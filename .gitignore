@@ -1,0 +1,7 @@
+db
+data
+tmp
+logs
+__pycache__
+.env
+credentials.json

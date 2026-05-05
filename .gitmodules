@@ -1,0 +1,3 @@
+[submodule "src/PinnacleExport"]
+	path = src/PinnacleExport
+	url = git@github.com:Christie-Scientific-Computing/PinnacleExport.git
