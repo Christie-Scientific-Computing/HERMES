@@ -13,18 +13,19 @@ logger = logging.getLogger(__name__)
 
 
 st.set_page_config(
-    page_title="Apollo",
-    page_icon="🚀",
+    page_title="Hermes",
+    page_icon="🪽",
+    layout="wide"
 )
 
-st.write("# Welcome to APOLLO 🚀")
-st.write("**:red[APOLLO]**: :red[A]utomated :red[P]lan :red[O]rchestration for :red[L]ibrary :red[L]ookup and :red[O]utput (*thanks Claude!*)")
+st.write("# 🪽 HERMES 🪽")
+st.write(":red[H]andles :red[E]verything: :red[R]etrieve, :red[M]odify and :red[E]xport :red[S]tuff")
 
 st.markdown(
     """
     ### Quick start
-    1. Find plans
-    2. Centralise & clean
+    1. Import plans
+    2. Clean metadata / Anonymise
     3. Export
     ### Reporting issues
     - Please open issues here: 
