@@ -5,7 +5,8 @@ import os
 import logging
 from fastapi import FastAPI
 from dotenv import load_dotenv
-from backend.src.import_.endpoints import router as import_router
+from backend.src.retrieve.endpoints import router as import_router
+from backend.src.export.endpoints import router as export_router
 from backend.src.database import setup_status_db
 
 load_dotenv()
@@ -26,3 +27,4 @@ logger = logging.getLogger(__name__)
 setup_status_db(os.getenv('STATUS_DB'))
 app = FastAPI()
 app.include_router(import_router)
+app.include_router(export_router)

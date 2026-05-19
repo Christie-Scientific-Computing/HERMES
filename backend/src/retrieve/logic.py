@@ -12,8 +12,8 @@ from pyorthanc import Orthanc, Modality, find_series
 from dotenv import load_dotenv
 from pathlib import Path
 
-from backend.src.import_.PinnacleExport.entrypoint import entry as pinn_entry
-from backend.src.import_.PinnacleExport.src.database import ExportRequest
+from backend.src.retrieve.PinnacleExport.entrypoint import entry as pinn_entry
+from backend.src.retrieve.PinnacleExport.src.database import ExportRequest
 
 
 logger = logging.getLogger(__name__)
@@ -118,25 +118,107 @@ class Importer():
         }
 
     def import_patient(self, mrn: int, locations: dict[str, bool]) -> None:
-
+        
+        #NOTE Order matters when importing
         if locations['in_mosaiq']:
             self.import_from_mosaiq(mrn)
         
         if locations['in_pinnacle']:
             self.import_from_pinnacle(mrn)
 
-        if locations['in_proknow']:
-            self.import_from_proknow()
+        # if locations['in_proknow']:
+        #     self.import_from_proknow()
 
         #TODO Add raystation
+        
+
+        ## Clean orthanc after importing all data.
+        self._cleanup_orthanc(mrn)
 
 
     ## ============= Methods for importing ===========================
+    def _cleanup_orthanc(self, mrn):
+        #TODO Structs and plans can be duplicated by mosaiq and pinnacle import.
+        ## Since they have different UIDs and metadata in headers.
+        ## Cleanup by looking at referenceSOPInstanceUID (for struct). Will link to CT, which has the same series UID across platforms. 
+
+        study_query = {
+            'Level': 'Study',
+            'Query': {
+                'PatientID': str(mrn),
+                }
+            }
+        # Get series info (all data local at this point)
+        series_list = find_series(client=self.ot, query=study_query["Query"])
+        if not series_list:
+            logger.error(f"No series found for MRN {mrn} locally after C-MOVE")
+            return
+
+        # Group by study
+        studies: dict[str, list] = defaultdict(list)
+        for series in series_list:
+            study_uid = series.parent_study.main_dicom_tags.get("StudyInstanceUID")
+            studies[study_uid].append(series)
+
+        for study_uid, series_in_study in studies.items():
+            modalities_in_study = {s.main_dicom_tags.get("Modality") for s in series_in_study}
+            # Delete entire study if no RTDOSE (incomplete planning data)
+            if self.import_level == 'Planning' and 'RTDOSE' not in modalities_in_study:
+                logger.info(
+                    "Study (%s) has no RTDOSE — deleting. Found modalities: %s",
+                    study_uid, modalities_in_study
+                )
+                study_orthanc_id = series_in_study[0].parent_study.identifier
+                self.orthanc_delete(f"/studies/{study_orthanc_id}")
+                continue
+
+            series_per_modality = {} #key=modality;val=#of series per modality
+            for mod in modalities_in_study:
+                series_per_modality[mod] = len([s for s in series_in_study if s.main_dicom_tags.get("Modality") == mod])
+
+            for series in series_in_study:
+                info = series.main_dicom_tags
+                manufacturer = info.get("Manufacturer", "")
+                modality_tag = info.get("Modality", "")  
+                station_name = info.get("StationName", "")
+                
+
+                ## Delete data we don't want
+                if modality_tag not in self.accepted_modalities:
+                    logger.debug("Deleting %s. Modality (%s) not accepted.", info, modality_tag)
+                    self.orthanc_delete(f"/series/{series.identifier}")
+                    continue
+                
+                if self.import_level == 'Planning' and modality_tag == 'CT' and manufacturer == 'ELEKTA':
+                    # Catch CBCTs when importing planning data 
+                    logger.debug("Deleting %s. CBCTs not accepted in planning mode.", info)
+                    self.orthanc_delete(f"/series/{series.identifier}")
+                    continue
+
+                ## If more plans/structs than RTDOSE files
+                ## Delete based on stationName = cht-pinnapp0. 
+                #TODO Rely on my conversion since this is where the dose comes from? 
+
+                ## Remove duplicate struct 
+                if modality_tag == 'RTSTRUCT' and series_per_modality['RTSTRUCT'] > series_per_modality['RTDOSE'] and station_name == 'cht-pinnapp0':
+
+                    logger.debug("Deleting %s. RTSTRUCT from mosaiq", info)
+                    self.orthanc_delete(f"/series/{series.identifier}")
+                    continue
+                    
+                if modality_tag == 'RTPLAN' and series_per_modality['RTPLAN'] > series_per_modality['RTDOSE'] and station_name == 'cht-pinnapp0':
+
+                    logger.debug("Deleting %s. RTPLAN from mosaiq", info)
+                    self.orthanc_delete(f"/series/{series.identifier}")
+                    continue
+                
+
+
     def import_from_mosaiq(self, mrn: int):
         #TODO Import all data into central orthanc
         # FIlter based on condition
         # Delete those not meeting condition
-        logger.info("Importing data...")
+        logger.info("Importing data from mosaiq")
 
         study_query = {
             'Level': 'Study',
@@ -161,50 +243,6 @@ class Importer():
                 logger.error('Failed to C-MOVE from %s', src)
                 raise 
 
-        # Get series info (all data local at this point)
-        series_list = find_series(client=self.ot, query=study_query["Query"])
-        if not series_list:
-            logger.error(f"No series found for MRN {mrn} locally after C-MOVE")
-            return
-
-
-        # Group by study
-        studies: dict[str, list] = defaultdict(list)
-        for series in series_list:
-            study_uid = series.main_dicom_tags.get("StudyInstanceUID")
-            studies[study_uid].append(series)
-
-        for study_uid, series_in_study in studies.items():
-            modalities_in_study = {s.main_dicom_tags.get("Modality") for s in series_in_study}
-
-            # Delete entire study if no RTDOSE (incomplete planning data)
-            if self.import_level == 'Planning' and 'RTDOSE' not in modalities_in_study:
-                logger.info(
-                    "Study (%s) has no RTDOSE — deleting. Found modalities: %s",
-                    study_uid, modalities_in_study
-                )
-                study_orthanc_id = series_in_study[0].parent_study.identifier
-                self.orthanc_delete(f"/studies/{study_orthanc_id}")
-                continue
-
-            for series in series_list:
-                info = series.main_dicom_tags
-                manufacturer = info.get("Manufacturer", "")
-                modality_tag = info.get("Modality", "")  
-
-                ## Delete data we don't want
-                if modality_tag not in self.accepted_modalities:
-                    logger.debug("Deleting %s. Modality (%s) not accepted.", info, modality_tag)
-                    self.orthanc_delete(f"/series/{series.identifier}")
-                    continue
-                
-                if self.import_level == 'Planning' and modality_tag == 'CT' and manufacturer == 'ELEKTA':
-                    # Catch CBCTs when importing planning data 
-                    logger.debug("Deleting %s. CBCTs not accepted in planning mode.", info)
-                    self.orthanc_delete(f"/series/{series.identifier}")
-                    continue
-
-
 
     def import_from_pinnacle(self, mrn: int):
 
@@ -217,8 +255,6 @@ class Importer():
             'requests': export_requests
         }
         pinn_entry(payload)
-
-        ...
 
 
     def import_from_proknow(self):
