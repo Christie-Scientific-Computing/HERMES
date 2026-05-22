@@ -136,6 +136,11 @@ def main():
     TODO: 
         - Report errors/plans that need reviewing
     """
+    # clear session state on page load
+    for key in ["job_id", "messages", "import_done"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
     st.set_page_config(
         page_title="Hermes",
         page_icon="🪽",
@@ -150,10 +155,8 @@ def main():
         Data will be sent to {ORTHANC_URL} 
          
         **TODO** 
-
-            - Issue with duplicate RTSTRUCT and RTPLAN when importing from multiple sources.
             - Raystation query/retrieve
-            - Proknow download
+            - Handle ProKnow nonsense where it generates new RTSTRUCT uid when downloading
 
     """)
     

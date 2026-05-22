@@ -30,12 +30,13 @@ PROKNOW_WORKSPACE = 'RBV - Christie'
 
 class Request(BaseModel):
     job_id: str
-    path_to_csv: str
+    mrn: str | None = None
+    path_to_csv: str | None = None
     destination: str | None = None # DICOM AE
     collection: str | None = None # ProKnow collection
 
 class Response(BaseModel):
-    mrn: int 
+    mrn: str 
     status: str | None = None
 
 @router.get("/get_orthanc_modalities")
@@ -173,6 +174,27 @@ async def proknow_upload(body: Request):
             "Cache-Control": "no-cache",
         }
     ) 
+
+
+@router.post("/proknow_upload_patient")
+async def proknow_upload_patient(body: Request):
+    req = body.model_dump()
+    logger.info(req)
+    exp = Exporter(destination=req['collection'])
+    start = time.time()
+    try: 
+        res = exp.upload_to_proknow(req['mrn'])
+        response = Response(mrn=req['mrn'], **res)
+
+        return f"data: {json.dumps({
+                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
+
+    except Exception as e:
+        return f"data: {json.dumps({'type': 'error',
+                'execution_time': np.round(time.time() - start, 2),
+                'mrn': req['mrn'],
+                'error': str(e)})}\n\n"
+
 
 
 @router.post("/cancel/{job_id}")

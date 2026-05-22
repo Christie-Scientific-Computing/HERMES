@@ -211,6 +211,11 @@ def submit_form(data):
 
 
 def main():
+    # clear session state on page load
+    for key in ["job_id", "messages", "import_done"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
     st.set_page_config(
         page_title="Hermes",
         page_icon="🪽",
@@ -223,10 +228,6 @@ def main():
         Data will be sent from {ORTHANC_URL} to the specified AE title (Orthanc modality).
 
         If you can't see the intended destination AE title, contact admins.
-
-        **TODO**
-
-            - Handle ProKnow API upload
          
     """)
     patients_to_export = st.file_uploader(

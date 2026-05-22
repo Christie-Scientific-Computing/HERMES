@@ -17,11 +17,12 @@ router = APIRouter(prefix='/import', tags=["import"])
 
 class Request(BaseModel):
     job_id: str
-    path_to_csv: str
-    import_level: str
+    mrn: str | None = None
+    path_to_csv: str | None = None
+    import_level: str | None = None
 
 class Response(BaseModel):
-    mrn: int 
+    mrn: str 
     status: str | None = None
     in_mosaiq: bool | None = None
     in_pinnacle: bool | None = None
@@ -93,23 +94,41 @@ async def batch_import(body: Request):
     # return responses
 
 
-@router.get('/single_import')
-async def single_import(mrn: int):
-    logger.info("Importing %s", mrn)
-    imp = Importer()
-    res = imp.handle_patient(mrn)
+@router.post('/single_import')
+async def single_import(body: Request):
+    req = body.model_dump()
+    logger.info("Importing %s", req['mrn'])
+    imp = Importer(req['import_level'])
+    start = time.time()
+    try:
+        res = imp.handle_patient(req['mrn'])
+        response = Response(mrn=req['mrn'], **res)
+        return f"data: {json.dumps({
+                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
+
+    except Exception as e:
+        return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': req['mrn'], 'error': str(e)})}\n\n"
 
 
 @router.get('/find_patient')
-async def find_patient(mrn: int) -> Response:
-    logger.info("Searching for %s", mrn)
-    imp = Importer()
-    res = imp.find_patient(mrn)
-    return Response(mrn=mrn, **res)
+async def find_patient(body: Request) -> Response:
+    req = body.model_dump()
+    logger.info("Searching for %s", req['mrn'])
+    imp = Importer(req['import_level'])
+    start = time.time()
+    try:
+        res = imp.find_patient(req['mrn'])
+        response = Response(mrn=req['mrn'], **res)
+        return f"data: {json.dumps({
+                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
+
+    except Exception as e:
+        return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': req['mrn'], 'error': str(e)})}\n\n"
+    
 
 
 @router.post("/cancel/{job_id}")
-async def cancel_import(job_id: str):
+async def cancel_import(body: Request):
     cancel_flags[job_id] = True
     logger.info(f"Cancelling: {cancel_flags}")
     return {"cancelled": True}

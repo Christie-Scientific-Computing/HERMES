@@ -23,6 +23,7 @@ class Exporter():
     def __init__(self, destination: str):
         self.destination = destination # DICOM SCP
         self.tmp_dir = Path('./tmp')
+        self.tmp_dir.mkdir(exist_ok=True)
 
     def upload_to_proknow(self, patient_id: str):
         try:
@@ -40,9 +41,12 @@ class Exporter():
         study_status = {}
         for study_uid in series_dict.keys():
             input_dir = self.tmp_dir / study_uid
-
-            self.upload_study_to_proknow(input_dir, self.destination)
-            #shutil.rmtree(input_dir)
+            try:
+                self.upload_study_to_proknow(input_dir, self.destination)
+            except ValueError as e:
+                logger.error(f"Error occured during proknow upload: {e}")
+            
+            shutil.rmtree(input_dir)
 
         return {'status': 'Success'}
 
