@@ -25,11 +25,12 @@ if STATUS_DB:
         status_db = StatusDB(STATUS_DB)
         logger.debug("StatusDB initialized")
     except Exception as e:
-        logger.warning("Failed to init StatusDB: %s", e)
-        status_db = None
+        logger.error("Failed to init StatusDB: %s", e)
+        raise ValueError(f"Failed to init StatusDB: {e}")
+     
 else:
-    status_db = None
-    logger.warning("STATUS_DB not set; status events will not be recorded")
+    logger.error("STATUS_DB not set; status events will not be recorded")
+    raise ValueError("STATUS_DB not set; status events will not be recorded")
 
 # Cancellation flags and lock
 cancel_lock = threading.Lock()
@@ -43,7 +44,7 @@ class Request(BaseModel):
     import_level: str | None = None
 
 class Response(BaseModel):
-    mrn: str 
+    mrn: str | int
     status: str | None = None
     in_mosaiq: bool | None = None
     in_pinnacle: bool | None = None
@@ -93,7 +94,7 @@ async def import_event_stream(job_id: str, path_to_csv: str, import_level: str):
                 Importer(import_level).handle_patient, patient_id
             )
             response = Response(mrn=patient_id, **res)
-
+            
             # Record success
             if status_db:
                 try:

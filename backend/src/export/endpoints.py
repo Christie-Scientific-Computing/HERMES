@@ -31,13 +31,15 @@ STATUS_DB = os.getenv('STATUS_DB')
 if STATUS_DB:
     try:
         status_db = StatusDB(STATUS_DB)
-        logger.debug("StatusDB initialized for export endpoints")
+        logger.debug("StatusDB initialized")
     except Exception as e:
-        logger.warning("Failed to init StatusDB: %s", e)
-        status_db = None
+        logger.error("Failed to init StatusDB: %s", e)
+        raise ValueError(f"Failed to init StatusDB: {e}")
+     
 else:
-    status_db = None
-    logger.warning("STATUS_DB not set; status events will not be recorded (export)")
+    logger.error("STATUS_DB not set; status events will not be recorded")
+    raise ValueError("STATUS_DB not set; status events will not be recorded")
+
 
 ORTHANC_URL = os.getenv('ORTHANC_URL')
 ORTHANC_USER = os.getenv('ORTHANC_USER')
@@ -54,7 +56,7 @@ class Request(BaseModel):
     collection: str | None = None # ProKnow collection
 
 class Response(BaseModel):
-    mrn: str 
+    mrn: str | int
     status: str | None = None
 
 @router.get("/get_orthanc_modalities")
