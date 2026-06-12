@@ -73,7 +73,6 @@ async def export_event_stream(job_id: str, path_to_csv: str, destination: str, *
     Generator that yields SSE-formatted events, one per patient.
     """
     with cancel_lock:
-        with cancel_lock:
         cancel_flags[job_id] = False
     rows = Exporter.read_input_file(path_to_csv)
     total = len(rows)
@@ -166,10 +165,10 @@ async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str, 
                 'mrn': patient_id,
                 'error': str(e)})}\n\n"
     
-with cancel_lock:
-    if job_id in cancel_flags:
-        del cancel_flags[job_id]
-yield f"data: {json.dumps({'done': True})}\n\n"
+    with cancel_lock:
+        if job_id in cancel_flags:
+            del cancel_flags[job_id]
+    yield f"data: {json.dumps({'done': True})}\n\n"
     
     
     

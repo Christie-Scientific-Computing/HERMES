@@ -28,7 +28,8 @@ STATUS_DB = os.getenv('STATUS_DB')
 if STATUS_DB:
     setup_status_db(STATUS_DB)
 else:
-    logger.warning("STATUS_DB not set; skipping status DB setup")
+    logger.warning("STATUS_DB not set; ABORTING!")
+    exit()
 app = FastAPI()
 app.include_router(import_router)
 app.include_router(export_router)
