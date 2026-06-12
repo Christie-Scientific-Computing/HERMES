@@ -14,13 +14,13 @@ from dotenv import load_dotenv
 from pyorthanc import Orthanc, find_series
 from fastapi.responses import StreamingResponse
 from backend.src.export.logic import Exporter
+import threading
+from backend.src.status.db_client import StatusDB
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/export', tags=["export"])
-import threading
-from backend.src.status.db_client import StatusDB
 
 # Cancellation flags
 cancel_lock = threading.Lock()
@@ -249,9 +249,9 @@ async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str, 
         if job_id in cancel_flags:
             del cancel_flags[job_id]
     yield f"data: {json.dumps({'done': True})}\n\n"
-
-
-
+    
+    
+    
 @router.post("/proknow_upload")
 async def proknow_upload(body: Request):
     req = body.model_dump()

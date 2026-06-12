@@ -12,7 +12,6 @@ from pathlib import Path
 from backend.src.retrieve.logic import Importer
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-
 from backend.src.status.db_client import StatusDB
 import threading
 
@@ -49,7 +48,6 @@ class Response(BaseModel):
     in_mosaiq: bool | None = None
     in_pinnacle: bool | None = None
     in_proknow: bool | None = None
-
 
 async def import_event_stream(job_id: str, path_to_csv: str, import_level: str):
     """
