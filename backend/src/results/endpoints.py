@@ -66,9 +66,12 @@ async def patient_timeline(job_id: str, mrn: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get('/patient/{mrn}/all')
+@router.get('/patient/all/{mrn}')
 async def patient_timeline_all(mrn: str):
-    """Return chronological events for a patient across all jobs."""
+    """Return chronological events for a patient across all jobs.
+
+    Falls back to legacy tables (status, errors, plans, uploads) if no events found in new events table.
+    """
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
     try:
@@ -76,6 +79,73 @@ async def patient_timeline_all(mrn: str):
         cur = conn.cursor()
         cur.execute("SELECT * FROM events WHERE mrn=? ORDER BY ts", (mrn,))
         rows = [dict(r) for r in cur.fetchall()]
+
+        # If no canonical events, try to reconstruct from legacy tables
+        if not rows:
+            legacy = []
+            # status table
+            try:
+                cur.execute("SELECT process_datetime as ts, status as event_type, path FROM status WHERE mrn=? ORDER BY process_datetime", (mrn,))
+                for r in cur.fetchall():
+                    legacy.append({
+                        'ts': r[0],
+                        'stage': 'retrieve',
+                        'event_type': r[1],
+                        'details': json.dumps({'path': r[2]}) if r[2] else None,
+                    })
+            except Exception:
+                # table may not exist in older DBs
+                pass
+
+            # errors table
+            try:
+                cur.execute("SELECT error_message, path FROM errors WHERE mrn=?", (mrn,))
+                for r in cur.fetchall():
+                    legacy.append({
+                        'ts': None,
+                        'stage': 'retrieve',
+                        'event_type': 'failure',
+                        'error_message': r[0],
+                        'details': json.dumps({'path': r[1]}) if r[1] else None,
+                    })
+            except Exception:
+                pass
+
+            # plans table (may indicate plan-level outcomes)
+            try:
+                cur.execute("SELECT plan_name, status, error_message FROM plans WHERE mrn=?", (mrn,))
+                for r in cur.fetchall():
+                    legacy.append({
+                        'ts': None,
+                        'stage': 'retrieve',
+                        'event_type': r[1],
+                        'details': json.dumps({'plan_name': r[0], 'error': r[2]})
+                    })
+            except Exception:
+                pass
+
+            # uploads table (where they were sent)
+            try:
+                cur.execute("SELECT path, was_sent_to_remote, remote_ip, remote_AE_title, was_uploaded_to_proknow, proknow_collection FROM uploads WHERE mrn=?", (mrn,))
+                for r in cur.fetchall():
+                    legacy.append({
+                        'ts': None,
+                        'stage': 'export',
+                        'event_type': 'upload',
+                        'details': json.dumps({
+                            'path': r[0],
+                            'was_sent_to_remote': bool(r[1]),
+                            'remote_ip': r[2],
+                            'remote_AE_title': r[3],
+                            'was_uploaded_to_proknow': bool(r[4]),
+                            'proknow_collection': r[5]
+                        })
+                    })
+            except Exception:
+                pass
+
+            rows = legacy
+
         conn.close()
         return {"mrn": mrn, "events": rows}
     except Exception as e:

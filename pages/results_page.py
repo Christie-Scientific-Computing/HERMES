@@ -80,6 +80,10 @@ if 'patients' in st.session_state:
     st.write(f"{len(patients)} patients found")
     patient_filter = st.checkbox("Show failed only", value=True)
 
+    # Aggregate failure counts by stage for chart
+    from collections import defaultdict
+    failure_counts = defaultdict(int)
+
     for mrn in patients:
         try:
             # If job mode and job_id present, prefer job-scoped endpoint
@@ -87,7 +91,7 @@ if 'patients' in st.session_state:
                 res = requests.get(f"{BASE_URL}/results/patient/{job_id}/{mrn}")
             else:
                 # Global patient timeline across jobs
-                res = requests.get(f"{BASE_URL}/results/patient/{mrn}/all")
+                res = requests.get(f"{BASE_URL}/results/patient/all/{mrn}")
 
             if res.status_code != 200:
                 st.markdown(f"**{mrn}** — Error fetching timeline: {res.text}")
@@ -98,28 +102,64 @@ if 'patients' in st.session_state:
             if patient_filter and not failed:
                 continue
 
+            # update failure counts
+            for e in events:
+                if e.get('event_type') == 'failure':
+                    stg = e.get('stage') or 'unknown'
+                    failure_counts[stg] += 1
+
             with st.expander(f"{mrn} — {'FAILED' if failed else 'OK'} ({len(events)} events)"):
                 if not events:
                     st.write("No events recorded")
                     continue
+
+                # Display summary table for events
                 for ev in events:
                     ts = ev.get('ts')
-                    stage = ev.get('stage')
-                    et = ev.get('event_type')
+                    stage = ev.get('stage') or 'unknown'
+                    et = ev.get('event_type') or 'unknown'
                     err = ev.get('error_message')
                     details = ev.get('details')
+
+                    # nicely format details: might be JSON string or dict
+                    if isinstance(details, str):
+                        try:
+                            parsed_details = json.loads(details)
+                        except Exception:
+                            parsed_details = details
+                    else:
+                        parsed_details = details
+
                     if et == 'failure':
                         st.markdown(f"- **{ts}** — {stage} — **{et.upper()}** — {err}")
-                        if details:
-                            try:
-                                parsed = json.loads(details)
-                                st.code(json.dumps(parsed, indent=2))
-                            except Exception:
-                                st.write(details)
+                        if parsed_details:
+                            st.markdown("  - Details:")
+                            if isinstance(parsed_details, dict):
+                                st.json(parsed_details)
+                            else:
+                                st.write(parsed_details)
                     else:
                         st.markdown(f"- {ts} — {stage} — {et}")
+                        if parsed_details:
+                            st.markdown("  - Details:")
+                            if isinstance(parsed_details, dict):
+                                st.json(parsed_details)
+                            else:
+                                st.write(parsed_details)
         except Exception as e:
             st.write(f"Failed to fetch timeline for {mrn}: {e}")
+
+    # Show failure chart if any failures recorded
+    if failure_counts:
+        st.subheader('Failures by stage')
+        try:
+            import pandas as pd
+            df = pd.DataFrame(list(failure_counts.items()), columns=['stage', 'count']).set_index('stage')
+            st.bar_chart(df)
+        except Exception:
+            # Fallback: simple text
+            for k, v in failure_counts.items():
+                st.write(f"{k}: {v}")
 
 
 st.sidebar.header("ℹ️ Information")
