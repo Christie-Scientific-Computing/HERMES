@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from backend.src.retrieve.endpoints import router as import_router
 from backend.src.export.endpoints import router as export_router
 from backend.src.database import setup_status_db
+from backend.src.results.endpoints import router as results_router
 
 load_dotenv()
 
@@ -28,3 +29,4 @@ setup_status_db(os.getenv('STATUS_DB'))
 app = FastAPI()
 app.include_router(import_router)
 app.include_router(export_router)
+app.include_router(results_router)
