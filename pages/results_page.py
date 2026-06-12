@@ -18,26 +18,56 @@ st.markdown("""
 Use a job id to view job-level summary and per-patient timelines. Click a patient to see the chronological events and why they failed.
 """)
 
-job_id = st.text_input("Job ID", value="")
+mode = st.radio('Mode', ['By job id', 'From CSV upload'], index=0)
 
-if st.button("Load job"):
-    if not job_id:
-        st.error("Please provide a job id")
-    else:
+patients_list = None
+
+if mode == 'By job id':
+    job_id = st.text_input("Job ID", value="")
+
+    if st.button("Load job"):
+        if not job_id:
+            st.error("Please provide a job id")
+        else:
+            try:
+                res = requests.get(f"{BASE_URL}/results/job/{job_id}")
+                if res.status_code != 200:
+                    st.error(f"Error fetching job summary: {res.text}")
+                else:
+                    st.session_state['job_summary'] = res.json()
+
+                res = requests.get(f"{BASE_URL}/results/job/{job_id}/patients")
+                if res.status_code != 200:
+                    st.error(f"Error fetching patients: {res.text}")
+                else:
+                    st.session_state['patients'] = res.json().get('patients', [])
+            except Exception as e:
+                st.error(f"Failed to contact backend: {e}")
+
+    if 'patients' in st.session_state:
+        patients_list = st.session_state['patients']
+
+else:
+    uploaded_file = st.file_uploader('Upload CSV with patient IDs (header: patient_id)', type=['csv'])
+    if uploaded_file is not None:
+        import csv
         try:
-            res = requests.get(f"{BASE_URL}/results/job/{job_id}")
-            if res.status_code != 200:
-                st.error(f"Error fetching job summary: {res.text}")
-            else:
-                st.session_state['job_summary'] = res.json()
+            text = uploaded_file.getvalue().decode('utf-8')
+        except Exception:
+            text = uploaded_file.getvalue().decode('latin-1')
+        reader = csv.DictReader(text.splitlines())
+        ids = []
+        for row in reader:
+            if 'patient_id' in row and row['patient_id']:
+                val = row['patient_id'].strip()
+                if val and not val.startswith('#'):
+                    ids.append(val)
+        patients_list = ids
+        st.session_state['patients_from_csv'] = ids
 
-            res = requests.get(f"{BASE_URL}/results/job/{job_id}/patients")
-            if res.status_code != 200:
-                st.error(f"Error fetching patients: {res.text}")
-            else:
-                st.session_state['patients'] = res.json().get('patients', [])
-        except Exception as e:
-            st.error(f"Failed to contact backend: {e}")
+if patients_list:
+    st.session_state['patients'] = patients_list
+    st.success(f"Loaded {len(patients_list)} patients")
 
 
 if 'job_summary' in st.session_state:
@@ -52,7 +82,13 @@ if 'patients' in st.session_state:
 
     for mrn in patients:
         try:
-            res = requests.get(f"{BASE_URL}/results/patient/{job_id}/{mrn}")
+            # If job mode and job_id present, prefer job-scoped endpoint
+            if mode == 'By job id' and 'job_id' in locals() and job_id:
+                res = requests.get(f"{BASE_URL}/results/patient/{job_id}/{mrn}")
+            else:
+                # Global patient timeline across jobs
+                res = requests.get(f"{BASE_URL}/results/patient/{mrn}/all")
+
             if res.status_code != 200:
                 st.markdown(f"**{mrn}** — Error fetching timeline: {res.text}")
                 continue
