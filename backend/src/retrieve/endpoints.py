@@ -1,6 +1,7 @@
 """
 Endpoints for the import page
 """
+import os
 import json
 import time
 import asyncio
@@ -12,8 +13,29 @@ from backend.src.retrieve.logic import Importer
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
+from backend.src.status.db_client import StatusDB
+import threading
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/import', tags=["import"])
+
+# StatusDB init
+STATUS_DB = os.getenv('STATUS_DB')
+if STATUS_DB:
+    try:
+        status_db = StatusDB(STATUS_DB)
+        logger.debug("StatusDB initialized")
+    except Exception as e:
+        logger.warning("Failed to init StatusDB: %s", e)
+        status_db = None
+else:
+    status_db = None
+    logger.warning("STATUS_DB not set; status events will not be recorded")
+
+# Cancellation flags and lock
+cancel_lock = threading.Lock()
+cancel_flags: dict[str, bool] = {} ## Holds cancellation status for every job
+
 
 class Request(BaseModel):
     job_id: str
@@ -28,44 +50,77 @@ class Response(BaseModel):
     in_pinnacle: bool | None = None
     in_proknow: bool | None = None
 
-cancel_flags: dict[str, bool] = {} ## Holds cancellation status for every job
 
 async def import_event_stream(job_id: str, path_to_csv: str, import_level: str):
     """
     Generator that yields SSE-formatted events, one per patient.
     """
-    cancel_flags[job_id] = False
+    with cancel_lock:
+        cancel_flags[job_id] = False
+
     rows = Importer.read_input_file(path_to_csv)
     total = len(rows)
+
+    # Create job record if available
+    if status_db:
+        try:
+            status_db.create_job(job_id, description=f"Batch import from {path_to_csv}")
+        except Exception as e:
+            logger.warning("Could not create job in status DB: %s", e)
 
     yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
     for row in rows:
-        if cancel_flags.get(job_id):
-            logger.info("Client cancelled request, aborting")
-            yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-            break
+        with cancel_lock:
+            if cancel_flags.get(job_id):
+                logger.info("Client cancelled request, aborting")
+                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
+                break
 
         patient_id = row['patient_id']
+
+        # Record patient & starting event
+        if status_db:
+            try:
+                status_db.add_patient(job_id, str(patient_id), input_path=path_to_csv)
+                status_db.add_event(job_id, str(patient_id), stage='retrieve', event_type='start')
+            except Exception as e:
+                logger.warning("Status DB write failed: %s", e)
 
         # Starting patient
         yield f"data: {json.dumps({'type': 'progress', 'current': patient_id})}\n\n"
         start = time.time()
         try:
-            
             res = await asyncio.to_thread(
                 Importer(import_level).handle_patient, patient_id
             )
             response = Response(mrn=patient_id, **res)
-            
+
+            # Record success
+            if status_db:
+                try:
+                    status_db.add_event(job_id, str(patient_id), stage='retrieve', event_type='success', details=res)
+                except Exception as e:
+                    logger.warning("Status DB write failed: %s", e)
+
             yield f"data: {json.dumps({
                 'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
 
         except Exception as e:
             logger.error("Failed to import patient %s: %s", patient_id, e)
+
+            # Record failure
+            if status_db:
+                try:
+                    status_db.add_event(job_id, str(patient_id), stage='retrieve', event_type='failure', error_message=str(e))
+                except Exception as ex:
+                    logger.warning("Status DB write failed: %s", ex)
+
             yield f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': patient_id, 'error': str(e)})}\n\n"
     
-    del cancel_flags[job_id]
+    with cancel_lock:
+        if job_id in cancel_flags:
+            del cancel_flags[job_id]
     yield f"data: {json.dumps({'done': True})}\n\n"
     
 
@@ -128,7 +183,8 @@ async def find_patient(body: Request) -> Response:
 
 
 @router.post("/cancel/{job_id}")
-async def cancel_import(body: Request):
-    cancel_flags[job_id] = True
-    logger.info(f"Cancelling: {cancel_flags}")
+async def cancel_import(job_id: str):
+    with cancel_lock:
+        cancel_flags[job_id] = True
+    logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}

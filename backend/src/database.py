@@ -52,4 +52,42 @@ def setup_status_db(path_to_db: Path):
     """)
 
     conn.commit()
+
+    # Additional tables to track jobs/patients/events while preserving legacy schema
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS jobs(
+            job_id TEXT PRIMARY KEY,
+            created_at TEXT,
+            created_by TEXT,
+            description TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS patients(
+            job_id TEXT,
+            mrn TEXT,
+            input_path TEXT,
+            created_at TEXT,
+            PRIMARY KEY (job_id, mrn),
+            FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS events(
+            ID INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT,
+            mrn TEXT,
+            stage TEXT,
+            event_type TEXT,
+            ts TEXT,
+            attempt INTEGER DEFAULT 1,
+            error_message TEXT,
+            details TEXT,
+            FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+        )
+    """)
+
+    conn.commit()
     conn.close()
