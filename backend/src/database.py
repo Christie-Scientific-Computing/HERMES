@@ -50,9 +50,6 @@ def setup_status_db(path_to_db: Path):
         error_message TEXT,
         FOREIGN KEY (ID) REFERENCES status (ID))
     """)
-
-    conn.commit()
-
     # Additional tables to track jobs/patients/events while preserving legacy schema
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs(

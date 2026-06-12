@@ -24,7 +24,7 @@ class StatusDB:
         cur = conn.cursor()
         cur.execute(
             "INSERT OR IGNORE INTO jobs(job_id, created_at, created_by, description) VALUES(?, ?, ?, ?)",
-            (job_id, datetime.utcnow().isoformat(), created_by, description),
+            (job_id, datetime.now(datetime.timezone.utc).isoformat(), created_by, description),
         )
         conn.commit()
         conn.close()
@@ -34,7 +34,7 @@ class StatusDB:
         cur = conn.cursor()
         cur.execute(
             "INSERT OR IGNORE INTO patients(job_id, mrn, input_path, created_at) VALUES(?, ?, ?, ?)",
-            (job_id, mrn, input_path, datetime.utcnow().isoformat()),
+            (job_id, mrn, input_path, datetime.now(datetime.timezone.utc).isoformat()),
         )
         conn.commit()
         conn.close()
@@ -45,7 +45,7 @@ class StatusDB:
         details_json = json.dumps(details) if details is not None else None
         cur.execute(
             "INSERT INTO events(job_id, mrn, stage, event_type, ts, attempt, error_message, details) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-            (job_id, mrn, stage, event_type, datetime.utcnow().isoformat(), attempt, error_message, details_json),
+            (job_id, mrn, stage, event_type, datetime.now(datetime.timezone.utc).isoformat(), attempt, error_message, details_json),
         )
         conn.commit()
         conn.close()
