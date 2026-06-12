@@ -24,7 +24,11 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-setup_status_db(os.getenv('STATUS_DB'))
+STATUS_DB = os.getenv('STATUS_DB')
+if STATUS_DB:
+    setup_status_db(STATUS_DB)
+else:
+    logger.warning("STATUS_DB not set; skipping status DB setup")
 app = FastAPI()
 app.include_router(import_router)
 app.include_router(export_router)

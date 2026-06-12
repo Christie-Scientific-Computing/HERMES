@@ -63,7 +63,7 @@ class Exporter():
         series_list = find_series(client=client, query={"PatientID": str(patient_id)})
 
         if not series_list:
-            logger.error(f"No series found for patient ({mrn}).")
+            logger.error(f"No series found for patient ({patient_id}).")
             raise ValueError
 
         series_to_send = [x.identifier for x in series_list]

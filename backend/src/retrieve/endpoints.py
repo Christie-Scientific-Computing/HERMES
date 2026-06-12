@@ -28,23 +28,27 @@ class Response(BaseModel):
     in_pinnacle: bool | None = None
     in_proknow: bool | None = None
 
+import threading
+cancel_lock = threading.Lock()
 cancel_flags: dict[str, bool] = {} ## Holds cancellation status for every job
 
 async def import_event_stream(job_id: str, path_to_csv: str, import_level: str):
     """
     Generator that yields SSE-formatted events, one per patient.
     """
-    cancel_flags[job_id] = False
+    with cancel_lock:
+        cancel_flags[job_id] = False
     rows = Importer.read_input_file(path_to_csv)
     total = len(rows)
 
     yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
     for row in rows:
-        if cancel_flags.get(job_id):
-            logger.info("Client cancelled request, aborting")
-            yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-            break
+        with cancel_lock:
+            if cancel_flags.get(job_id):
+                logger.info("Client cancelled request, aborting")
+                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
+                break
 
         patient_id = row['patient_id']
 
@@ -65,7 +69,9 @@ async def import_event_stream(job_id: str, path_to_csv: str, import_level: str):
             logger.error("Failed to import patient %s: %s", patient_id, e)
             yield f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': patient_id, 'error': str(e)})}\n\n"
     
-    del cancel_flags[job_id]
+    with cancel_lock:
+        if job_id in cancel_flags:
+            del cancel_flags[job_id]
     yield f"data: {json.dumps({'done': True})}\n\n"
     
 
@@ -128,7 +134,8 @@ async def find_patient(body: Request) -> Response:
 
 
 @router.post("/cancel/{job_id}")
-async def cancel_import(body: Request):
-    cancel_flags[job_id] = True
-    logger.info(f"Cancelling: {cancel_flags}")
+async def cancel_import(job_id: str):
+    with cancel_lock:
+        cancel_flags[job_id] = True
+    logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}
