@@ -14,13 +14,14 @@ STATUS_DB = os.getenv('STATUS_DB')
 if STATUS_DB:
     try:
         status_db = StatusDB(STATUS_DB)
-        logger.debug("StatusDB initialized for results endpoints")
+        logger.debug("StatusDB initialized")
     except Exception as e:
-        logger.warning("Failed to init StatusDB for results endpoints: %s", e)
-        status_db = None
+        logger.error("Failed to init StatusDB: %s", e)
+        raise ValueError(f"Failed to init StatusDB: {e}")
+     
 else:
-    status_db = None
-    logger.warning("STATUS_DB not set; results endpoints will be unavailable")
+    logger.error("STATUS_DB not set; status events will not be recorded")
+    raise ValueError("STATUS_DB not set; status events will not be recorded")
 
 
 @router.get('/job/{job_id}')
@@ -56,6 +57,7 @@ async def job_patients(job_id: str):
 @router.get('/patient/{job_id}/{mrn}')
 async def patient_timeline(job_id: str, mrn: str):
     """Return chronological events for a patient in a job."""
+    
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
     try:
@@ -66,11 +68,12 @@ async def patient_timeline(job_id: str, mrn: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get('/patient/{mrn}/all')
+@router.get('/patient/timeline/{mrn}/all')
 async def patient_timeline_all(mrn: str):
     """Return chronological events for a patient across all jobs."""
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
+    
     try:
         conn = status_db._get_conn()
         cur = conn.cursor()
