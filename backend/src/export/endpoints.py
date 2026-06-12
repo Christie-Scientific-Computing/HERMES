@@ -19,6 +19,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/export', tags=["export"])
+import threading
+cancel_lock = threading.Lock()
 cancel_flags: dict[str, bool] = {} ## Holds cancellation status for every job
 
 ORTHANC_URL = os.getenv('ORTHANC_URL')
@@ -70,7 +72,8 @@ async def export_event_stream(job_id: str, path_to_csv: str, destination: str, *
     """ 
     Generator that yields SSE-formatted events, one per patient.
     """
-    cancel_flags[job_id] = False
+    with cancel_lock:
+        cancel_flags[job_id] = False
     rows = Exporter.read_input_file(path_to_csv)
     total = len(rows)
     logger.info(f"Exporting {total} rows")
@@ -78,10 +81,11 @@ async def export_event_stream(job_id: str, path_to_csv: str, destination: str, *
     yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
     for row in rows:
-        if cancel_flags.get(job_id):
-            logger.info("Client cancelled request, aborting")
-            yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-            break
+        with cancel_lock:
+            if cancel_flags.get(job_id):
+                logger.info("Client cancelled request, aborting")
+                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
+                break
         patient_id = row['patient_id']
 
         # Starting patient
@@ -104,7 +108,9 @@ async def export_event_stream(job_id: str, path_to_csv: str, destination: str, *
                 'mrn': patient_id,
                 'error': str(e)})}\n\n"
     
-    del cancel_flags[job_id]
+    with cancel_lock:
+        if job_id in cancel_flags:
+            del cancel_flags[job_id]
     yield f"data: {json.dumps({'done': True})}\n\n"
     
 
@@ -122,7 +128,8 @@ async def dicom_move(body: Request):
     ) 
 
 async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str, **kwargs):
-    cancel_flags[job_id] = False
+    with cancel_lock:
+        cancel_flags[job_id] = False
     rows = Exporter.read_input_file(path_to_csv)
     total = len(rows)
     logger.info(f"Exporting {total} rows")
@@ -130,10 +137,11 @@ async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str, 
     yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
     for row in rows:
-        if cancel_flags.get(job_id):
-            logger.info("Client cancelled request, aborting")
-            yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-            break
+        with cancel_lock:
+            if cancel_flags.get(job_id):
+                logger.info("Client cancelled request, aborting")
+                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
+                break
 
         patient_id = row['patient_id']
 
@@ -157,11 +165,13 @@ async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str, 
                 'mrn': patient_id,
                 'error': str(e)})}\n\n"
     
-    del cancel_flags[job_id]
+    with cancel_lock:
+        if job_id in cancel_flags:
+            del cancel_flags[job_id]
     yield f"data: {json.dumps({'done': True})}\n\n"
-
-
-
+    
+    
+    
 @router.post("/proknow_upload")
 async def proknow_upload(body: Request):
     req = body.model_dump()
@@ -199,7 +209,8 @@ async def proknow_upload_patient(body: Request):
 
 @router.post("/cancel/{job_id}")
 async def cancel_export(job_id: str):
-    cancel_flags[job_id] = True
-    logger.info(f"Cancelling: {cancel_flags}")
+    with cancel_lock:
+        cancel_flags[job_id] = True
+    logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}
 

@@ -2,6 +2,7 @@
 Database setup
 """
 import sqlite3
+from pathlib import Path
 
 def setup_status_db(path_to_db: Path):
     # Init status db
