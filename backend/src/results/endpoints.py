@@ -64,3 +64,20 @@ async def patient_timeline(job_id: str, mrn: str):
     except Exception as e:
         logger.exception("Failed to fetch patient timeline: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get('/patient/{mrn}/all')
+async def patient_timeline_all(mrn: str):
+    """Return chronological events for a patient across all jobs."""
+    if not status_db:
+        raise HTTPException(status_code=503, detail="Status DB not configured")
+    try:
+        conn = status_db._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM events WHERE mrn=? ORDER BY ts", (mrn,))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return {"mrn": mrn, "events": rows}
+    except Exception as e:
+        logger.exception("Failed to fetch patient timeline (all jobs): %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
