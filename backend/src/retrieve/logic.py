@@ -105,7 +105,7 @@ class Importer():
         """
         locations: dict[str, bool] = self.find_patient(mrn)
         self.import_patient(mrn, locations)
-        return {'status': 'I did it', **locations}
+        return {'status': 'success', **locations}
 
 
     def find_patient(self, mrn: int) -> dict[str, bool]:

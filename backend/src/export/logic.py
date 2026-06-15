@@ -58,13 +58,13 @@ class Exporter():
             logger.info("Connected to Orthanc")
         except Exception as exc:
             logger.error(f"Failed to connect to Orthanc: {exc}")
-            raise
+            raise ValueError("Could not connect to Orthanc")
         
         series_list = find_series(client=client, query={"PatientID": str(patient_id)})
 
         if not series_list:
             logger.error(f"No series found for patient ({patient_id}).")
-            raise ValueError
+            raise ValueError(f"No series found for patient ({patient_id}).")
 
         series_to_send = [x.identifier for x in series_list]
         try:
@@ -78,7 +78,7 @@ class Exporter():
             logger.info("DICOM moved")
         except Exception as e:
             logging.error("Could not send patient (%s) to dest: %s", patient_id, self.destination)
-            raise
+            raise ValueError("Could not send patient (%s) to dest: %s", patient_id, self.destination)
         
         return {'status': 'Success'}
 
