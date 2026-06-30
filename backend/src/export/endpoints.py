@@ -7,7 +7,8 @@ import logging
 import time
 import asyncio
 import numpy as np
-from fastapi import APIRouter
+from pathlib import Path
+from fastapi import APIRouter, UploadFile, File, Form
 from pydantic import BaseModel
 from proknow import ProKnow
 from dotenv import load_dotenv
@@ -313,6 +314,44 @@ async def proknow_upload_patient(body: Request):
                 'mrn': req['mrn'],
                 'error': str(e)})}\n\n"
 
+
+
+@router.post("/dicom_move_file")
+async def dicom_move_file(
+    file: UploadFile = File(..., description="CSV with a patient_id column"),
+    job_id: str = Form(...),
+    destination: str = Form(..., description="Orthanc modality AE title"),
+):
+    """Accept a CSV file upload and stream DICOM C-MOVE progress via SSE. Used by the gateway frontend."""
+    tmp_dir = Path("./tmp")
+    tmp_dir.mkdir(exist_ok=True)
+    tmp_path = tmp_dir / f"{job_id}_{file.filename}"
+    tmp_path.write_bytes(await file.read())
+
+    return StreamingResponse(
+        export_event_stream(job_id=job_id, path_to_csv=str(tmp_path), destination=destination),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.post("/proknow_upload_file")
+async def proknow_upload_file(
+    file: UploadFile = File(..., description="CSV with a patient_id column"),
+    job_id: str = Form(...),
+    collection: str = Form(..., description="ProKnow collection name"),
+):
+    """Accept a CSV file upload and stream ProKnow upload progress via SSE. Used by the gateway frontend."""
+    tmp_dir = Path("./tmp")
+    tmp_dir.mkdir(exist_ok=True)
+    tmp_path = tmp_dir / f"{job_id}_{file.filename}"
+    tmp_path.write_bytes(await file.read())
+
+    return StreamingResponse(
+        proknow_upload_stream(job_id=job_id, path_to_csv=str(tmp_path), collection=collection),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.post("/cancel/{job_id}")
