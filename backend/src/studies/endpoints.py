@@ -94,12 +94,24 @@ async def get_study(orthanc_id: str):
         try:
             s = _orthanc("GET", f"/series/{series_id}")
             s_tags = s.get("MainDicomTags", {})
+
+            # SeriesInstanceUID is not always indexed in MainDicomTags depending on the
+            # Orthanc version and configuration. Read it from the DICOM module directly
+            # as a reliable fallback.
+            series_uid = s_tags.get("SeriesInstanceUID")
+            if not series_uid:
+                try:
+                    module = _orthanc("GET", f"/series/{series_id}/module?simplify")
+                    series_uid = module.get("SeriesInstanceUID")
+                except Exception:
+                    pass
+
             series.append({
                 "orthanc_id": series_id,
                 "modality": s_tags.get("Modality"),
                 "series_description": s_tags.get("SeriesDescription"),
                 "series_date": s_tags.get("SeriesDate"),
-                "series_instance_uid": s_tags.get("SeriesInstanceUID"),
+                "series_instance_uid": series_uid,
                 "instance_count": len(s.get("Instances", [])),
             })
         except Exception:
