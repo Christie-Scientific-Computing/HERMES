@@ -176,7 +176,7 @@ async def dicom_move(body: Request):
         }
     ) 
 
-async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str, **kwargs):
+async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str=None, **kwargs):
     """
     Generator for uploading to ProKnow that records status events.
     """

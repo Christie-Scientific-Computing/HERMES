@@ -314,7 +314,7 @@ class Importer():
             modality = Modality(self.ot, src)
             try:
                 studies = modality.find(study_query)
-                return True
+                #return True
             except Exception as e:
                 logger.debug(f'Could not find {mrn} in {src}')
                 continue

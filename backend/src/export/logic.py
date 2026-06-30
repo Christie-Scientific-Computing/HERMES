@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class Exporter():
     def __init__(self, destination: str):
-        self.destination = destination # DICOM SCP
+        self.destination = destination # DICOM SCP or collection
         self.tmp_dir = Path('./tmp')
         self.tmp_dir.mkdir(exist_ok=True)
 
@@ -82,7 +82,7 @@ class Exporter():
         
         return {'status': 'Success'}
 
-    def upload_study_to_proknow(self, path: Path, collection: str):
+    def upload_study_to_proknow(self, path: Path, collection: str = None):
         logger.info(f"UPLOADING: {path}")
         try:
             pk = ProKnow(PROKNOW_URL, './credentials.json')#
@@ -129,9 +129,9 @@ class Exporter():
             raise ValueError("Dose expected but not found on ProKnow")
 
         
-
-        collection = pk.collections.find(workspace=PROKNOW_WORKSPACE, name=collection).get()
-        collection.patients.add(PROKNOW_WORKSPACE, dose_id)
+        if collection is not None:
+            collection = pk.collections.find(workspace=PROKNOW_WORKSPACE, name=collection).get()
+            collection.patients.add(PROKNOW_WORKSPACE, dose_id)
 
         return {'status': 'Success'}
 

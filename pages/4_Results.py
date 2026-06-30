@@ -1,5 +1,5 @@
 """
-Streamlit Results page — alternative to pages/4_Results.py
+Streamlit Results page 
 Shows job summary and per-patient timelines using the /results API.
 """
 import os
