@@ -66,6 +66,19 @@ async def proknow_upload_patient(request: Request):
     return await proxy_request(request, "export/proknow_upload_patient")
 
 
+@router.post("/dicom_move_uids_file")
+async def dicom_move_uids_file(request: Request):
+    """
+    C-MOVE specific studies or series identified by DICOM UIDs.
+    Accepts `multipart/form-data` with fields: `file` (CSV), `job_id`, `destination`, `level`.
+    The CSV must have a `study_instance_uid` column and optionally `series_instance_uid`.
+    Use the CSV downloaded from `GET /studies` as input — filter it on your side first.
+    `level`: `study` (default, deduplicates by study UID) or `series` (moves individual series).
+    Returns an SSE stream of progress events.
+    """
+    return await proxy_request(request, "export/dicom_move_uids_file")
+
+
 @router.post("/cancel/{job_id}")
 async def cancel_export(request: Request, job_id: str):
     """Cancel a running batch export job by its job_id."""

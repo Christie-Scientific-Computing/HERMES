@@ -1,6 +1,12 @@
 """
 Export page — move data from Orthanc to a DICOM destination or ProKnow.
+
+Accepts two CSV formats:
+  - patient_id column  → existing patient-level C-MOVE / ProKnow upload
+  - study_instance_uid / series_instance_uid columns → targeted UID-based C-MOVE
+    (use the CSV downloaded from the Studies page, filter it, then upload here)
 """
+import csv
 import os
 import json
 import uuid
@@ -18,14 +24,17 @@ BASE_URL     = f"http://{GATEWAY_URI}:{GATEWAY_PORT}"
 st.set_page_config(page_title="Export — HERMES", page_icon="🪽", layout="wide")
 st.title("Export")
 st.markdown("""
-Move data from Orthanc to a DICOM destination (C-MOVE) or upload to a ProKnow collection.
+Move data from Orthanc to a DICOM destination or upload to ProKnow.
 
-Upload a CSV of patient IDs (header: `patient_id`) and click **Run**.
+Upload a **patient CSV** (`patient_id` column) to export all studies per patient,
+or upload a **study/series CSV** (downloaded from the Studies page) to export specific studies.
 """)
 
 
+# ── Shared SSE progress fragment ──────────────────────────────────────────────
+
 @st.fragment(run_every=0.5)
-def show_progress(file_bytes: bytes, file_name: str, endpoint: str, dest_key: str, dest_value: str):
+def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields: dict):
     if "job_id" not in st.session_state:
         job_id   = str(uuid.uuid4())
         messages = []
@@ -37,7 +46,7 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, dest_key: st
                 with requests.post(
                     f"{BASE_URL}/{endpoint}",
                     files={"file": (file_name, file_bytes, "text/csv")},
-                    data={"job_id": job_id, dest_key: dest_value},
+                    data={"job_id": job_id, **form_fields},
                     stream=True,
                     timeout=(10, None),
                 ) as resp:
@@ -68,14 +77,12 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, dest_key: st
 
     total     = next((m["total"] for m in messages if m.get("type") == "start"), 0)
     completed = sum(1 for m in messages if m.get("type") in ("success", "error"))
-
     progress  = (completed / total) if total else 0
-    prog_text = f"{completed} / {total}" if total else "Starting…"
 
-    st.progress(progress, text=prog_text)
+    st.progress(progress, text=f"{completed} / {total}" if total else "Starting…")
     status = st.status(label, expanded=not terminal, state=state)
 
-    patient_slots = {}
+    patient_slots: dict = {}
     errors = []
 
     st.button("Stop", type="primary", on_click=stop_job, disabled=bool(terminal))
@@ -83,7 +90,7 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, dest_key: st
     for msg in messages:
         t = msg.get("type")
         if t == "start":
-            status.write(f"Exporting {msg['total']} patients")
+            status.write(f"Exporting {msg['total']} item{'s' if msg['total'] != 1 else ''}")
         elif t == "progress":
             patient_slots[msg["current"]] = status.empty()
             patient_slots[msg["current"]].markdown(f"⏳ `{msg['current']}`")
@@ -103,18 +110,58 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, dest_key: st
                 st.code(f"{e['mrn']}: {e['error']}")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── CSV upload and type detection ─────────────────────────────────────────────
 
 for key in ("job_id", "messages"):
     if key in st.session_state:
         del st.session_state[key]
 
-uploaded = st.file_uploader("Patient CSV", type=["csv"], help="Must have a patient_id column")
+uploaded = st.file_uploader(
+    "CSV file",
+    type=["csv"],
+    help="Patient CSV (`patient_id` column) or study/series CSV from the Studies page.",
+)
 
-dest_type = st.radio("Destination type", ["DICOM (C-MOVE)", "ProKnow"], horizontal=True)
-is_dicom  = dest_type.startswith("DICOM")
+csv_type = None
+header   = []
 
-# Populate destination options from gateway API
+if uploaded:
+    content = uploaded.getvalue().decode("utf-8", errors="replace")
+    reader  = csv.DictReader(content.splitlines())
+    header  = [h.strip().lower() for h in (reader.fieldnames or [])]
+
+    if "study_instance_uid" in header or "series_instance_uid" in header:
+        csv_type = "uid"
+        st.info("📋 Study/series UID format detected — will export specific studies.")
+    elif "patient_id" in header:
+        csv_type = "patient"
+        st.info("📋 Patient ID format detected — will export all studies per patient.")
+    else:
+        st.error("CSV must have a `patient_id` or `study_instance_uid` column.")
+
+
+# ── Destination selection ─────────────────────────────────────────────────────
+
+if csv_type == "uid":
+    st.subheader("Options")
+    dest_type    = "DICOM (C-MOVE)"    # UID-based export only supports DICOM
+    export_level = st.radio(
+        "Export level",
+        ["Study", "Series"],
+        horizontal=True,
+        help="**Study**: move the entire study for each unique study UID. **Series**: move individual series (one C-MOVE per row, after deduplication).",
+    )
+    st.caption("UID-based export uses DICOM C-MOVE only. For ProKnow, use the patient ID format.")
+
+elif csv_type == "patient":
+    st.subheader("Options")
+    dest_type = st.radio("Destination type", ["DICOM (C-MOVE)", "ProKnow"], horizontal=True)
+
+else:
+    dest_type = None
+
+
+# Destination picker (DICOM AE or ProKnow collection)
 @st.cache_data(ttl=60)
 def get_destinations():
     try:
@@ -129,25 +176,55 @@ def get_destinations():
         collections = []
     return modalities, collections
 
-modalities, collections = get_destinations()
-options = modalities if is_dicom else collections
 
-if options:
-    destination = st.selectbox("Destination", options)
-else:
-    st.warning("No destinations available. Check gateway/Hermes connectivity.")
-    destination = None
+destination = None
+if dest_type:
+    modalities, collections = get_destinations()
+    is_dicom = dest_type.startswith("DICOM")
+    options  = modalities if is_dicom else collections
+
+    if options:
+        destination = st.selectbox("Destination", options)
+    else:
+        st.warning("No destinations available — check gateway/Hermes connectivity.")
+
+
+# ── Run ───────────────────────────────────────────────────────────────────────
 
 st.divider()
-can_run = bool(uploaded and destination)
-if not uploaded:
-    st.warning("⚠️ Upload a CSV before running.")
+can_run = bool(uploaded and csv_type and destination)
+if not can_run and uploaded:
+    if not destination:
+        st.warning("⚠️ Select a destination before running.")
 
 if st.button("▶ Run", disabled=not can_run, type="primary"):
-    endpoint = "export/dicom_move_file" if is_dicom else "export/proknow_upload_file"
-    dest_key = "destination"            if is_dicom else "collection"
-    show_progress(uploaded.getvalue(), uploaded.name, endpoint, dest_key, destination)
+    file_bytes = uploaded.getvalue()
+    file_name  = uploaded.name
+    is_dicom   = dest_type.startswith("DICOM")
+
+    if csv_type == "uid":
+        show_progress(
+            file_bytes, file_name,
+            endpoint    = "export/dicom_move_uids_file",
+            form_fields = {"destination": destination, "level": export_level.lower()},
+        )
+    elif is_dicom:
+        show_progress(
+            file_bytes, file_name,
+            endpoint    = "export/dicom_move_file",
+            form_fields = {"destination": destination},
+        )
+    else:
+        show_progress(
+            file_bytes, file_name,
+            endpoint    = "export/proknow_upload_file",
+            form_fields = {"collection": destination},
+        )
 
 with st.sidebar:
     st.header("ℹ️ Info")
-    st.info("**DICOM C-MOVE**: pushes to a registered Orthanc modality.\n\n**ProKnow**: uploads to the configured workspace collection.")
+    st.info(
+        "**Patient CSV** — exports all studies currently in Orthanc for each patient.\n\n"
+        "**Study/series CSV** — exports only the specific studies or series listed. "
+        "Download this from the Studies page, filter the rows you want, then upload here."
+    )

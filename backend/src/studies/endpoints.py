@@ -99,6 +99,7 @@ async def get_study(orthanc_id: str):
                 "modality": s_tags.get("Modality"),
                 "series_description": s_tags.get("SeriesDescription"),
                 "series_date": s_tags.get("SeriesDate"),
+                "series_instance_uid": s_tags.get("SeriesInstanceUID"),
                 "instance_count": len(s.get("Instances", [])),
             })
         except Exception:

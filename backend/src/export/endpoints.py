@@ -2,11 +2,13 @@
 Endpoints for the export page
 """
 import os
+import csv as csv_mod
 import json
 import logging
 import time
 import asyncio
 import numpy as np
+import requests as http_requests
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Form
 from pydantic import BaseModel
@@ -349,6 +351,124 @@ async def proknow_upload_file(
 
     return StreamingResponse(
         proknow_upload_stream(job_id=job_id, path_to_csv=str(tmp_path), collection=collection),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+def _c_move_by_uid(ae_title: str, study_uid: str, series_uid: str | None = None):
+    """Trigger an Orthanc C-MOVE for a specific study or series by DICOM UID."""
+    level    = "Series" if series_uid else "Study"
+    resource = {"StudyInstanceUID": study_uid}
+    if series_uid:
+        resource["SeriesInstanceUID"] = series_uid
+    resp = http_requests.post(
+        f"{ORTHANC_URL}/modalities/{ae_title}/move",
+        auth=(ORTHANC_USER, ORTHANC_PASS),
+        verify=False,
+        json={"Level": level, "Resources": [resource]},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def export_by_uid_stream(job_id: str, path_to_csv: str, destination: str, level: str = "study"):
+    """
+    SSE generator for UID-based C-MOVE.
+    Reads a CSV with study_instance_uid / series_instance_uid columns,
+    deduplicates, and moves each unique study or series.
+    """
+    with cancel_lock:
+        cancel_flags[job_id] = False
+
+    seen: set = set()
+    items: list[dict] = []
+    with open(path_to_csv, newline="") as f:
+        for row in csv_mod.DictReader(f):
+            study_uid  = (row.get("study_instance_uid")  or "").strip()
+            series_uid = (row.get("series_instance_uid") or "").strip()
+            if not study_uid:
+                continue
+            use_series = level == "series" and bool(series_uid)
+            key   = (study_uid, series_uid) if use_series else study_uid
+            label = series_uid if use_series else study_uid
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({
+                "study_uid":  study_uid,
+                "series_uid": series_uid if use_series else None,
+                "label":      label,
+                "patient_id": (row.get("patient_id") or study_uid).strip(),
+            })
+
+    total = len(items)
+
+    if status_db:
+        try:
+            status_db.create_job(job_id, description=f"UID C-MOVE ({level}) to {destination}")
+        except Exception as e:
+            logger.warning("Could not create job: %s", e)
+
+    yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
+
+    for item in items:
+        with cancel_lock:
+            if cancel_flags.get(job_id):
+                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
+                break
+
+        yield f"data: {json.dumps({'type': 'progress', 'current': item['label']})}\n\n"
+        start = time.time()
+        try:
+            await asyncio.to_thread(_c_move_by_uid, destination, item["study_uid"], item["series_uid"])
+
+            if status_db:
+                try:
+                    status_db.add_patient(job_id, item["patient_id"], input_path=path_to_csv)
+                    status_db.add_event(job_id, item["patient_id"], stage="export", event_type="success")
+                except Exception as e:
+                    logger.warning("Status DB write failed: %s", e)
+
+            yield f"data: {json.dumps({'type': 'success', 'mrn': item['label'], 'execution_time': np.round(time.time() - start, 2)})}\n\n"
+
+        except Exception as e:
+            logger.error("C-MOVE failed for %s: %s", item["label"], e)
+
+            if status_db:
+                try:
+                    status_db.add_event(job_id, item["patient_id"], stage="export", event_type="failure", error_message=str(e))
+                except Exception as ex:
+                    logger.warning("Status DB write failed: %s", ex)
+
+            yield f"data: {json.dumps({'type': 'error', 'mrn': item['label'], 'error': str(e), 'execution_time': np.round(time.time() - start, 2)})}\n\n"
+
+    with cancel_lock:
+        if job_id in cancel_flags:
+            del cancel_flags[job_id]
+    yield f"data: {json.dumps({'done': True})}\n\n"
+
+
+@router.post("/dicom_move_uids_file")
+async def dicom_move_uids_file(
+    file: UploadFile = File(..., description="CSV with study_instance_uid and optionally series_instance_uid columns"),
+    job_id: str = Form(...),
+    destination: str = Form(..., description="Orthanc modality AE title"),
+    level: str = Form("study", description="'study' to move whole study, 'series' to move individual series"),
+):
+    """
+    C-MOVE specific studies or series identified by DICOM UIDs.
+    Accepts the CSV produced by the gateway Studies page.
+    Deduplicates rows before moving.
+    """
+    tmp_dir = Path("./tmp")
+    tmp_dir.mkdir(exist_ok=True)
+    tmp_path = tmp_dir / f"{job_id}_{file.filename}"
+    tmp_path.write_bytes(await file.read())
+
+    return StreamingResponse(
+        export_by_uid_stream(job_id=job_id, path_to_csv=str(tmp_path), destination=destination, level=level),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
