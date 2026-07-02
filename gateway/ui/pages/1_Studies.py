@@ -143,39 +143,205 @@ def _collect_series_uids(patient_rows: list[dict]) -> list[str]:
     return uids
 
 
+def _collect_modalities(patient_rows: list[dict]) -> list[str]:
+    """Return sorted list of distinct modality strings present in the result set."""
+    seen = set()
+    for patient in patient_rows:
+        for study in patient.get("studies", []):
+            for s in study.get("series", []):
+                m = s.get("modality") or ""
+                if m:
+                    seen.add(m)
+    return sorted(seen)
+
+
+def apply_filters(
+    patient_rows: list[dict],
+    modalities: list[str],
+    pacs_filter: str,
+    date_from,
+    date_to,
+    description_kw: str,
+    min_instances: int,
+    pacs_status: dict | None,
+) -> list[dict]:
+    """
+    Return a filtered copy of patient_rows without mutating the originals.
+
+    Filtering is at the series level: a study is included only if at least one
+    series passes all active filters, and only passing series are shown in that study.
+    """
+    date_from_str = date_from.strftime("%Y%m%d") if date_from else None
+    date_to_str   = date_to.strftime("%Y%m%d")   if date_to   else None
+    kw = (description_kw or "").strip().lower()
+
+    def series_passes(s: dict, study_date: str | None) -> bool:
+        # Modality
+        if modalities and s.get("modality") not in modalities:
+            return False
+        # PACS status — None (unknown) is excluded from both On/Not on PACS views
+        if pacs_filter != "All" and pacs_status is not None:
+            uid = s.get("series_instance_uid") or ""
+            val = pacs_status.get(uid)
+            if val is None:
+                return False
+            if pacs_filter == "On PACS" and not val:
+                return False
+            if pacs_filter == "Not on PACS" and val:
+                return False
+        # Date — prefer series_date, fall back to study_date; missing date passes
+        raw_date = s.get("series_date") or study_date or ""
+        if date_from_str and raw_date and raw_date < date_from_str:
+            return False
+        if date_to_str and raw_date and raw_date > date_to_str:
+            return False
+        # Description keyword
+        if kw and kw not in (s.get("series_description") or "").lower():
+            return False
+        # Min instance count
+        if min_instances > 0 and (s.get("instance_count") or 0) < min_instances:
+            return False
+        return True
+
+    result = []
+    for patient in patient_rows:
+        filtered_studies = []
+        for study in patient.get("studies", []):
+            study_date = study.get("study_date") or ""
+            passing = [s for s in study.get("series", []) if series_passes(s, study_date)]
+            if passing:
+                filtered_studies.append({**study, "series": passing})
+        if filtered_studies:
+            result.append({**patient, "studies": filtered_studies})
+    return result
+
+
+def render_filter_sidebar(all_patient_rows: list[dict]) -> dict:
+    """
+    Render the sidebar filter panel and return the active filter values as a dict.
+    Options are derived from the full (unfiltered) result set so filters don't cascade.
+    """
+    pacs_available   = st.session_state.get("pacs_status") is not None
+    modality_options = _collect_modalities(all_patient_rows)
+
+    # Read current values from session state to compute active state before rendering
+    cur_modalities    = st.session_state.get("filter_modalities", [])
+    cur_pacs          = st.session_state.get("filter_pacs", "All")
+    cur_date_from     = st.session_state.get("filter_date_from")
+    cur_date_to       = st.session_state.get("filter_date_to")
+    cur_description   = st.session_state.get("filter_description", "")
+    cur_min_instances = st.session_state.get("filter_min_instances", 0)
+
+    any_active = bool(
+        cur_modalities
+        or (pacs_available and cur_pacs != "All")
+        or cur_date_from
+        or cur_date_to
+        or (cur_description or "").strip()
+        or (cur_min_instances or 0) > 0
+    )
+
+    with st.sidebar:
+        with st.expander("Filter results", expanded=any_active):
+            st.multiselect(
+                "Modality",
+                options=modality_options,
+                key="filter_modalities",
+                help="Show only studies that contain at least one series of the selected modalities.",
+            )
+            st.text_input(
+                "Series description contains",
+                key="filter_description",
+                placeholder="e.g. Planning CT",
+            )
+            st.date_input("Study/series date from", value=None, key="filter_date_from")
+            st.date_input("Study/series date to",   value=None, key="filter_date_to")
+            st.number_input(
+                "Min instance count",
+                min_value=0,
+                step=1,
+                key="filter_min_instances",
+                help="Exclude series with fewer instances (e.g. set to 10 to hide scouts/localisers).",
+            )
+            if pacs_available:
+                st.radio(
+                    "PACS presence",
+                    ["All", "On PACS", "Not on PACS"],
+                    key="filter_pacs",
+                )
+            else:
+                st.caption("Run **Check PACS** to enable the PACS presence filter.")
+
+            if any_active:
+                if st.button("Clear filters", use_container_width=True):
+                    for k in [
+                        "filter_modalities", "filter_pacs", "filter_date_from",
+                        "filter_date_to", "filter_description", "filter_min_instances",
+                    ]:
+                        st.session_state.pop(k, None)
+                    st.rerun()
+
+    return {
+        "modalities":     st.session_state.get("filter_modalities", []),
+        "pacs_filter":    st.session_state.get("filter_pacs", "All"),
+        "date_from":      st.session_state.get("filter_date_from"),
+        "date_to":        st.session_state.get("filter_date_to"),
+        "description_kw": st.session_state.get("filter_description", ""),
+        "min_instances":  st.session_state.get("filter_min_instances", 0),
+    }
+
+
 def show_results(patient_rows: list[dict], show_patient_stats: bool = False):
     """Render summary metrics, action buttons, and per-study expanders."""
-    total_studies  = sum(len(p["studies"]) for p in patient_rows)
-    patients_found = sum(1 for p in patient_rows if p["studies"])
+    pacs_status   = st.session_state.get("pacs_status")
+    filters       = render_filter_sidebar(patient_rows)
+    filtered_rows = apply_filters(patient_rows, **filters, pacs_status=pacs_status)
+
+    any_filters_active = bool(
+        filters["modalities"]
+        or (pacs_status is not None and filters["pacs_filter"] != "All")
+        or filters["date_from"]
+        or filters["date_to"]
+        or (filters["description_kw"] or "").strip()
+        or (filters["min_instances"] or 0) > 0
+    )
+
+    total_studies_raw = sum(len(p["studies"]) for p in patient_rows)
+    total_studies     = sum(len(p["studies"]) for p in filtered_rows)
+    patients_found    = sum(1 for p in filtered_rows if p["studies"])
 
     if show_patient_stats:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Patients searched",      len(patient_rows))
-        c2.metric("Patients with studies",  patients_found)
-        c3.metric("Total studies",          total_studies)
+        c1.metric("Patients searched",     len(patient_rows))   # always raw count
+        c2.metric("Patients with studies", patients_found)
+        c3.metric("Total studies",         total_studies)
     else:
         st.caption(f"{total_studies} stud{'y' if total_studies == 1 else 'ies'} found")
 
+    if any_filters_active and total_studies < total_studies_raw:
+        st.caption(f"Showing {total_studies} of {total_studies_raw} studies (filtered)")
+
     if total_studies == 0:
-        st.info("No studies matched.")
+        if any_filters_active:
+            st.info("No studies match the active filters. Try adjusting or clearing them in the sidebar.")
+        else:
+            st.info("No studies matched.")
         return
 
-    pacs_status = st.session_state.get("pacs_status")
-
-    # Action buttons row
+    # Action buttons — CSV download reflects the filtered view; PACS check covers all
     btn_col1, btn_col2 = st.columns([1, 1])
     with btn_col1:
-        csv_data = build_download_csv(patient_rows, pacs_status=pacs_status)
+        csv_data = build_download_csv(filtered_rows, pacs_status=pacs_status)
         st.download_button(
             "⬇ Download study list (CSV)",
             data=csv_data,
             file_name="studies.csv",
             mime="text/csv",
-            help="One row per series. Includes study and series UIDs. Can be filtered and re-uploaded on the Export page.",
+            help="One row per series. Reflects the current filter. Includes study and series UIDs for re-upload on the Export page.",
         )
     with btn_col2:
         if st.button("🔍 Check PACS", help="Query the remote PACS to see which series are already present there."):
-            series_uids = _collect_series_uids(patient_rows)
+            series_uids = _collect_series_uids(patient_rows)   # full unfiltered set
             if not series_uids:
                 st.warning("No series UIDs available to check.")
             else:
@@ -203,7 +369,7 @@ def show_results(patient_rows: list[dict], show_patient_stats: bool = False):
                     except Exception as exc:
                         st.error(f"Could not reach gateway: {exc}")
 
-    for patient in patient_rows:
+    for patient in filtered_rows:
         if not patient["studies"]:
             if show_patient_stats:
                 st.markdown(f"*{patient['patient_id']} — no studies found*")
