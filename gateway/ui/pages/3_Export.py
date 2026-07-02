@@ -75,8 +75,9 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields:
     else:
         label, state = "Exporting…", "running"
 
-    total     = next((m["total"] for m in messages if m.get("type") == "start"), 0)
-    completed = sum(1 for m in messages if m.get("type") in ("success", "error"))
+    total    = next((m["total"] for m in messages if m.get("type") == "start"), 0)
+    skipped  = sum(1 for m in messages if m.get("type") == "skipped")
+    completed = sum(1 for m in messages if m.get("type") in ("success", "error", "skipped"))
     progress  = (completed / total) if total else 0
 
     st.progress(progress, text=f"{completed} / {total}" if total else "Starting…")
@@ -97,12 +98,18 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields:
         elif t == "success":
             if msg["mrn"] in patient_slots:
                 patient_slots[msg["mrn"]].markdown(f"✅ `{msg['mrn']}` — {msg['execution_time']}s")
+        elif t == "skipped":
+            if msg["mrn"] in patient_slots:
+                patient_slots[msg["mrn"]].markdown(f"⏭️ `{msg['mrn']}` — {msg.get('reason', 'skipped')}")
         elif t == "error":
             errors.append(msg)
             if msg["mrn"] in patient_slots:
                 patient_slots[msg["mrn"]].markdown(f"❌ `{msg['mrn']}` — {msg['error']}")
         elif t == "cancelled" or msg.get("done"):
             break
+
+    if skipped:
+        status.caption(f"⏭️ {skipped} item{'s' if skipped > 1 else ''} skipped (already on PACS)")
 
     if errors:
         with st.expander(f"{len(errors)} error{'s' if len(errors) > 1 else ''}"):
@@ -142,6 +149,8 @@ if uploaded:
 
 # ── Destination selection ─────────────────────────────────────────────────────
 
+skip_on_pacs = False
+
 if csv_type == "uid":
     st.subheader("Options")
     dest_type    = "DICOM (C-MOVE)"    # UID-based export only supports DICOM
@@ -150,6 +159,12 @@ if csv_type == "uid":
         ["Study", "Series"],
         horizontal=True,
         help="**Study**: move the entire study for each unique study UID. **Series**: move individual series (one C-MOVE per row, after deduplication).",
+    )
+    skip_on_pacs = st.checkbox(
+        "Skip series/studies already on PACS",
+        value=False,
+        help="Before each C-MOVE, query the remote PACS. If the item is already there, skip it. "
+             "Requires PACS_AE_TITLE and PACS_HOST to be set in the Hermes backend .env.",
     )
     st.caption("UID-based export uses DICOM C-MOVE only. For ProKnow, use the patient ID format.")
 
@@ -206,7 +221,11 @@ if st.button("▶ Run", disabled=not can_run, type="primary"):
         show_progress(
             file_bytes, file_name,
             endpoint    = "export/dicom_move_uids_file",
-            form_fields = {"destination": destination, "level": export_level.lower()},
+            form_fields = {
+                "destination":      destination,
+                "level":            export_level.lower(),
+                "skip_if_on_pacs":  "true" if skip_on_pacs else "false",
+            },
         )
     elif is_dicom:
         show_progress(
@@ -226,5 +245,7 @@ with st.sidebar:
     st.info(
         "**Patient CSV** — exports all studies currently in Orthanc for each patient.\n\n"
         "**Study/series CSV** — exports only the specific studies or series listed. "
-        "Download this from the Studies page, filter the rows you want, then upload here."
+        "Download this from the Studies page, filter the rows you want, then upload here.\n\n"
+        "**Skip if on PACS** — before each C-MOVE, queries the remote PACS via C-FIND "
+        "and skips anything already present. Only available in UID export mode."
     )

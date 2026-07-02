@@ -23,6 +23,7 @@ from routers.studies  import router as studies_router
 from routers.import_  import router as import_router
 from routers.export_  import router as export_router
 from routers.results_ import router as results_router
+from routers.pacs     import router as pacs_router
 from routers.forward  import router as forward_router
 
 load_dotenv()
@@ -65,4 +66,5 @@ app.include_router(studies_router)  # GET /studies, GET /studies/{id}
 app.include_router(import_router)   # POST /import/*
 app.include_router(export_router)   # GET|POST /export/*
 app.include_router(results_router)  # GET /results/*
+app.include_router(pacs_router)     # GET /pacs/status, POST /pacs/query_series
 app.include_router(forward_router)  # catch-all /{path:path} — must be last

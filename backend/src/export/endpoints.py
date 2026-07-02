@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from backend.src.export.logic import Exporter
 import threading
 from backend.src.status.db_client import StatusDB
+from backend.src.pacs import client as pacs_client
 
 load_dotenv()
 
@@ -373,14 +374,30 @@ def _c_move_by_uid(ae_title: str, study_uid: str, series_uid: str | None = None)
     return resp.json()
 
 
-async def export_by_uid_stream(job_id: str, path_to_csv: str, destination: str, level: str = "study"):
+async def export_by_uid_stream(
+    job_id: str,
+    path_to_csv: str,
+    destination: str,
+    level: str = "study",
+    skip_if_on_pacs: bool = False,
+):
     """
     SSE generator for UID-based C-MOVE.
     Reads a CSV with study_instance_uid / series_instance_uid columns,
     deduplicates, and moves each unique study or series.
+    When skip_if_on_pacs is True, items already present on the remote PACS are skipped.
     """
     with cancel_lock:
         cancel_flags[job_id] = False
+
+    # Register PACS modality once upfront if we'll need it
+    pacs_check = skip_if_on_pacs and pacs_client.is_configured()
+    if pacs_check:
+        try:
+            pacs_client.ensure_registered()
+        except Exception as exc:
+            logger.warning("Could not register PACS modality — skip-if-on-PACS disabled: %s", exc)
+            pacs_check = False
 
     seen: set = set()
     items: list[dict] = []
@@ -420,6 +437,21 @@ async def export_by_uid_stream(job_id: str, path_to_csv: str, destination: str, 
                 break
 
         yield f"data: {json.dumps({'type': 'progress', 'current': item['label']})}\n\n"
+
+        # PACS pre-check: skip if the series/study already exists on the remote PACS
+        if pacs_check:
+            try:
+                if item["series_uid"]:
+                    on_pacs = await asyncio.to_thread(pacs_client.series_on_pacs, item["series_uid"])
+                else:
+                    on_pacs = await asyncio.to_thread(pacs_client.study_on_pacs, item["study_uid"])
+                if on_pacs:
+                    logger.info("Skipping %s — already on PACS", item["label"])
+                    yield f"data: {json.dumps({'type': 'skipped', 'mrn': item['label'], 'reason': 'already on PACS'})}\n\n"
+                    continue
+            except Exception as exc:
+                logger.warning("PACS check failed for %s, proceeding with export: %s", item["label"], exc)
+
         start = time.time()
         try:
             await asyncio.to_thread(_c_move_by_uid, destination, item["study_uid"], item["series_uid"])
@@ -456,11 +488,13 @@ async def dicom_move_uids_file(
     job_id: str = Form(...),
     destination: str = Form(..., description="Orthanc modality AE title"),
     level: str = Form("study", description="'study' to move whole study, 'series' to move individual series"),
+    skip_if_on_pacs: str = Form("false", description="Pass 'true' to skip series/studies already present on the remote PACS"),
 ):
     """
     C-MOVE specific studies or series identified by DICOM UIDs.
     Accepts the CSV produced by the gateway Studies page.
     Deduplicates rows before moving.
+    Set skip_if_on_pacs=true to skip any item that already exists on the configured remote PACS.
     """
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
@@ -468,7 +502,13 @@ async def dicom_move_uids_file(
     tmp_path.write_bytes(await file.read())
 
     return StreamingResponse(
-        export_by_uid_stream(job_id=job_id, path_to_csv=str(tmp_path), destination=destination, level=level),
+        export_by_uid_stream(
+            job_id=job_id,
+            path_to_csv=str(tmp_path),
+            destination=destination,
+            level=level,
+            skip_if_on_pacs=skip_if_on_pacs.lower() == "true",
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
