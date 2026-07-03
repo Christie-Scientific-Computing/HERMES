@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv",
     "streamlit",
     "pandas",
+    "pynetdicom",
 ]
 
 [tool.fastapi]

@@ -34,7 +34,6 @@ Required in `.env` (not committed):
 | `PINN_DB` | Path to Pinnacle SQLite database |
 | `PULL_MODALITY_AET_ONE`, `PULL_MODALITY_AET_TWO` | DICOM AE titles to pull from |
 | `PATH_TO_CERT`, `PATH_TO_KEY` | TLS certificates for Orthanc |
-| `PACS_AE_TITLE`, `PACS_HOST`, `PACS_PORT` | Remote PACS for C-FIND comparison (optional) |
 
 ProKnow credentials live in `credentials.json` (git-ignored).
 

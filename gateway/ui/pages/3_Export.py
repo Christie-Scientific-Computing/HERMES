@@ -7,6 +7,7 @@ Accepts two CSV formats:
     (use the CSV downloaded from the Studies page, filter it, then upload here)
 """
 import csv
+import io
 import os
 import json
 import uuid
@@ -29,6 +30,64 @@ Move data from Orthanc to a DICOM destination or upload to ProKnow.
 Upload a **patient CSV** (`patient_id` column) to export all studies per patient,
 or upload a **study/series CSV** (downloaded from the Studies page) to export specific studies.
 """)
+
+
+# ── PACS pre-filtering ────────────────────────────────────────────────────────
+
+def _filter_csv_by_pacs(file_bytes: bytes, level: str) -> tuple[bytes, int]:
+    """
+    Query the gateway's PACS endpoints and return (filtered_csv_bytes, n_skipped).
+    At study level, checks StudyInstanceUID; at series level, checks SeriesInstanceUID.
+    Items whose PACS status is unknown (null) are NOT skipped — only confirmed positives.
+    """
+    content = file_bytes.decode("utf-8", errors="replace")
+    reader = csv.DictReader(content.splitlines())
+    rows = list(reader)
+    fieldnames = reader.fieldnames or []
+
+    if not rows:
+        return file_bytes, 0
+
+    if level == "series":
+        uid_key  = "series_instance_uid"
+        endpoint = f"{BASE_URL}/pacs/query_series"
+        body_key = "series_uids"
+    else:
+        uid_key  = "study_instance_uid"
+        endpoint = f"{BASE_URL}/pacs/query_studies"
+        body_key = "study_uids"
+
+    unique_uids = list({
+        (row.get(uid_key) or "").strip()
+        for row in rows
+        if (row.get(uid_key) or "").strip()
+    })
+
+    if not unique_uids:
+        return file_bytes, 0
+
+    try:
+        res = requests.post(endpoint, json={body_key: unique_uids}, timeout=120)
+        if not res.ok:
+            st.warning(f"PACS check failed ({res.status_code}) — exporting all items.")
+            return file_bytes, 0
+        pacs_status = res.json().get("results", {})
+    except Exception as exc:
+        st.warning(f"Could not reach PACS — exporting all items: {exc}")
+        return file_bytes, 0
+
+    # Only skip items confirmed present (True); leave unknowns (None) through
+    filtered = [
+        row for row in rows
+        if pacs_status.get((row.get(uid_key) or "").strip()) is not True
+    ]
+    n_skipped = len(rows) - len(filtered)
+
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(filtered)
+    return out.getvalue().encode("utf-8"), n_skipped
 
 
 # ── Shared SSE progress fragment ──────────────────────────────────────────────
@@ -75,10 +134,14 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields:
     else:
         label, state = "Exporting…", "running"
 
-    total    = next((m["total"] for m in messages if m.get("type") == "start"), 0)
-    skipped  = sum(1 for m in messages if m.get("type") == "skipped")
-    completed = sum(1 for m in messages if m.get("type") in ("success", "error", "skipped"))
+    total     = next((m["total"] for m in messages if m.get("type") == "start"), 0)
+    completed = sum(1 for m in messages if m.get("type") in ("success", "error"))
     progress  = (completed / total) if total else 0
+
+    # Show PACS skip summary if applicable (stored before this fragment started)
+    pacs_skipped = st.session_state.get("pacs_skipped", 0)
+    if pacs_skipped:
+        st.caption(f"⏭️ {pacs_skipped} item{'s' if pacs_skipped != 1 else ''} skipped (already on PACS)")
 
     st.progress(progress, text=f"{completed} / {total}" if total else "Starting…")
     status = st.status(label, expanded=not terminal, state=state)
@@ -98,18 +161,12 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields:
         elif t == "success":
             if msg["mrn"] in patient_slots:
                 patient_slots[msg["mrn"]].markdown(f"✅ `{msg['mrn']}` — {msg['execution_time']}s")
-        elif t == "skipped":
-            if msg["mrn"] in patient_slots:
-                patient_slots[msg["mrn"]].markdown(f"⏭️ `{msg['mrn']}` — {msg.get('reason', 'skipped')}")
         elif t == "error":
             errors.append(msg)
             if msg["mrn"] in patient_slots:
                 patient_slots[msg["mrn"]].markdown(f"❌ `{msg['mrn']}` — {msg['error']}")
         elif t == "cancelled" or msg.get("done"):
             break
-
-    if skipped:
-        status.caption(f"⏭️ {skipped} item{'s' if skipped > 1 else ''} skipped (already on PACS)")
 
     if errors:
         with st.expander(f"{len(errors)} error{'s' if len(errors) > 1 else ''}"):
@@ -119,7 +176,7 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields:
 
 # ── CSV upload and type detection ─────────────────────────────────────────────
 
-for key in ("job_id", "messages"):
+for key in ("job_id", "messages", "pacs_skipped"):
     if key in st.session_state:
         del st.session_state[key]
 
@@ -163,8 +220,8 @@ if csv_type == "uid":
     skip_on_pacs = st.checkbox(
         "Skip series/studies already on PACS",
         value=False,
-        help="Before each C-MOVE, query the remote PACS. If the item is already there, skip it. "
-             "Requires PACS_AE_TITLE and PACS_HOST to be set in the Hermes backend .env.",
+        help="Before exporting, the gateway queries the PACS directly and removes items already present. "
+             "Requires PACS_HOST and PACS_AE_TITLE in the gateway .env.",
     )
     st.caption("UID-based export uses DICOM C-MOVE only. For ProKnow, use the patient ID format.")
 
@@ -218,14 +275,16 @@ if st.button("▶ Run", disabled=not can_run, type="primary"):
     is_dicom   = dest_type.startswith("DICOM")
 
     if csv_type == "uid":
+        if skip_on_pacs:
+            with st.spinner("Querying PACS before export…"):
+                file_bytes, n_skipped = _filter_csv_by_pacs(file_bytes, export_level.lower())
+                if n_skipped:
+                    st.session_state["pacs_skipped"] = n_skipped
+
         show_progress(
             file_bytes, file_name,
             endpoint    = "export/dicom_move_uids_file",
-            form_fields = {
-                "destination":      destination,
-                "level":            export_level.lower(),
-                "skip_if_on_pacs":  "true" if skip_on_pacs else "false",
-            },
+            form_fields = {"destination": destination, "level": export_level.lower()},
         )
     elif is_dicom:
         show_progress(
@@ -246,6 +305,6 @@ with st.sidebar:
         "**Patient CSV** — exports all studies currently in Orthanc for each patient.\n\n"
         "**Study/series CSV** — exports only the specific studies or series listed. "
         "Download this from the Studies page, filter the rows you want, then upload here.\n\n"
-        "**Skip if on PACS** — before each C-MOVE, queries the remote PACS via C-FIND "
-        "and skips anything already present. Only available in UID export mode."
+        "**Skip if on PACS** — the gateway queries the PACS directly before exporting "
+        "and removes any items already present. Only available in UID export mode."
     )
