@@ -1,0 +1,49 @@
+services:
+
+  backend:
+    build: .
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      # SQLite job-tracking DB — persisted in the named volume below
+      STATUS_DB: /data/status.db
+    volumes:
+      # Persistent job-tracking database
+      - status_db:/data
+      # Pinnacle DB (read-only host file — adjust path to match your system)
+      - type: bind
+        source: ./db/pinn_db.sqlite
+        target: /pinn/pinn_db.sqlite
+        read_only: true
+      # TLS certs for Orthanc (adjust paths to match your system)
+      # - type: bind
+      #   source: /path/to/cert.pem
+      #   target: /certs/cert.pem
+      #   read_only: true
+      # - type: bind
+      #   source: /path/to/key.pem
+      #   target: /certs/key.pem
+      #   read_only: true
+      # ProKnow credentials
+      - type: bind
+        source: ./credentials.json
+        target: /app/credentials.json
+        read_only: true
+
+  streamlit:
+    build: .
+    command: streamlit run Home.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      # Point Streamlit at the backend service, not localhost
+      BACKEND_URI: backend
+      BACKEND_PORT: "8000"
+    depends_on:
+      - backend
+
+volumes:
+  status_db:
