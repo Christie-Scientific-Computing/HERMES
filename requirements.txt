@@ -1,0 +1,33 @@
+# HERMES — Python dependencies
+# Covers both the backend (FastAPI) and gateway (FastAPI + Streamlit) packages.
+
+# Web framework / servers
+fastapi
+uvicorn[standard]
+
+# HTTP clients
+httpx
+requests
+
+# Streamlit UI
+streamlit
+
+# Data handling
+pandas
+polars
+numpy
+
+# DICOM
+pydicom
+pynetdicom
+pyorthanc
+
+# ProKnow cloud RT platform
+proknow
+
+# PostgreSQL (anonymisation DB)
+psycopg2-binary
+
+# Utilities
+python-dotenv
+pydantic

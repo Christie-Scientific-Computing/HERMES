@@ -7,6 +7,7 @@ Config: PACS_HOST, PACS_PORT, PACS_AE_TITLE, GATEWAY_AE_TITLE in gateway .env.
 """
 import os
 import logging
+import subprocess
 from dotenv import load_dotenv
 from pynetdicom import AE
 from pynetdicom.sop_class import StudyRootQueryRetrieveInformationModelFind, Verification
@@ -19,9 +20,30 @@ PACS_HOST        = os.getenv("PACS_HOST")
 PACS_PORT        = int(os.getenv("PACS_PORT", "104"))
 PACS_AE_TITLE    = os.getenv("PACS_AE_TITLE")
 GATEWAY_AE_TITLE = os.getenv("GATEWAY_AE_TITLE", "HERMES_GW")
+DGATE_EXE_PATH   = os.getenv("DGATE_EXE_PATH")
 
 # C-FIND pending status codes
 _PENDING = (0xFF00, 0xFF01)
+
+
+def _convert_uid(uid: str) -> str | None:
+    """
+    Convert a real DICOM UID to its Conquest-anonymised equivalent via dgate64.
+    Returns the original UID unchanged when DGATE_EXE_PATH is not set (passthrough/dev mode).
+    Returns None if Conquest cannot map the UID.
+    """
+    if not DGATE_EXE_PATH:
+        return uid
+    try:
+        result = subprocess.run(
+            [DGATE_EXE_PATH, f"--dolua:print(changeuid('{uid}', '', '#ukcat'))"],
+            capture_output=True, text=True, timeout=10,
+        )
+        converted = result.stdout.strip()
+        return converted if (converted and converted != "nil") else None
+    except Exception as exc:
+        logger.error("dgate64 UID conversion failed for %s: %s", uid, exc)
+        return None
 
 
 def is_configured() -> bool:
@@ -75,10 +97,14 @@ def query_series_batch(series_uids: list[str]) -> dict[str, bool | None]:
 
     try:
         for uid in series_uids:
+            anon_uid = _convert_uid(uid)
+            if anon_uid is None:
+                results[uid] = None
+                continue
             try:
                 ds = Dataset()
                 ds.QueryRetrieveLevel = "SERIES"
-                ds.SeriesInstanceUID  = uid
+                ds.SeriesInstanceUID  = anon_uid
                 ds.StudyInstanceUID   = ""
                 found = any(
                     s.Status in _PENDING
@@ -87,7 +113,7 @@ def query_series_batch(series_uids: list[str]) -> dict[str, bool | None]:
                 )
                 results[uid] = found
             except Exception as exc:
-                logger.error("C-FIND failed for series %s: %s", uid, exc)
+                logger.error("C-FIND failed for series UID: %s", exc)
                 results[uid] = None
     finally:
         assoc.release()
@@ -112,10 +138,14 @@ def query_studies_batch(study_uids: list[str]) -> dict[str, bool | None]:
 
     try:
         for uid in study_uids:
+            anon_uid = _convert_uid(uid)
+            if anon_uid is None:
+                results[uid] = None
+                continue
             try:
                 ds = Dataset()
-                ds.QueryRetrieveLevel  = "STUDY"
-                ds.StudyInstanceUID    = uid
+                ds.QueryRetrieveLevel = "STUDY"
+                ds.StudyInstanceUID   = anon_uid
                 found = any(
                     s.Status in _PENDING
                     for s, _ in assoc.send_c_find(ds, StudyRootQueryRetrieveInformationModelFind)
@@ -123,7 +153,7 @@ def query_studies_batch(study_uids: list[str]) -> dict[str, bool | None]:
                 )
                 results[uid] = found
             except Exception as exc:
-                logger.error("C-FIND failed for study %s: %s", uid, exc)
+                logger.error("C-FIND failed for study UID: %s", exc)
                 results[uid] = None
     finally:
         assoc.release()
