@@ -158,7 +158,7 @@ class Importer():
         # Get series info (all data local at this point)
         series_list = find_series(client=self.ot, query=study_query["Query"])
         if not series_list:
-            logger.error(f"No series found for MRN {mrn} locally after C-MOVE")
+            logger.error("No series found locally after C-MOVE")
             return
 
         # Group by study

@@ -1,0 +1,18 @@
+[project]
+name = "hermes-gateway"
+version = "0.1.0"
+description = "User-facing API gateway for HERMES"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "python-dotenv",
+    "streamlit",
+    "pandas",
+    "pynetdicom",
+    "psycopg2-binary",
+]
+
+[tool.fastapi]
+entrypoint = "main:app"

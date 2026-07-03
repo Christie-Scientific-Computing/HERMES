@@ -10,7 +10,7 @@ import numpy as np
 from pydantic import BaseModel
 from pathlib import Path
 from backend.src.retrieve.logic import Importer
-from fastapi import APIRouter
+from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from backend.src.status.db_client import StatusDB
 import threading
@@ -179,6 +179,25 @@ async def find_patient(body: Request) -> Response:
     except Exception as e:
         return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': req['mrn'], 'error': str(e)})}\n\n"
     
+
+
+@router.post("/batch_import_file")
+async def batch_import_file(
+    file: UploadFile = File(..., description="CSV with a patient_id column"),
+    job_id: str = Form(...),
+    import_level: str = Form("Planning data"),
+):
+    """Accept a CSV file upload and stream import progress via SSE. Used by the gateway frontend."""
+    tmp_dir = Path("./tmp")
+    tmp_dir.mkdir(exist_ok=True)
+    tmp_path = tmp_dir / f"{job_id}_{file.filename}"
+    tmp_path.write_bytes(await file.read())
+
+    return StreamingResponse(
+        import_event_stream(job_id, str(tmp_path), import_level),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.post("/cancel/{job_id}")

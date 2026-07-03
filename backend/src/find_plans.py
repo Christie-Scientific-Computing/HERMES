@@ -54,7 +54,7 @@ def query_mosaiq_datadirector(client, patient_id: str) -> bool:
         try:
             studies = modality.find(study_query)
         except Exception as e:
-            logger.error(f'Could not find {patient_id} in {src}')
+            logger.error(f'Could not find patient in {src}')
             continue
         study_uids = [s['StudyInstanceUID'] for s in studies['answers'] if 'StudyInstanceUID' in s]
         
