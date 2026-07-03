@@ -1,13 +1,18 @@
 """
 Import page — fetch RT planning data into Orthanc from Mosaiq / Pinnacle.
 """
+import csv
 import os
+import sys
 import json
 import uuid
 import threading
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import anon
 
 load_dotenv()
 
@@ -57,8 +62,9 @@ def show_progress(file_bytes: bytes, file_name: str, import_level: str):
     def stop_job():
         requests.post(f"{BASE_URL}/import/cancel/{st.session_state['job_id']}", timeout=5)
 
-    messages = st.session_state.get("messages", [])
-    terminal = next((m for m in messages if m.get("type") == "cancelled" or m.get("done")), None)
+    messages     = st.session_state.get("messages", [])
+    real_to_anon = st.session_state.get("real_to_anon", {})
+    terminal     = next((m for m in messages if m.get("type") == "cancelled" or m.get("done")), None)
 
     if terminal and terminal.get("type") == "cancelled":
         label, state = "Cancelled", "error"
@@ -87,26 +93,30 @@ def show_progress(file_bytes: bytes, file_name: str, import_level: str):
             status.write(f"Importing {msg['total']} patients")
         elif t == "progress":
             patient_slots[msg["current"]] = status.empty()
-            patient_slots[msg["current"]].markdown(f"⏳ `{msg['current']}`")
+            display = real_to_anon.get(msg["current"], msg["current"])
+            patient_slots[msg["current"]].markdown(f"⏳ `{display}`")
         elif t == "success":
             if msg["mrn"] in patient_slots:
-                patient_slots[msg["mrn"]].markdown(f"✅ `{msg['mrn']}` — {msg['execution_time']}s")
+                display = real_to_anon.get(msg["mrn"], msg["mrn"])
+                patient_slots[msg["mrn"]].markdown(f"✅ `{display}` — {msg['execution_time']}s")
         elif t == "error":
             errors.append(msg)
             if msg["mrn"] in patient_slots:
-                patient_slots[msg["mrn"]].markdown(f"❌ `{msg['mrn']}` — {msg['error']}")
+                display = real_to_anon.get(msg["mrn"], msg["mrn"])
+                patient_slots[msg["mrn"]].markdown(f"❌ `{display}` — {msg['error']}")
         elif t == "cancelled" or msg.get("done"):
             break
 
     if errors:
         with st.expander(f"{len(errors)} error{'s' if len(errors) > 1 else ''}"):
             for e in errors:
-                st.code(f"{e['mrn']}: {e['error']}")
+                display = real_to_anon.get(e["mrn"], e["mrn"])
+                st.code(f"{display}: {e['error']}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-for key in ("job_id", "messages"):
+for key in ("job_id", "messages", "real_to_anon"):
     if key in st.session_state:
         del st.session_state[key]
 
@@ -122,7 +132,30 @@ if not uploaded:
     st.warning("⚠️ Upload a CSV before running.")
 
 if st.button("▶ Run", disabled=not uploaded, type="primary"):
-    show_progress(uploaded.getvalue(), uploaded.name, import_level)
+    file_bytes = uploaded.getvalue()
+    file_name  = uploaded.name
+
+    if anon.is_configured():
+        content  = file_bytes.decode("utf-8", errors="replace")
+        reader   = csv.DictReader(content.splitlines())
+        anon_ids = list(dict.fromkeys(
+            row["patient_id"].strip()
+            for row in reader
+            if row.get("patient_id") and not row["patient_id"].strip().startswith("#")
+        ))
+        try:
+            anon_to_real = anon.lookup_real_ids(anon_ids)
+        except anon.AnonLookupError as exc:
+            st.error(str(exc))
+            st.stop()
+        except Exception as exc:
+            st.error(f"Anonymisation DB error: {exc}")
+            st.stop()
+        real_to_anon = {v: k for k, v in anon_to_real.items()}
+        st.session_state["real_to_anon"] = real_to_anon
+        file_bytes = anon.rewrite_csv_patient_ids(file_bytes, anon_to_real)
+
+    show_progress(file_bytes, file_name, import_level)
 
 with st.sidebar:
     st.header("ℹ️ Info")

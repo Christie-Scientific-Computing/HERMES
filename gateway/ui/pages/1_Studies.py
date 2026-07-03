@@ -7,6 +7,7 @@ Results include a downloadable CSV with study and series UIDs for use in the Exp
 import io
 import csv
 import os
+import sys
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -16,6 +17,10 @@ load_dotenv()
 GATEWAY_URI  = os.getenv("GATEWAY_URI", "localhost")
 GATEWAY_PORT = os.getenv("GATEWAY_PORT", "8001")
 BASE_URL     = f"http://{GATEWAY_URI}:{GATEWAY_PORT}"
+
+# Anonymisation module lives one directory up from ui/pages/
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import anon
 
 st.set_page_config(page_title="Studies — HERMES", page_icon="🪽", layout="wide")
 st.title("Studies")
@@ -153,6 +158,18 @@ def _collect_modalities(patient_rows: list[dict]) -> list[str]:
                 if m:
                     seen.add(m)
     return sorted(seen)
+
+
+def _anonymise_study_list(studies: list[dict], real_to_anon: dict[str, str]) -> list[dict]:
+    """
+    Replace patient_id with the anonymised ID and blank patient_name.
+    real_to_anon may be a partial mapping; missing IDs fall back to "[unknown]".
+    """
+    result = []
+    for s in studies:
+        real_pid = s.get("patient_id") or ""
+        result.append({**s, "patient_id": real_to_anon.get(real_pid, "[unknown]"), "patient_name": ""})
+    return result
 
 
 def apply_filters(
@@ -396,8 +413,23 @@ if mode == "Search form":
 
     if submitted:
         params: dict = {}
+        anon_to_real: dict[str, str] = {}
+
         if patient_id.strip():
-            params["patient_id"] = patient_id.strip()
+            anon_pid = patient_id.strip()
+            if anon.is_configured():
+                try:
+                    anon_to_real = anon.lookup_real_ids([anon_pid])
+                    params["patient_id"] = anon_to_real[anon_pid]
+                except anon.AnonLookupError as exc:
+                    st.error(str(exc))
+                    st.stop()
+                except Exception as exc:
+                    st.error(f"Anonymisation DB error: {exc}")
+                    st.stop()
+            else:
+                params["patient_id"] = anon_pid
+
         if date_from or date_to:
             f = date_from.strftime("%Y%m%d") if date_from else ""
             t = date_to.strftime("%Y%m%d")   if date_to   else ""
@@ -410,6 +442,20 @@ if mode == "Search form":
 
         with st.spinner("Searching…"):
             studies = fetch_studies(params)
+
+        # Anonymise: convert all real patient IDs in results back to anon IDs
+        if anon.is_configured() and studies:
+            real_pids = [s.get("patient_id") for s in studies if s.get("patient_id")]
+            # Use the mapping we already have; look up any extras (e.g. date-only search)
+            known_real = set(anon_to_real.values())
+            extra_real = [p for p in real_pids if p not in known_real]
+            real_to_anon = {v: k for k, v in anon_to_real.items()}
+            if extra_real:
+                try:
+                    real_to_anon.update(anon.lookup_anon_ids(extra_real))
+                except Exception as exc:
+                    st.warning(f"Could not reverse-lookup some patient IDs: {exc}")
+            studies = _anonymise_study_list(studies, real_to_anon)
 
         # Group by patient_id for uniform display
         by_patient: dict[str, list] = {}
@@ -437,17 +483,35 @@ elif mode == "Batch CSV":
             for row in reader
             if row.get("patient_id") and not row["patient_id"].strip().startswith("#")
         ]
-        unique_ids = list(dict.fromkeys(all_ids))  # preserve order, deduplicate
+        unique_anon_ids = list(dict.fromkeys(all_ids))  # preserve order, deduplicate
+
+        # Anonymisation: convert all anon IDs → real IDs in one batch query
+        if anon.is_configured():
+            try:
+                anon_to_real = anon.lookup_real_ids(unique_anon_ids)
+            except anon.AnonLookupError as exc:
+                st.error(str(exc))
+                st.stop()
+            except Exception as exc:
+                st.error(f"Anonymisation DB error: {exc}")
+                st.stop()
+            real_to_anon = {v: k for k, v in anon_to_real.items()}
+        else:
+            anon_to_real = {pid: pid for pid in unique_anon_ids}
+            real_to_anon = {}
 
         # Clear stale PACS results when re-searching
         st.session_state.pop("pacs_status", None)
 
         results = []
-        prog     = st.progress(0.0, text="Searching…")
-        for i, pid in enumerate(unique_ids):
-            prog.progress((i + 0.5) / len(unique_ids), text=f"Searching `{pid}`…")
-            studies = fetch_studies({"patient_id": pid})
-            results.append({"patient_id": pid, "studies": studies})
+        prog = st.progress(0.0, text="Searching…")
+        for i, anon_pid in enumerate(unique_anon_ids):
+            prog.progress((i + 0.5) / len(unique_anon_ids), text=f"Searching `{anon_pid}`…")
+            real_pid = anon_to_real.get(anon_pid, anon_pid)
+            studies  = fetch_studies({"patient_id": real_pid})
+            if anon.is_configured():
+                studies = _anonymise_study_list(studies, real_to_anon)
+            results.append({"patient_id": anon_pid, "studies": studies})
 
         prog.empty()
         st.session_state["results"]      = results

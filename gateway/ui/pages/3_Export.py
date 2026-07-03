@@ -9,12 +9,16 @@ Accepts two CSV formats:
 import csv
 import io
 import os
+import sys
 import json
 import uuid
 import threading
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import anon
 
 load_dotenv()
 
@@ -124,8 +128,9 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields:
     def stop_job():
         requests.post(f"{BASE_URL}/export/cancel/{st.session_state['job_id']}", timeout=5)
 
-    messages = st.session_state.get("messages", [])
-    terminal = next((m for m in messages if m.get("type") == "cancelled" or m.get("done")), None)
+    messages     = st.session_state.get("messages", [])
+    real_to_anon = st.session_state.get("real_to_anon", {})
+    terminal     = next((m for m in messages if m.get("type") == "cancelled" or m.get("done")), None)
 
     if terminal and terminal.get("type") == "cancelled":
         label, state = "Cancelled", "error"
@@ -157,26 +162,30 @@ def show_progress(file_bytes: bytes, file_name: str, endpoint: str, form_fields:
             status.write(f"Exporting {msg['total']} item{'s' if msg['total'] != 1 else ''}")
         elif t == "progress":
             patient_slots[msg["current"]] = status.empty()
-            patient_slots[msg["current"]].markdown(f"⏳ `{msg['current']}`")
+            display = real_to_anon.get(msg["current"], msg["current"])
+            patient_slots[msg["current"]].markdown(f"⏳ `{display}`")
         elif t == "success":
             if msg["mrn"] in patient_slots:
-                patient_slots[msg["mrn"]].markdown(f"✅ `{msg['mrn']}` — {msg['execution_time']}s")
+                display = real_to_anon.get(msg["mrn"], msg["mrn"])
+                patient_slots[msg["mrn"]].markdown(f"✅ `{display}` — {msg['execution_time']}s")
         elif t == "error":
             errors.append(msg)
             if msg["mrn"] in patient_slots:
-                patient_slots[msg["mrn"]].markdown(f"❌ `{msg['mrn']}` — {msg['error']}")
+                display = real_to_anon.get(msg["mrn"], msg["mrn"])
+                patient_slots[msg["mrn"]].markdown(f"❌ `{display}` — {msg['error']}")
         elif t == "cancelled" or msg.get("done"):
             break
 
     if errors:
         with st.expander(f"{len(errors)} error{'s' if len(errors) > 1 else ''}"):
             for e in errors:
-                st.code(f"{e['mrn']}: {e['error']}")
+                display = real_to_anon.get(e["mrn"], e["mrn"])
+                st.code(f"{display}: {e['error']}")
 
 
 # ── CSV upload and type detection ─────────────────────────────────────────────
 
-for key in ("job_id", "messages", "pacs_skipped"):
+for key in ("job_id", "messages", "pacs_skipped", "real_to_anon"):
     if key in st.session_state:
         del st.session_state[key]
 
@@ -286,18 +295,38 @@ if st.button("▶ Run", disabled=not can_run, type="primary"):
             endpoint    = "export/dicom_move_uids_file",
             form_fields = {"destination": destination, "level": export_level.lower()},
         )
-    elif is_dicom:
-        show_progress(
-            file_bytes, file_name,
-            endpoint    = "export/dicom_move_file",
-            form_fields = {"destination": destination},
-        )
-    else:
-        show_progress(
-            file_bytes, file_name,
-            endpoint    = "export/proknow_upload_file",
-            form_fields = {"collection": destination},
-        )
+    elif csv_type == "patient":
+        if anon.is_configured():
+            content  = file_bytes.decode("utf-8", errors="replace")
+            reader   = csv.DictReader(content.splitlines())
+            anon_ids = list(dict.fromkeys(
+                row["patient_id"].strip()
+                for row in reader
+                if row.get("patient_id") and not row["patient_id"].strip().startswith("#")
+            ))
+            try:
+                anon_to_real = anon.lookup_real_ids(anon_ids)
+            except anon.AnonLookupError as exc:
+                st.error(str(exc))
+                st.stop()
+            except Exception as exc:
+                st.error(f"Anonymisation DB error: {exc}")
+                st.stop()
+            st.session_state["real_to_anon"] = {v: k for k, v in anon_to_real.items()}
+            file_bytes = anon.rewrite_csv_patient_ids(file_bytes, anon_to_real)
+
+        if is_dicom:
+            show_progress(
+                file_bytes, file_name,
+                endpoint    = "export/dicom_move_file",
+                form_fields = {"destination": destination},
+            )
+        else:
+            show_progress(
+                file_bytes, file_name,
+                endpoint    = "export/proknow_upload_file",
+                form_fields = {"collection": destination},
+            )
 
 with st.sidebar:
     st.header("ℹ️ Info")

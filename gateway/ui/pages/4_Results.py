@@ -3,11 +3,15 @@ Results page — inspect job summaries and per-patient event timelines.
 """
 import os
 import csv
+import sys
 import json
 import requests
 import streamlit as st
 from collections import defaultdict
 from dotenv import load_dotenv
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+import anon
 
 load_dotenv()
 
@@ -37,8 +41,17 @@ if mode == "By job ID":
                 if not r_sum.ok:
                     st.error(f"Job not found ({r_sum.status_code}).")
                     st.stop()
+                real_pids = r_pts.json().get("patients", []) if r_pts.ok else []
+                if anon.is_configured() and real_pids:
+                    try:
+                        real_to_anon = anon.lookup_anon_ids(real_pids)
+                    except Exception:
+                        real_to_anon = {}
+                else:
+                    real_to_anon = {}
                 st.session_state["job_summary"] = r_sum.json()
-                st.session_state["patient_ids"] = r_pts.json().get("patients", []) if r_pts.ok else []
+                st.session_state["patient_ids"] = real_pids
+                st.session_state["real_to_anon"] = real_to_anon
                 st.session_state["mode"]        = "job"
                 st.session_state["job_id"]      = job_id
             except Exception as exc:
@@ -47,16 +60,31 @@ if mode == "By job ID":
 else:
     uploaded = st.file_uploader("Patient CSV", type=["csv"], help="Must have a patient_id column")
     if uploaded:
-        text   = uploaded.getvalue().decode("utf-8", errors="replace")
-        reader = csv.DictReader(text.splitlines())
-        ids    = [
+        text     = uploaded.getvalue().decode("utf-8", errors="replace")
+        reader   = csv.DictReader(text.splitlines())
+        anon_ids = list(dict.fromkeys(
             row["patient_id"].strip()
             for row in reader
             if row.get("patient_id") and not row["patient_id"].strip().startswith("#")
-        ]
-        if ids:
-            st.session_state["patient_ids"] = ids
-            st.session_state["mode"]        = "csv"
+        ))
+        if anon_ids:
+            if anon.is_configured():
+                try:
+                    anon_to_real = anon.lookup_real_ids(anon_ids)
+                except anon.AnonLookupError as exc:
+                    st.error(str(exc))
+                    st.stop()
+                except Exception as exc:
+                    st.error(f"Anonymisation DB error: {exc}")
+                    st.stop()
+                real_ids     = [anon_to_real[aid] for aid in anon_ids]
+                real_to_anon = {v: k for k, v in anon_to_real.items()}
+            else:
+                real_ids     = anon_ids
+                real_to_anon = {}
+            st.session_state["patient_ids"]  = real_ids
+            st.session_state["real_to_anon"] = real_to_anon
+            st.session_state["mode"]         = "csv"
             st.session_state.pop("job_summary", None)
             st.session_state.pop("job_id", None)
 
@@ -73,9 +101,10 @@ if "job_summary" in st.session_state:
     c2.metric("Failed",    failure_total)
 
 if "patient_ids" in st.session_state:
-    ids      = st.session_state["patient_ids"]
-    job_id   = st.session_state.get("job_id")
-    use_job  = st.session_state.get("mode") == "job"
+    ids          = st.session_state["patient_ids"]
+    real_to_anon = st.session_state.get("real_to_anon", {})
+    job_id       = st.session_state.get("job_id")
+    use_job      = st.session_state.get("mode") == "job"
 
     st.subheader(f"{len(ids)} patient{'s' if len(ids) != 1 else ''}")
     show_failed_only = st.checkbox("Show failed only", value=False)
@@ -83,6 +112,7 @@ if "patient_ids" in st.session_state:
     failure_counts: dict[str, int] = defaultdict(int)
 
     for mrn in ids:
+        display_id = real_to_anon.get(mrn, mrn)
         try:
             url = (
                 f"{BASE_URL}/results/patient/{job_id}/{mrn}"
@@ -103,7 +133,7 @@ if "patient_ids" in st.session_state:
                 failure_counts[e.get("stage") or "unknown"] += 1
                 break
 
-        label = f"{mrn} — {'❌ FAILED' if failed else '✅ OK'} ({len(events)} events)"
+        label = f"{display_id} — {'❌ FAILED' if failed else '✅ OK'} ({len(events)} events)"
         with st.expander(label):
             if not events:
                 st.write("No events recorded.")

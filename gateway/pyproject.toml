@@ -11,6 +11,7 @@ dependencies = [
     "streamlit",
     "pandas",
     "pynetdicom",
+    "psycopg2-binary",
 ]
 
 [tool.fastapi]
