@@ -1,4 +1,4 @@
-# HERMES:
+<img src='./static/hermes-logo.svg'>
 ### Handles Everything: Receive, Modify, Export Stuff
 
 Web-app for exporting plans from all data sources (Pinnacle, Raystation, Mosaiq).
