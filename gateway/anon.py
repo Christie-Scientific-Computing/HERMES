@@ -32,15 +32,15 @@ ANON_CONFIG = os.getenv("ANON_CONFIG")
 
 
 _SQL_ANON_TO_REAL = """
-    SELECT key_value
+    SELECT patient_id as anon_id, key_value as real_id
     FROM   key_value
-    WHERE  patient_id = ANY(%s) AND key_type_id = 1
+    WHERE  patient_id = ANY(%s::bigint[]) AND key_type_id = 1
 """
 
 _SQL_REAL_TO_ANON = """
-    SELECT key_value
+    SELECT key_value as real_id, patient_id as anon_id
     FROM   key_value
-    WHERE  patient_id = ANY(%s) AND key_type_id = 0
+    WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ class AnonDatabase():
     def _connect(self):
         """Connect to remote database"""
         self.dbConnectString = f"host='{self.ServerName}' dbname='{self.DBName}' user='{self.UserName}' password='{self.PassWd}'"
-        print('PASSWORD', str(self.PassWd), flush=True)
+        
         try:
             return psycopg2.connect(
                 dbname=self.DBName,
@@ -135,7 +135,8 @@ def lookup_real_ids(anon_ids: list[str]) -> dict[str, str]:
     finally:
         conn.close()
 
-    mapping = {row[0]: row[1] for row in rows}
+    mapping = {str(row[0]): str(row[1]) for row in rows}
+    print(mapping, flush=True)
     missing = [aid for aid in unique if aid not in mapping]
     if missing:
         raise AnonLookupError(
@@ -166,7 +167,7 @@ def lookup_anon_ids(real_ids: list[str]) -> dict[str, str]:
     finally:
         conn.close()
 
-    mapping = {row[0]: row[1] for row in rows}
+    mapping = {str(row[0]): str(row[1]) for row in rows}
     # Fill in a safe placeholder for any unmapped real IDs
     for rid in unique:
         if rid not in mapping:
