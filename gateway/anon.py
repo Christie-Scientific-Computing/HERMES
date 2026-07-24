@@ -16,43 +16,80 @@ import io as _io
 import logging
 import psycopg2
 from dotenv import load_dotenv
+import xmltodict
+from cryptography.fernet import Fernet
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-ANON_DB_HOST = os.getenv("ANON_DB_HOST")
-ANON_DB_PORT = int(os.getenv("ANON_DB_PORT", "5432"))
-ANON_DB_NAME = os.getenv("ANON_DB_NAME", "anon_mapping")
-ANON_DB_USER = os.getenv("ANON_DB_USER", "gateway")
-ANON_DB_PASS = os.getenv("ANON_DB_PASS", "")
+ANON_CONFIG = os.getenv("ANON_CONFIG")
 
 
-# ── SQL queries ── EDIT THESE to match your database schema ──────────────────
+# ── SQL queries ──────────────────
 #
 # anon_id : the anonymised patient identifier that external users submit
 # real_id : the real patient ID stored in HERMES / Orthanc / StatusDB
-#
-# Both queries use PostgreSQL's ANY operator for efficient batch lookups.
+
 
 _SQL_ANON_TO_REAL = """
-    SELECT anon_id, real_id
-    FROM   anon_mapping
-    WHERE  anon_id = ANY(%s)
+    SELECT patient_id as anon_id, key_value as real_id
+    FROM   key_value
+    WHERE  patient_id = ANY(%s::bigint[]) AND key_type_id = 1
 """
-# TODO: replace `anon_mapping` with your table name
-# TODO: replace `anon_id`      with your anonymised-ID column name
-# TODO: replace `real_id`      with your real-patient-ID column name
 
 _SQL_REAL_TO_ANON = """
-    SELECT real_id, anon_id
-    FROM   anon_mapping
-    WHERE  real_id = ANY(%s)
+    SELECT key_value as real_id, patient_id as anon_id
+    FROM   key_value
+    WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
 """
-# TODO: replace `anon_mapping` with your table name
-# TODO: replace `real_id`      with your real-patient-ID column name
-# TODO: replace `anon_id`      with your anonymised-ID column name
 
 # ─────────────────────────────────────────────────────────────────────────────
+class AnonDatabase():
+    """Class to read key database configuration file"""
+
+    def __init__(self):
+        """If config file is set, read the XML file to populate the data and decode the username and password"""
+        self.filePath = ANON_CONFIG
+        self.key = "RNLMk5u0H8Ns4Avewnmf2XzsuNmu0yhMmSgiCvtHy9o="
+
+        ## Parse config file
+        with open(self.filePath) as fd:
+            doc = xmltodict.parse(fd.read())
+
+        topLevel = list(doc.keys())[0]
+        self.ServerName = doc[topLevel]['keyDataBase']['dataBaseServer']#.encode('utf-8')
+        self.ServerIP = doc[topLevel]['keyDataBase']['dataBaseIP']#.encode('utf-8')
+        self.DBName = doc[topLevel]['keyDataBase']['dataBaseName']#.encode('utf-8')
+
+        self.Port = doc[topLevel]['keyDataBase']['dataBasePort']#.encode('utf-8')
+        self.UserName = self.decodeString(doc[topLevel]['keyDataBase']['dataBaseUserName']).decode('utf-8')
+        self.PassWd = self.decodeString(doc[topLevel]['keyDataBase']['dataBasePassword']).decode('utf-8')
+
+    def decodeString(self,inStr):
+        """Decode the input string using PyCrypto libraries"""
+        decryption_suite = Fernet(self.key)
+        plainText = decryption_suite.decrypt(inStr)
+        return plainText
+
+    def encodeString(self, inStr):
+        """Encode the input string using PyCrypto libraries"""
+        encryption_suite = Fernet(self.key)
+        cipherText = encryption_suite.encrypt(inStr)
+        return cipherText
+    
+    def _connect(self):
+        """Connect to remote database"""
+        self.dbConnectString = f"host='{self.ServerName}' dbname='{self.DBName}' user='{self.UserName}' password='{self.PassWd}'"
+        
+        try:
+            return psycopg2.connect(
+                dbname=self.DBName,
+                user=self.UserName,
+                password=self.PassWd,
+                host=self.ServerIP,
+                port=self.Port)    #NOTE - needs link-local address entry in pg_hba.conf -- unsure if this is still the case
+        except Exception as exc:
+            raise ConnectionError(f"Cannot connect to anonymisation DB (keyDataBase) specified in {ANON_CONFIG} {exc}") from exc
 
 
 class AnonLookupError(Exception):
@@ -61,21 +98,21 @@ class AnonLookupError(Exception):
 
 def is_configured() -> bool:
     """Return True if the anonymisation DB is configured in the environment."""
-    return bool(ANON_DB_HOST)
+    return bool(ANON_CONFIG)
 
 
-def _connect():
-    try:
-        return psycopg2.connect(
-            host=ANON_DB_HOST,
-            port=ANON_DB_PORT,
-            dbname=ANON_DB_NAME,
-            user=ANON_DB_USER,
-            password=ANON_DB_PASS,
-            connect_timeout=5,
-        )
-    except Exception as exc:
-        raise ConnectionError(f"Cannot connect to anonymisation DB at {ANON_DB_HOST}: {exc}") from exc
+# def _connect():
+#     try:
+#         return psycopg2.connect(
+#             host=ANON_DB_HOST,
+#             port=ANON_DB_PORT,
+#             dbname=ANON_DB_NAME,
+#             user=ANON_DB_USER,
+#             password=ANON_DB_PASS,
+#             connect_timeout=5,
+#         )
+#     except Exception as exc:
+#         raise ConnectionError(f"Cannot connect to anonymisation DB at {ANON_DB_HOST}: {exc}") from exc
 
 
 def lookup_real_ids(anon_ids: list[str]) -> dict[str, str]:
@@ -89,7 +126,8 @@ def lookup_real_ids(anon_ids: list[str]) -> dict[str, str]:
         return {}
 
     unique = list(dict.fromkeys(anon_ids))
-    conn = _connect()
+    anonDB = AnonDatabase()
+    conn = anonDB._connect()
     try:
         with conn.cursor() as cur:
             cur.execute(_SQL_ANON_TO_REAL, (unique,))
@@ -97,7 +135,8 @@ def lookup_real_ids(anon_ids: list[str]) -> dict[str, str]:
     finally:
         conn.close()
 
-    mapping = {row[0]: row[1] for row in rows}
+    mapping = {str(row[0]): str(row[1]) for row in rows}
+    print(mapping, flush=True)
     missing = [aid for aid in unique if aid not in mapping]
     if missing:
         raise AnonLookupError(
@@ -119,7 +158,8 @@ def lookup_anon_ids(real_ids: list[str]) -> dict[str, str]:
         return {}
 
     unique = list(dict.fromkeys(real_ids))
-    conn = _connect()
+    anonDB = AnonDatabase()
+    conn = anonDB._connect()
     try:
         with conn.cursor() as cur:
             cur.execute(_SQL_REAL_TO_ANON, (unique,))
@@ -127,7 +167,7 @@ def lookup_anon_ids(real_ids: list[str]) -> dict[str, str]:
     finally:
         conn.close()
 
-    mapping = {row[0]: row[1] for row in rows}
+    mapping = {str(row[0]): str(row[1]) for row in rows}
     # Fill in a safe placeholder for any unmapped real IDs
     for rid in unique:
         if rid not in mapping:
