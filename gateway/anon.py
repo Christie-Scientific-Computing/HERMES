@@ -53,15 +53,17 @@ class AnonDatabase():
         self.key = "RNLMk5u0H8Ns4Avewnmf2XzsuNmu0yhMmSgiCvtHy9o="
 
         ## Parse config file
-        with open(self.filePath+"\\"+self.fileName) as fd:
+        with open(self.filePath) as fd:
             doc = xmltodict.parse(fd.read())
 
         topLevel = list(doc.keys())[0]
-        self.ServerName = doc[topLevel]['keyDataBase']['dataBaseServer'].encode('utf-8')
-        self.DBName = doc[topLevel]['keyDataBase']['dataBaseName'].encode('utf-8')
-        self.Port = doc[topLevel]['keyDataBase']['dataBasePort'].encode('utf-8')
-        self.UserName = self.decodeString(doc[topLevel]['keyDataBase']['dataBaseUserName'].encode('utf-8'))
-        self.PassWd = self.decodeString(doc[topLevel]['keyDataBase']['dataBasePassword'].encode('utf-8'))
+        self.ServerName = doc[topLevel]['keyDataBase']['dataBaseServer']#.encode('utf-8')
+        self.ServerIP = doc[topLevel]['keyDataBase']['dataBaseIP']#.encode('utf-8')
+        self.DBName = doc[topLevel]['keyDataBase']['dataBaseName']#.encode('utf-8')
+
+        self.Port = doc[topLevel]['keyDataBase']['dataBasePort']#.encode('utf-8')
+        self.UserName = self.decodeString(doc[topLevel]['keyDataBase']['dataBaseUserName']).decode('utf-8')
+        self.PassWd = self.decodeString(doc[topLevel]['keyDataBase']['dataBasePassword']).decode('utf-8')
 
     def decodeString(self,inStr):
         """Decode the input string using PyCrypto libraries"""
@@ -77,9 +79,15 @@ class AnonDatabase():
     
     def _connect(self):
         """Connect to remote database"""
-        self.dbConnectString = "host='"+self.ukCATServerName+"' dbname='"+self.ukCATDBName+"' user='"+self.ukCATUserName+"' password='"+self.ukCATPassWd+"'"
+        self.dbConnectString = f"host='{self.ServerName}' dbname='{self.DBName}' user='{self.UserName}' password='{self.PassWd}'"
+        print('PASSWORD', str(self.PassWd), flush=True)
         try:
-            return psycopg2.connect(self.dbConnectString)    #NOTE - needs link-local address entry in pg_hba.conf -- unsure if this is still the case
+            return psycopg2.connect(
+                dbname=self.DBName,
+                user=self.UserName,
+                password=self.PassWd,
+                host=self.ServerIP,
+                port=self.Port)    #NOTE - needs link-local address entry in pg_hba.conf -- unsure if this is still the case
         except Exception as exc:
             raise ConnectionError(f"Cannot connect to anonymisation DB (keyDataBase) specified in {ANON_CONFIG} {exc}") from exc
 
