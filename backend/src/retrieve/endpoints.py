@@ -156,8 +156,7 @@ async def single_import(body: Request):
     try:
         res = imp.handle_patient(req['mrn'])
         response = Response(mrn=req['mrn'], **res)
-        return f"data: {json.dumps({
-                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
+        return f"data: {json.dumps({'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
 
     except Exception as e:
         return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': req['mrn'], 'error': str(e)})}\n\n"
