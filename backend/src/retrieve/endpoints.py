@@ -102,8 +102,7 @@ async def import_event_stream(job_id: str, path_to_csv: str, import_level: str):
                 except Exception as e:
                     logger.warning("Status DB write failed: %s", e)
 
-            yield f"data: {json.dumps({
-                'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
+            yield f"data: {json.dumps({'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
 
         except Exception as e:
             logger.error("Failed to import patient %s: %s", patient_id, e)
@@ -173,8 +172,7 @@ async def find_patient(body: Request) -> Response:
     try:
         res = imp.find_patient(req['mrn'])
         response = Response(mrn=req['mrn'], **res)
-        return f"data: {json.dumps({
-                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
+        return f"data: {json.dumps({'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
 
     except Exception as e:
         return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': req['mrn'], 'error': str(e)})}\n\n"
