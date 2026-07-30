@@ -40,7 +40,7 @@ def import_single(mrn: str, import_level: str) -> dict:
         "job_id": new_job_id(), "mrn": mrn, "import_level": import_level,
     }, timeout=(10, None))
     resp.raise_for_status()
-    return _parse_sse_line(resp.text)
+    return resp.json()
 
 
 def import_batch_file(file_name: str, file_bytes: bytes, import_level: str) -> list[dict]:

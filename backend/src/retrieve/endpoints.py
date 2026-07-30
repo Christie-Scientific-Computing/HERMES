@@ -2,7 +2,6 @@
 Endpoints for the import page
 """
 import os
-import json
 import time
 import logging
 import numpy as np
@@ -108,8 +107,7 @@ async def single_import(body: Request):
         imp = Importer(req['import_level'])
         res = imp.handle_patient(real_mrn)
         response = Response(mrn=anon.to_display_id(real_mrn), **res)
-        return f"data: {json.dumps({
-                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
+        return {'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()}
 
     except Exception as e:
         logger.exception("single_import failed for %s", req['mrn'])
@@ -117,7 +115,7 @@ async def single_import(body: Request):
             display_mrn = anon.to_display_id(real_mrn)
         except Exception:
             display_mrn = "[unknown]"
-        return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn, 'error': str(e)})}\n\n"
+        return {'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn, 'error': str(e)}
 
 
 @router.get('/find_patient')

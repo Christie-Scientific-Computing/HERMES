@@ -3,7 +3,6 @@ Endpoints for the export page
 """
 import os
 import csv as csv_mod
-import json
 import logging
 import time
 import numpy as np
@@ -181,8 +180,7 @@ async def proknow_upload_patient(body: Request):
             except Exception as e:
                 logger.warning("Status DB write failed: %s", e)
 
-        return f"data: {json.dumps({
-                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
+        return {'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()}
 
     except Exception as e:
         # Record failure
@@ -192,10 +190,7 @@ async def proknow_upload_patient(body: Request):
             except Exception as ex:
                 logger.warning("Status DB write failed: %s", ex)
 
-        return f"data: {json.dumps({'type': 'error',
-                'execution_time': np.round(time.time() - start, 2),
-                'mrn': display_mrn,
-                'error': str(e)})}\n\n"
+        return {'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn, 'error': str(e)}
 
 
 
