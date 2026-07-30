@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from backend.src.identity import anon
 from backend.src.results.endpoints import router as results_router, status_db
 
 REAL_MRN = "500123"
@@ -76,3 +77,16 @@ def test_patient_timeline_all_jobs_boundary(client, job_id):
 def test_unknown_anon_id_returns_422(client, job_id):
     resp = client.get(f"/results/patient/{job_id}/999999999")
     assert resp.status_code == 422
+
+
+def test_anon_db_unreachable_returns_503_not_bare_500(client, job_id, monkeypatch):
+    """If the anon-mapping DB itself is down, callers must get a clean 503
+    with a detail message, not FastAPI's generic no-detail 500."""
+    monkeypatch.setattr(anon, "ANON_DB_PORT", 1)
+    monkeypatch.setattr(anon, "_pool", None)
+    try:
+        resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+        assert resp.status_code == 503
+        assert resp.json()["detail"]  # non-empty detail, not a bare error page
+    finally:
+        monkeypatch.setattr(anon, "_pool", None)

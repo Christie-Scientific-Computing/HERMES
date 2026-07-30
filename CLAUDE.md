@@ -12,19 +12,13 @@ There are two independently-run components: the **backend** (internal network, o
 
 ### Backend
 
-Two processes must run concurrently:
-
 ```bash
-# Backend (FastAPI)
 fastapi run backend/main.py
 # or with hot reload:
 python -m uvicorn backend.main:app --reload
-
-# Frontend (Streamlit) — separate terminal
-streamlit run Home.py
 ```
 
-Backend requires `DATABASE_URL` env var (a Postgres DSN) set before it will start — it exits immediately otherwise. On startup it also runs Alembic migrations against that database (`backend/src/database.py` → `alembic upgrade head`), so a fresh/empty Postgres database is all that's needed; no manual schema setup.
+Backend requires `DATABASE_URL` env var (a Postgres DSN) set before it will start — it exits immediately otherwise. On startup it also runs Alembic migrations against that database (`backend/src/database.py` → `alembic upgrade head`), so a fresh/empty Postgres database is all that's needed; no manual schema setup. See the README for full setup steps (Postgres, submodule, `.env`).
 
 ### Proxy (optional, DMZ-facing)
 
@@ -37,18 +31,18 @@ fastapi run main.py --port 8001
 
 The proxy requires `HERMES_URL` (pointing at the backend) — it exits immediately otherwise. It carries no business logic or database of its own — it's a pure SSE-aware HTTP forwarder to the backend.
 
-The Streamlit UI (`Home.py`/`pages/`) is unaffected by any of this — it always talks directly to the backend (`BACKEND_URI`/`BACKEND_PORT`), whether or not a proxy is deployed in front of it for external access. A production-ready Django frontend rewrite is planned but not yet started (see Known Gaps).
+There is currently no working production frontend: the original Streamlit UI's `pages/` directory (and the entire `gateway/` service, including its own Streamlit `ui/`) were deleted in a 2026-07-30 cleanup. `Home.py` still exists at the repo root but is now orphaned — a multi-page Streamlit entrypoint with no pages under it. A production-ready Django frontend is planned but not started (see Known Gaps).
 
-### `webui/` — throwaway Django test UI (not the planned frontend)
+### `webui/` — throwaway Django test UI (not the planned production frontend)
 
-A minimal Django app for manually exercising the backend during development — plain forms for Import/Export/Results, no live SSE progress (it blocks until the batch finishes and shows a results table), no anonymisation-awareness, no auth, no styling beyond readability. Talks directly to `BACKEND_URI`/`BACKEND_PORT`, same as the Streamlit pages. Explicitly **not** the production Django frontend mentioned elsewhere in this doc — that's a separate, not-yet-started effort with real requirements (htmx/SSE live progress, the anon-safe boundary already built into the backend, etc.). Run it with:
+A minimal Django app for manually exercising the backend during development — plain forms for Import/Export/Results, no live SSE progress (it blocks until the batch finishes and shows a results table), no anonymisation-awareness, no auth, no styling beyond readability. Talks directly to `BACKEND_URI`/`BACKEND_PORT`. This is currently the only working frontend in the repo, but it's explicitly **not** the production Django frontend mentioned elsewhere in this doc — that's a separate, not-yet-started effort with real requirements (htmx/SSE live progress, the anon-safe boundary already built into the backend, etc.). Run it with:
 
 ```bash
 cd webui
 python manage.py runserver
 ```
 
-Needs `python manage.py migrate` once (creates a local `db.sqlite3` for Django's own session/admin machinery — nothing HERMES-specific lives in it).
+Needs `python manage.py migrate` once (creates a local `db.sqlite3` for Django's own session/admin machinery — nothing HERMES-specific lives in it). See the README for full getting-started steps.
 
 ## Environment Variables
 
@@ -57,7 +51,7 @@ Backend, required in `.env` (not committed) — see `.env.example` for the full 
 | Variable | Purpose |
 |---|---|
 | `ORTHANC_URL`, `ORTHANC_USER`, `ORTHANC_PASS` | Central DICOM server |
-| `BACKEND_URI`, `BACKEND_PORT` | FastAPI location (used by Streamlit pages) |
+| `BACKEND_URI`, `BACKEND_PORT` | FastAPI location (used by `webui/`, the current test frontend) |
 | `DATABASE_URL` | Postgres DSN for HermesDB — job/event tracking today, more HERMES-owned data planned. **Not** the anon-mapping DB below; entirely separate database, never conflate the two |
 | `PINN_DB` | Path to Pinnacle's own read-only SQLite export cache (not HERMES-owned) |
 | `PINNACLE_PUSH_HOST`, `PINNACLE_PUSH_PORT`, `PINNACLE_PUSH_AE_TITLE` | Destination the Pinnacle export submodule pushes to (defaults preserve the historical hardcoded values) |
@@ -76,14 +70,12 @@ Proxy, in `proxy/.env` (see `proxy/.env.example`):
 
 That's the proxy's entire configuration surface — it has no database and no other business logic.
 
-`gateway/` still exists but is now parked/reduced to PACS-comparison querying only (`gateway/pacs_client.py` + `gateway/routers/pacs.py`), reachable only from whatever network segment can reach the remote PACS. It's genuinely frontend-only functionality (never part of the backend's feature set) and is unwired from everything else until the Django frontend work resumes — at which point it will likely move to live inside Django directly. Its own `.env.example` documents `PACS_HOST`/`PACS_PORT`/`PACS_AE_TITLE`/`GATEWAY_AE_TITLE`/`DGATE_EXE_PATH`. `gateway/ui/` (Streamlit) is stale — it called endpoints that have since moved into the merged backend — and is left untouched pending that same Django work.
-
 ## Architecture
 
 One FastAPI backend holds every feature (import, export, results, studies). A thin reverse proxy (`proxy/`) can optionally sit in front of it on a separate (DMZ) machine for external access — it carries zero business logic, existing purely to relay HTTP/SSE without exposing the backend's internal network directly. Real patient IDs never cross that boundary: when anonymisation is configured, the backend itself resolves anon ⇄ real IDs at its own API edge (inbound requests, outbound responses/SSE events), so the proxy — and any future external-facing frontend — only ever sees anon IDs.
 
 ```
-Home.py + pages/               ← Streamlit multi-page frontend (talks directly to the backend)
+webui/ (Django, test-only)     ← current interim frontend (talks directly to the backend)
     │  (HTTP + SSE)
     ▼
 proxy/main.py                  ← thin reverse proxy (optional, DMZ machine)
@@ -108,11 +100,7 @@ backend/main.py                ← FastAPI app, all features
 1. **HermesDB** (`DATABASE_URL`) — fully HERMES-owned, freely migrated (Alembic, `backend/alembic/versions/`). Job/event tracking today; more HERMES-owned data (errors, exports, users) planned.
 2. **The anon-mapping DB** (`ANON_DB_*`) — an existing database the Christie team owns, that HERMES only ever runs read-only `SELECT`s against (`backend/src/identity/anon.py`, table `key_value`). Reachable directly from the backend's network. HERMES must never write to it.
 
-**Pages** (`pages/`):
-- `1_Retrieve.py` — CSV upload → batch import with live SSE progress + cancel
-- `2_Modify.py` — Metadata editing (not yet implemented)
-- `3_Export.py` — DICOM C-MOVE or ProKnow upload with live SSE progress + cancel
-- `4_Results.py` — Inspect job/patient event timelines; supports job ID or CSV upload
+**webui pages** (`webui/core/`) — Import (single MRN or CSV batch), Export (DICOM C-MOVE or ProKnow upload), Results (job or patient lookup). See `webui/core/views.py`.
 
 **Backend modules** (`backend/src/`):
 - `retrieve/logic.py` — `Importer` class: searches Mosaiq, Pinnacle, ProKnow; pulls DICOM to Orthanc; runs `_cleanup_orthanc()` to deduplicate and filter by import level. Has characterization tests (`backend/tests/test_cleanup_orthanc.py`) covering every branch, since this is real clinical dedup/pruning logic
@@ -130,7 +118,7 @@ backend/main.py                ← FastAPI app, all features
 
 ## Key Design Patterns
 
-**SSE streaming** — Batch operations stream `text/event-stream` from FastAPI via the shared `run_batch_job()` generator (`backend/src/common/sse.py`); Streamlit polls via `threading.Thread` and uses `@st.fragment(run_every=0.5)` to refresh the UI. SSE message types: `start`, `progress`, `success`, `error`, `cancelled`, `{"type": "done"}` — every event consistently carries `"type"`.
+**SSE streaming** — Batch operations stream `text/event-stream` from FastAPI via the shared `run_batch_job()` generator (`backend/src/common/sse.py`). SSE message types: `start`, `progress`, `success`, `error`, `cancelled`, `{"type": "done"}` — every event consistently carries `"type"`. `webui/` (the current test frontend) consumes the whole stream server-side and blocks until it's done rather than showing live progress; a production frontend would want to actually stream this to the browser (e.g. htmx SSE).
 
 **Cancellation** — Each batch job gets a UUID. `POST /import/cancel/{job_id}` / `POST /export/cancel/{job_id}` call `StatusDB.cancel_job(job_id)`, which sets the `jobs.cancelled` column; `run_batch_job()` checks `StatusDB.is_cancelled(job_id)` once per item. Backed by Postgres rather than an in-process dict, so it works correctly even if the backend runs as multiple worker processes.
 
@@ -167,9 +155,9 @@ events(id, job_id, mrn, stage, event_type, ts, attempt, error_message, details J
 ## Known Gaps (TODOs in Code)
 
 - Raystation import not implemented
-- `2_Modify.py` page not implemented
+- Metadata editing ("Modify") not implemented anywhere
 - ProKnow RTSTRUCT UID regeneration workaround incomplete
 - CBCT export and "all images" export option pending
-- Django frontend (replacing both the core Streamlit app and `gateway/ui/`) is planned but not started. Since the anon boundary now lives entirely in the backend, that future frontend will never need to handle a real ID itself — it can pass anon IDs through everywhere, same as any other identifier
-- `gateway/pacs_client.py` (PACS comparison via direct `pynetdicom` C-FIND/C-ECHO) is parked — frontend-only functionality, unwired from the backend/proxy, pending a decision on where it lives once the Django work resumes (most likely embedded directly in Django)
+- No production frontend exists. `Home.py`/`pages/` (Streamlit) and the entire `gateway/` service — including `gateway/ui/` and the PACS-comparison querying (`pacs_client.py`, direct `pynetdicom` C-FIND/C-ECHO) — were deleted in a 2026-07-30 cleanup. `webui/` (Django) is a throwaway test UI, not a replacement; a production Django frontend is planned but not started. Since the anon boundary lives entirely in the backend, that future frontend will never need to handle a real ID itself — it can pass anon IDs through everywhere, same as any other identifier. PACS-comparison querying would need to be rebuilt from scratch if it's wanted again — nothing references it anymore
 - `PinnacleExport`'s own internals haven't been audited beyond the two call sites `retrieve/logic.py` already used (SQL injection fix, env-configurable push destination) — worth a follow-up look at whether it has its own persistence that should eventually join HermesDB
+- No root dependency file exists (`requirements.txt` was deleted; a clean one is being rewritten) — see the README for what's currently needed to run each component

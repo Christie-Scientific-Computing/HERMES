@@ -76,6 +76,8 @@ async def patient_timeline(job_id: str, mrn: str):
         real_mrn = anon.resolve_real_id(mrn)
     except anon.AnonLookupError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     try:
         events = status_db.get_patient_history(job_id, real_mrn)
         return {"job_id": job_id, "mrn": mrn, "events": _anonymize_events(events)}
@@ -94,6 +96,8 @@ async def patient_timeline_all(mrn: str):
         real_mrn = anon.resolve_real_id(mrn)
     except anon.AnonLookupError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     try:
         events = status_db.get_patient_history_all_jobs(real_mrn)
         return {"mrn": mrn, "events": _anonymize_events(events)}

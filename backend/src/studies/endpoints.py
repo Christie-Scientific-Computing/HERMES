@@ -59,6 +59,8 @@ async def list_studies(
             query["PatientID"] = anon.resolve_real_id(patient_id)
         except anon.AnonLookupError as e:
             raise HTTPException(status_code=422, detail=str(e))
+        except anon.AnonServiceError as e:
+            raise HTTPException(status_code=503, detail=str(e))
     if study_date:
         query["StudyDate"] = study_date
     if modality:
@@ -75,7 +77,10 @@ async def list_studies(
         for item in raw
         if item.get("PatientMainDicomTags", {}).get("PatientID")
     ]
-    display_map = anon.to_display_ids(real_patient_ids)
+    try:
+        display_map = anon.to_display_ids(real_patient_ids)
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     redact_name = anon.is_configured()
 
     studies = [
@@ -138,9 +143,13 @@ async def get_study(orthanc_id: str):
     tags = data.get("MainDicomTags", {})
     patient_tags = data.get("PatientMainDicomTags", {})
     real_patient_id = patient_tags.get("PatientID")
+    try:
+        display_patient_id = anon.to_display_id(real_patient_id) if real_patient_id else None
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return {
         "orthanc_id": orthanc_id,
-        "patient_id": anon.to_display_id(real_patient_id) if real_patient_id else None,
+        "patient_id": display_patient_id,
         "patient_name": None if anon.is_configured() else patient_tags.get("PatientName"),
         "study_date": tags.get("StudyDate"),
         "study_description": tags.get("StudyDescription"),

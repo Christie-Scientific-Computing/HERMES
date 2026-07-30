@@ -65,24 +65,20 @@ async def get_orthanc_modalities():
                 password=ORTHANC_PASS, verify=False,
                 timeout=14000.0,)
         logger.debug("Connected to Orthanc")
+        return client.get_modalities()
     except Exception as exc:
-        logger.error(f"Failed to connect to Orthanc: {exc}")
-        raise
-
-    res = client.get_modalities()
-
-    return res
+        logger.exception("Failed to fetch Orthanc modalities")
+        raise HTTPException(status_code=502, detail=f"Orthanc query failed: {exc}")
 
 @router.get("/get_proknow_collections")
 async def get_proknow_collections():
     try:
         pk = ProKnow(PROKNOW_URL, credentials_file='credentials.json')
         logger.debug("Connected to Proknow")
+        return [x.name for x in pk.collections.query(workspace=PROKNOW_WORKSPACE)]
     except Exception as exc:
-        logger.error(f"Failed to connect to ProKnow: {exc}")
-        raise
-
-    return [x.name for x in pk.collections.query(workspace=PROKNOW_WORKSPACE)]
+        logger.exception("Failed to fetch ProKnow collections")
+        raise HTTPException(status_code=502, detail=f"ProKnow query failed: {exc}")
 
 
 def _dicom_move_worker(destination: str):
@@ -100,11 +96,16 @@ def _proknow_worker(collection: str):
 
 
 def _build_export_items(path_to_csv: str) -> list[BatchItem]:
-    rows = Exporter.read_input_file(path_to_csv)
+    try:
+        rows = Exporter.read_input_file(path_to_csv)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
     try:
         return build_patient_id_batch(rows, input_path=path_to_csv)
     except anon.AnonLookupError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/dicom_move")
@@ -152,9 +153,11 @@ async def proknow_upload_patient(body: Request):
     job_id = req.get('job_id', 'manual')
     try:
         real_mrn = anon.resolve_real_id(req['mrn'])
+        display_mrn = anon.to_display_id(real_mrn)
     except anon.AnonLookupError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    display_mrn = anon.to_display_id(real_mrn)
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     # Record patient and start
     if status_db:
@@ -276,39 +279,48 @@ def _build_uid_items(path_to_csv: str, level: str) -> list[BatchItem]:
     """
     seen: set = set()
     items: list[BatchItem] = []
-    with open(path_to_csv, newline="") as f:
-        for row in csv_mod.DictReader(f):
-            study_uid  = (row.get("study_instance_uid")  or "").strip()
-            series_uid = (row.get("series_instance_uid") or "").strip()
-            if not study_uid:
-                continue
-            use_series = level == "series" and bool(series_uid)
-            key   = (study_uid, series_uid) if use_series else study_uid
-            label = series_uid if use_series else study_uid
-            if key in seen:
-                continue
-            seen.add(key)
+    try:
+        with open(path_to_csv, newline="") as f:
+            rows = list(csv_mod.DictReader(f))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
 
-            submitted_patient_id = (row.get("patient_id") or "").strip()
-            if submitted_patient_id:
-                try:
-                    status_mrn = anon.resolve_real_id(submitted_patient_id)
-                except anon.AnonLookupError:
-                    logger.warning(
-                        "patient_id %r in UID CSV has no anon mapping; using as-is for StatusDB bookkeeping only",
-                        submitted_patient_id,
-                    )
-                    status_mrn = submitted_patient_id
-            else:
-                status_mrn = study_uid
+    for row in rows:
+        study_uid  = (row.get("study_instance_uid")  or "").strip()
+        series_uid = (row.get("series_instance_uid") or "").strip()
+        if not study_uid:
+            continue
+        use_series = level == "series" and bool(series_uid)
+        key   = (study_uid, series_uid) if use_series else study_uid
+        label = series_uid if use_series else study_uid
+        if key in seen:
+            continue
+        seen.add(key)
 
-            items.append(BatchItem(
-                real_id=study_uid,       # not used directly; worker reads extra["study_uid"]/["series_uid"]
-                display_id=label,
-                status_mrn=status_mrn,
-                input_path=path_to_csv,
-                extra={"study_uid": study_uid, "series_uid": series_uid if use_series else None},
-            ))
+        submitted_patient_id = (row.get("patient_id") or "").strip()
+        if submitted_patient_id:
+            try:
+                status_mrn = anon.resolve_real_id(submitted_patient_id)
+            except anon.AnonLookupError:
+                logger.warning(
+                    "patient_id %r in UID CSV has no anon mapping; using as-is for StatusDB bookkeeping only",
+                    submitted_patient_id,
+                )
+                status_mrn = submitted_patient_id
+            except anon.AnonServiceError as e:
+                # Unlike an unknown id, a dead anon service is a real problem worth
+                # failing the whole request over, not silently degrading every row.
+                raise HTTPException(status_code=503, detail=str(e))
+        else:
+            status_mrn = study_uid
+
+        items.append(BatchItem(
+            real_id=study_uid,       # not used directly; worker reads extra["study_uid"]/["series_uid"]
+            display_id=label,
+            status_mrn=status_mrn,
+            input_path=path_to_csv,
+            extra={"study_uid": study_uid, "series_uid": series_uid if use_series else None},
+        ))
 
     return items
 

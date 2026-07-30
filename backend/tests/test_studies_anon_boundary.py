@@ -16,6 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from backend.src.identity import anon
 from backend.src.studies import endpoints as studies_endpoints
 
 REAL_MRN = "500123"
@@ -95,3 +96,25 @@ def test_get_study_translates_and_redacts(client):
     assert body["patient_name"] is None
     assert REAL_MRN not in resp.text
     assert "Doe" not in resp.text
+
+
+def test_list_studies_anon_db_unreachable_returns_503(client, monkeypatch):
+    monkeypatch.setattr(anon, "ANON_DB_PORT", 1)
+    monkeypatch.setattr(anon, "_pool", None)
+    try:
+        resp = client.get("/studies")
+        assert resp.status_code == 503
+        assert resp.json()["detail"]
+    finally:
+        monkeypatch.setattr(anon, "_pool", None)
+
+
+def test_get_study_anon_db_unreachable_returns_503(client, monkeypatch):
+    monkeypatch.setattr(anon, "ANON_DB_PORT", 1)
+    monkeypatch.setattr(anon, "_pool", None)
+    try:
+        resp = client.get("/studies/orthanc-abc")
+        assert resp.status_code == 503
+        assert resp.json()["detail"]
+    finally:
+        monkeypatch.setattr(anon, "_pool", None)

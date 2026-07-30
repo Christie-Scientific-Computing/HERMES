@@ -55,6 +55,13 @@ class AnonLookupError(Exception):
     """Raised when an anonymised ID has no mapping in the external database."""
 
 
+class AnonServiceError(Exception):
+    """Raised when the anon-mapping database itself can't be reached/queried
+    (connection refused, auth failure, timeout, ...) -- distinct from
+    AnonLookupError, which means the DB answered but the ID isn't in it.
+    Callers should treat this as a 503, not a 422."""
+
+
 def is_configured() -> bool:
     """Return True if the anonymisation DB is configured in the environment."""
     return bool(ANON_DB_HOST)
@@ -87,14 +94,20 @@ def _to_bigints(ids: list[str]) -> dict[str, int]:
 def _query(sql: str, values: list[int]) -> list[tuple]:
     if not values:
         return []
-    pool = _get_pool()
-    conn = pool.getconn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(sql, (values,))
-            rows = cur.fetchall()
-        conn.commit()
-        return rows
+        pool = _get_pool()
+        conn = pool.getconn()
+    except Exception as exc:
+        raise AnonServiceError(f"Cannot reach anonymisation DB: {exc}") from exc
+    try:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (values,))
+                rows = cur.fetchall()
+            conn.commit()
+            return rows
+        except Exception as exc:
+            raise AnonServiceError(f"Anonymisation DB query failed: {exc}") from exc
     finally:
         pool.putconn(conn)
 

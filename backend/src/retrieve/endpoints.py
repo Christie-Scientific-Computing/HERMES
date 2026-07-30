@@ -48,11 +48,16 @@ class Response(BaseModel):
 
 
 def _build_import_items(path_to_csv: str) -> list[BatchItem]:
-    rows = Importer.read_input_file(path_to_csv)
+    try:
+        rows = Importer.read_input_file(path_to_csv)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
     try:
         return build_patient_id_batch(rows, input_path=path_to_csv)
     except anon.AnonLookupError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 def _import_worker(import_level: str):
@@ -95,17 +100,24 @@ async def single_import(body: Request):
         real_mrn = anon.resolve_real_id(req['mrn'])
     except anon.AnonLookupError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
-    imp = Importer(req['import_level'])
     start = time.time()
     try:
+        imp = Importer(req['import_level'])
         res = imp.handle_patient(real_mrn)
         response = Response(mrn=anon.to_display_id(real_mrn), **res)
         return f"data: {json.dumps({
                     'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}"
 
     except Exception as e:
-        return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': anon.to_display_id(real_mrn), 'error': str(e)})}\n\n"
+        logger.exception("single_import failed for %s", req['mrn'])
+        try:
+            display_mrn = anon.to_display_id(real_mrn)
+        except Exception:
+            display_mrn = "[unknown]"
+        return f"data: {json.dumps({'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn, 'error': str(e)})}\n\n"
 
 
 @router.get('/find_patient')
@@ -118,12 +130,18 @@ async def find_patient(
         real_mrn = anon.resolve_real_id(mrn)
     except anon.AnonLookupError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
-    imp = Importer(import_level)
     try:
+        imp = Importer(import_level)
         res = imp.find_patient(real_mrn)
         return Response(mrn=anon.to_display_id(real_mrn), **res)
+    except anon.AnonServiceError as e:
+        logger.exception("find_patient failed to translate result for %s", mrn)
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
+        logger.exception("find_patient failed for %s", mrn)
         raise HTTPException(status_code=500, detail=str(e))
 
 

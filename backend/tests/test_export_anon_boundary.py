@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from backend.src.export import endpoints as export_endpoints
 from backend.src.export.logic import Exporter as RealExporter
+from backend.src.identity import anon
 
 REAL_MRN_1, ANON_MRN_1 = "500123", "1001"
 REAL_MRN_2, ANON_MRN_2 = "500456", "1002"
@@ -86,6 +87,55 @@ def test_dicom_move_unknown_anon_id_in_csv_returns_422(client, tmp_path):
         "job_id": f"export-anon-{uuid.uuid4()}", "path_to_csv": str(csv_path), "destination": "SOME_AE",
     })
     assert resp.status_code == 422
+
+
+def test_dicom_move_missing_csv_returns_400_not_500(client):
+    resp = client.post("/export/dicom_move", json={
+        "job_id": f"export-anon-{uuid.uuid4()}",
+        "path_to_csv": "/nonexistent/path/patients.csv",
+        "destination": "SOME_AE",
+    })
+    assert resp.status_code == 400
+    assert resp.json()["detail"]
+
+
+def test_dicom_move_anon_db_unreachable_returns_503(client, tmp_path, monkeypatch):
+    csv_path = tmp_path / "patients.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["patient_id"])
+        writer.writerow([ANON_MRN_1])
+
+    monkeypatch.setattr(anon, "ANON_DB_PORT", 1)
+    monkeypatch.setattr(anon, "_pool", None)
+    try:
+        resp = client.post("/export/dicom_move", json={
+            "job_id": f"export-anon-{uuid.uuid4()}", "path_to_csv": str(csv_path), "destination": "SOME_AE",
+        })
+        assert resp.status_code == 503
+        assert resp.json()["detail"]
+    finally:
+        monkeypatch.setattr(anon, "_pool", None)
+
+
+def test_get_orthanc_modalities_failure_returns_502_not_bare_500(client, monkeypatch):
+    def boom(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    monkeypatch.setattr(export_endpoints, "Orthanc", boom)
+    resp = client.get("/export/get_orthanc_modalities")
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_get_proknow_collections_failure_returns_502_not_bare_500(client, monkeypatch):
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("credentials.json")
+
+    monkeypatch.setattr(export_endpoints, "ProKnow", boom)
+    resp = client.get("/export/get_proknow_collections")
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
 
 
 def test_cancel_mid_batch_stops_remaining_items(client, tmp_path, monkeypatch):

@@ -52,3 +52,15 @@ def test_resolve_and_display_roundtrip():
     assert real == "500123"
     back = anon.to_display_id(real)
     assert back == "1001"
+
+
+def test_unreachable_db_raises_anon_service_error(monkeypatch):
+    """Distinguishes 'DB is down' from 'ID not in DB' (AnonLookupError) --
+    callers need to tell these apart to return 503 vs 422."""
+    monkeypatch.setattr(anon, "ANON_DB_PORT", 1)  # nothing listens on port 1
+    monkeypatch.setattr(anon, "_pool", None)
+    try:
+        with pytest.raises(anon.AnonServiceError):
+            anon.lookup_real_ids(["1001"])
+    finally:
+        monkeypatch.setattr(anon, "_pool", None)  # don't leak a broken pool to later tests
