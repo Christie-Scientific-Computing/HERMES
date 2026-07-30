@@ -4,6 +4,7 @@
 # Web framework / servers
 fastapi
 uvicorn[standard]
+python-multipart  # required by FastAPI's File()/Form() (retrieve + export CSV upload endpoints)
 
 # HTTP clients
 httpx
@@ -25,9 +26,14 @@ pyorthanc
 # ProKnow cloud RT platform
 proknow
 
-# PostgreSQL (anonymisation DB)
+# PostgreSQL (HermesDB job/event tracking, anonymisation-mapping lookups)
 psycopg2-binary
+alembic
+sqlalchemy
 
 # Utilities
 python-dotenv
 pydantic
+
+# Testing
+pytest

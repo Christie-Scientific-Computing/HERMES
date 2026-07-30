@@ -32,7 +32,11 @@ PATH_TO_CERT = os.getenv('PATH_TO_CERT')
 PATH_TO_KEY = os.getenv('PATH_TO_KEY')
 
 PINN_DB = os.getenv('PINN_DB')
-STATUS_DB = os.getenv('STATUS_DB')
+
+# Destination the Pinnacle export submodule pushes to (was hardcoded)
+PINNACLE_PUSH_HOST = os.getenv('PINNACLE_PUSH_HOST', '192.168.117.5')
+PINNACLE_PUSH_PORT = int(os.getenv('PINNACLE_PUSH_PORT', '32806'))
+PINNACLE_PUSH_AE_TITLE = os.getenv('PINNACLE_PUSH_AE_TITLE', 'old_mosaiq_router')
 
 #Proknow setup
 PROKNOW_URL = 'https://nhs.proknow.com'
@@ -271,9 +275,9 @@ class Importer():
         export_requests = self.get_pinn_export_requests(mrn)
 
         payload = {
-            'remote_IP': '192.168.117.5',
-            'remote_port': 32806,
-            'remote_AE_title': 'old_mosaiq_router',
+            'remote_IP': PINNACLE_PUSH_HOST,
+            'remote_port': PINNACLE_PUSH_PORT,
+            'remote_AE_title': PINNACLE_PUSH_AE_TITLE,
             'requests': export_requests
         }
         pinn_entry(payload)
@@ -348,7 +352,7 @@ class Importer():
             raise
 
         cursor = conn.cursor()
-        entries = cursor.execute(f"SELECT * FROM entries WHERE MedicalRecordNumber = {mrn}").fetchall()
+        entries = cursor.execute("SELECT * FROM entries WHERE MedicalRecordNumber = ?", (mrn,)).fetchall()
         if entries:
             return True
         else:
@@ -380,8 +384,8 @@ class Importer():
             logger.error(f"Failed to connect to Pinnacle database (./db/pinn_db.sqlite): {exc}")
             raise
         cursor = conn.cursor()
-        entries = cursor.execute(f"SELECT * from entries WHERE MedicalRecordNumber = {mrn}").fetchall()
-        
+        entries = cursor.execute("SELECT * FROM entries WHERE MedicalRecordNumber = ?", (mrn,)).fetchall()
+
         requests = []
         for entry in entries:
             request = ExportRequest(mrn=mrn, patient_id=entry['PinnacleID'], path=Path(entry['Path']))

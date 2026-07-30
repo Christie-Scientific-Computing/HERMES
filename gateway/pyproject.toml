@@ -1,17 +1,16 @@
 [project]
 name = "hermes-gateway"
-version = "0.1.0"
-description = "User-facing API gateway for HERMES"
+version = "0.2.0"
+description = "PACS comparison endpoints for HERMES (everything else moved to backend + proxy)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
-    "httpx",
+    "httpx",  # used by ui/ pages to call this API and the proxy
     "python-dotenv",
     "streamlit",
     "pandas",
     "pynetdicom",
-    "psycopg2-binary",
 ]
 
 [tool.fastapi]

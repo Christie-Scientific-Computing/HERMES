@@ -2,7 +2,11 @@
 Study-discovery endpoints.
 
 Queries the linked Orthanc instance and returns study-level metadata.
-Used by the HERMES Gateway (and directly accessible on the internal network).
+Inbound `patient_id` filters are anon ids, resolved to the real PatientID
+before querying Orthanc; outbound `patient_id` fields are translated back
+to anon ids. `patient_name` has no anonymisation mapping at all (the
+key_value table only maps numeric patient ids) so it's redacted whenever
+anonymisation is configured, rather than leaking a real name.
 """
 import os
 import logging
@@ -11,6 +15,8 @@ from typing import Optional
 import requests
 from fastapi import APIRouter, HTTPException, Query
 from dotenv import load_dotenv
+
+from backend.src.identity import anon
 
 load_dotenv()
 
@@ -37,7 +43,7 @@ def _orthanc(method: str, path: str, **kwargs):
 
 @router.get("")
 async def list_studies(
-    patient_id: Optional[str] = Query(None, description="Filter by patient MRN (PatientID)"),
+    patient_id: Optional[str] = Query(None, description="Filter by patient MRN (PatientID) -- anon id"),
     study_date: Optional[str] = Query(
         None,
         description="Study date: YYYYMMDD for exact date, YYYYMMDD-YYYYMMDD for range",
@@ -49,7 +55,10 @@ async def list_studies(
     """Return studies available in Orthanc, with optional filters."""
     query: dict = {}
     if patient_id:
-        query["PatientID"] = patient_id
+        try:
+            query["PatientID"] = anon.resolve_real_id(patient_id)
+        except anon.AnonLookupError as e:
+            raise HTTPException(status_code=422, detail=str(e))
     if study_date:
         query["StudyDate"] = study_date
     if modality:
@@ -61,11 +70,19 @@ async def list_studies(
         logger.exception("Orthanc /tools/find failed")
         raise HTTPException(status_code=502, detail=f"Orthanc query failed: {exc}")
 
+    real_patient_ids = [
+        item.get("PatientMainDicomTags", {}).get("PatientID")
+        for item in raw
+        if item.get("PatientMainDicomTags", {}).get("PatientID")
+    ]
+    display_map = anon.to_display_ids(real_patient_ids)
+    redact_name = anon.is_configured()
+
     studies = [
         {
             "orthanc_id": item["ID"],
-            "patient_id": item.get("PatientMainDicomTags", {}).get("PatientID"),
-            "patient_name": item.get("PatientMainDicomTags", {}).get("PatientName"),
+            "patient_id": display_map.get(item.get("PatientMainDicomTags", {}).get("PatientID")),
+            "patient_name": None if redact_name else item.get("PatientMainDicomTags", {}).get("PatientName"),
             "study_date": item.get("MainDicomTags", {}).get("StudyDate"),
             "study_description": item.get("MainDicomTags", {}).get("StudyDescription"),
             "study_instance_uid": item.get("MainDicomTags", {}).get("StudyInstanceUID"),
@@ -120,10 +137,11 @@ async def get_study(orthanc_id: str):
 
     tags = data.get("MainDicomTags", {})
     patient_tags = data.get("PatientMainDicomTags", {})
+    real_patient_id = patient_tags.get("PatientID")
     return {
         "orthanc_id": orthanc_id,
-        "patient_id": patient_tags.get("PatientID"),
-        "patient_name": patient_tags.get("PatientName"),
+        "patient_id": anon.to_display_id(real_patient_id) if real_patient_id else None,
+        "patient_name": None if anon.is_configured() else patient_tags.get("PatientName"),
         "study_date": tags.get("StudyDate"),
         "study_description": tags.get("StudyDescription"),
         "study_instance_uid": tags.get("StudyInstanceUID"),

@@ -1,0 +1,14 @@
+[project]
+name = "hermes-proxy"
+version = "0.1.0"
+description = "Thin reverse proxy for HERMES, deployed on the DMZ machine"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "python-dotenv",
+]
+
+[tool.fastapi]
+entrypoint = "main:app"

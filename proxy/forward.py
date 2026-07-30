@@ -1,8 +1,11 @@
 """
 Async reverse proxy helper.
 
-Forwards a FastAPI request to the Hermes backend, transparently handling
+Forwards a FastAPI request to the HERMES backend, transparently handling
 both regular JSON responses and SSE streaming responses (import/export).
+No business logic lives here on purpose -- PACS queries and anonymisation
+are handled inside the backend itself now (backend/src/identity/anon.py),
+since the mapping DB is reachable directly from the backend's network.
 """
 import httpx
 from fastapi import Request, Response, HTTPException
@@ -19,8 +22,8 @@ _STRIP_HEADERS = {
 
 async def proxy_request(request: Request, path: str) -> Response:
     """
-    Forward `request` to `/{path}` on the Hermes backend, preserving method,
-    body, query params, and headers.  SSE streams are forwarded as-is.
+    Forward `request` to `/{path}` on the HERMES backend, preserving method,
+    body, query params, and headers. SSE streams are forwarded as-is.
     """
     client: httpx.AsyncClient = request.app.state.client
 
@@ -37,9 +40,9 @@ async def proxy_request(request: Request, path: str) -> Response:
         )
         response = await client.send(req, stream=True)
     except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Hermes backend is unreachable")
+        raise HTTPException(status_code=503, detail="HERMES backend is unreachable")
     except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Hermes backend timed out")
+        raise HTTPException(status_code=504, detail="HERMES backend timed out")
 
     content_type = response.headers.get('content-type', '')
     forward_headers = {

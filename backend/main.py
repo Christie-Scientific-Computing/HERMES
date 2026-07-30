@@ -26,11 +26,11 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-STATUS_DB = os.getenv('STATUS_DB')
-if STATUS_DB:
-    setup_status_db(STATUS_DB)
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL:
+    setup_status_db(DATABASE_URL)
 else:
-    logger.warning("STATUS_DB not set; ABORTING!")
+    logger.warning("DATABASE_URL not set; ABORTING!")
     exit()
 app = FastAPI()
 app.include_router(import_router)
