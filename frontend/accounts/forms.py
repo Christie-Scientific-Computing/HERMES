@@ -1,12 +1,15 @@
 from django import forms
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
 
 from accounts.models import Profile
 
 User = get_user_model()
 
 
-class InviteUserForm(forms.Form):
+class _UserIdentityForm(forms.Form):
+    """Shared identity fields for both account-creation paths."""
+
     username = forms.CharField(max_length=150)
     email = forms.EmailField()
     first_name = forms.CharField(max_length=150, required=False)
@@ -24,7 +27,7 @@ class InviteUserForm(forms.Form):
             raise forms.ValidationError("A user with that username already exists.")
         return username
 
-    def save(self) -> User:
+    def _create_user(self, **extra) -> User:
         user = User.objects.create(
             username=self.cleaned_data["username"],
             email=self.cleaned_data["email"],
@@ -32,8 +35,49 @@ class InviteUserForm(forms.Form):
             last_name=self.cleaned_data["last_name"],
             is_staff=self.cleaned_data["is_staff"],
             is_active=True,
+            **extra,
         )
+        Profile.objects.create(user=user, department=self.cleaned_data["department"])
+        return user
+
+
+class InviteUserForm(_UserIdentityForm):
+    """Creates an unusable-password account and an activation link the
+    invitee uses to set their own password."""
+
+    def save(self) -> User:
+        user = self._create_user()
         user.set_unusable_password()
         user.save()
-        Profile.objects.create(user=user, department=self.cleaned_data["department"])
+        return user
+
+
+class CreateUserForm(_UserIdentityForm):
+    """Admin sets the password directly -- no email, no activation link,
+    account usable immediately."""
+
+    password1 = forms.CharField(label="Password", widget=forms.PasswordInput)
+    password2 = forms.CharField(label="Confirm password", widget=forms.PasswordInput)
+
+    def clean_password2(self):
+        password1 = self.cleaned_data.get("password1")
+        password2 = self.cleaned_data.get("password2")
+        if password1 and password2 and password1 != password2:
+            raise forms.ValidationError("The two password fields didn't match.")
+        if password1:
+            # An unsaved instance so validators like UserAttributeSimilarityValidator
+            # can check the password against the identity fields above.
+            temp_user = User(
+                username=self.cleaned_data.get("username", ""),
+                email=self.cleaned_data.get("email", ""),
+                first_name=self.cleaned_data.get("first_name", ""),
+                last_name=self.cleaned_data.get("last_name", ""),
+            )
+            validate_password(password1, temp_user)
+        return password2
+
+    def save(self) -> User:
+        user = self._create_user()
+        user.set_password(self.cleaned_data["password1"])
+        user.save()
         return user

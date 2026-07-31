@@ -88,3 +88,41 @@ def test_concurrent_jobs_do_not_interfere(db):
     assert db.list_job_patients(job_a) == ["MRN_A"]
     assert db.list_job_patients(job_b) == ["MRN_B"]
     assert db.summarize_job(job_a) != db.summarize_job(job_b)
+
+
+def test_get_job_returns_metadata(db, job_id):
+    db.create_job(job_id, description="a batch", created_by="alice", project_id=None)
+    job = db.get_job(job_id)
+    assert job["job_id"] == job_id
+    assert job["description"] == "a batch"
+    assert job["created_by"] == "alice"
+    assert job["cancelled"] is False
+
+
+def test_get_job_unknown_returns_none(db):
+    assert db.get_job(f"nonexistent-{uuid.uuid4()}") is None
+
+
+def test_get_latest_retrieve_details_returns_most_recent_success_per_patient(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="start")
+    db.add_event(
+        job_id, mrn="MRN1", stage="retrieve", event_type="success",
+        details={"in_mosaiq": True, "in_pinnacle": False, "in_proknow": False, "status": "imported"},
+    )
+    # a later, distinct success event for the same patient should win
+    db.add_event(
+        job_id, mrn="MRN1", stage="retrieve", event_type="success",
+        details={"in_mosaiq": True, "in_pinnacle": True, "in_proknow": False, "status": "re-imported"},
+    )
+    db.add_event(job_id, mrn="MRN2", stage="retrieve", event_type="failure", error_message="boom")
+
+    details = db.get_latest_retrieve_details(job_id)
+    assert details["MRN1"] == {"in_mosaiq": True, "in_pinnacle": True, "in_proknow": False, "status": "re-imported"}
+    assert "MRN2" not in details  # only failures recorded -- no success details to show
+
+
+def test_get_latest_retrieve_details_ignores_export_stage(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success", details={"status": "exported"})
+    assert db.get_latest_retrieve_details(job_id) == {}

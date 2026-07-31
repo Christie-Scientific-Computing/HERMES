@@ -41,12 +41,27 @@ def _anonymize_events(events: list[dict]) -> list[dict]:
 
 @router.get('/job/{job_id}')
 async def job_summary(job_id: str):
-    """Return aggregated counts by stage and event_type for a job."""
+    """
+    Return aggregated counts by stage and event_type for a job, plus the
+    job's own metadata (project_id/created_by/description/created_at/
+    cancelled) -- additive fields only; `summary` itself is unchanged so
+    existing callers (e.g. webui/) aren't affected.
+    """
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
     try:
         summary = status_db.summarize_job(job_id)
-        return {"job_id": job_id, "summary": summary}
+        response = {"job_id": job_id, "summary": summary}
+        job = status_db.get_job(job_id)
+        if job:
+            response.update({
+                "project_id": job.get("project_id"),
+                "created_by": job.get("created_by"),
+                "description": job.get("description"),
+                "created_at": job.get("created_at"),
+                "cancelled": job.get("cancelled"),
+            })
+        return response
     except Exception as e:
         logger.exception("Failed to get job summary: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -63,6 +78,37 @@ async def job_patients(job_id: str):
         return {"job_id": job_id, "patients": [display_map[p] for p in patients]}
     except Exception as e:
         logger.exception("Failed to list patients: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get('/job/{job_id}/patients/summary')
+async def job_patients_summary(job_id: str):
+    """
+    Per-patient summary for a job: anon id + retrieve-stage source-system
+    presence (in_mosaiq/in_pinnacle/in_proknow), when available. Export-only
+    jobs (or any patient with no successful retrieve event) simply have
+    those keys come back null -- callers must render that as "unknown", not
+    a false negative.
+    """
+    if not status_db:
+        raise HTTPException(status_code=503, detail="Status DB not configured")
+    try:
+        real_mrns = status_db.list_job_patients(job_id)
+        details_by_mrn = status_db.get_latest_retrieve_details(job_id)
+        display_map = anon.to_display_ids(real_mrns)
+        patients = [
+            {
+                "mrn": display_map[real_mrn],
+                "in_mosaiq": details_by_mrn.get(real_mrn, {}).get("in_mosaiq"),
+                "in_pinnacle": details_by_mrn.get(real_mrn, {}).get("in_pinnacle"),
+                "in_proknow": details_by_mrn.get(real_mrn, {}).get("in_proknow"),
+                "status": details_by_mrn.get(real_mrn, {}).get("status"),
+            }
+            for real_mrn in real_mrns
+        ]
+        return {"job_id": job_id, "patients": patients}
+    except Exception as e:
+        logger.exception("Failed to build patient summary: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

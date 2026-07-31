@@ -1,16 +1,25 @@
 """
 Views for import/export/results.
 
+Project selection has no implicit/session concept -- every submission form
+carries its own `project_id` field, populated fresh on every request (see
+_project_choices_for below) from backend_client.list_user_active_projects.
+Django's own ChoiceField validation against those freshly-fetched choices
+IS the live re-check that a submitted project_id is one the user currently
+has active access to -- there's nothing cached/trusted from earlier in the
+request or from session.
+
 The two-phase pattern for batch (file-upload) jobs deliberately separates
-the mutating action from the live-progress view, per the architecture
-review: `import_batch`/`export_dicom`/`export_proknow` are normal
-CSRF-protected POSTs that stage the uploaded file server-side (under
-MEDIA_ROOT/tmp_uploads) and mint a fresh, unguessable job_id, stored only
-in *this browser's own session* (`pending_job:<job_id>`). `job_stream` is
-the GET-only relay a browser's EventSource connects to -- it can only ever
-act on a job_id that this same session already staged via its own POST, so
-a third party can't trigger a real import/export by getting a victim to
-load a crafted GET URL (there's nothing in the session to act on).
+the mutating action from the live-progress view: `import_batch`/
+`export_dicom`/`export_proknow` (and, now, `import_single`, staging a
+one-row CSV the same way) are normal CSRF-protected POSTs that stage the
+uploaded file server-side (under MEDIA_ROOT/tmp_uploads) and mint a fresh,
+unguessable job_id, stored only in *this browser's own session*
+(`pending_job:<job_id>`). `job_stream` is the GET-only relay a browser's
+EventSource connects to -- it can only ever act on a job_id that this same
+session already staged via its own POST, so a third party can't trigger a
+real import/export by getting a victim to load a crafted GET URL (there's
+nothing in the session to act on).
 
 `job_stream` is the one async view in this app: it opens the backend's SSE
 endpoint via hermes_frontend.backend_client.stream_sse and re-frames every
@@ -27,6 +36,7 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.core.files.base import ContentFile
 from django.http import Http404, StreamingHttpResponse
 from django.shortcuts import redirect, render
 
@@ -37,35 +47,39 @@ from jobs.forms import (
 )
 
 
-def _require_active_project(request):
-    """
-    Re-validate the session's current project against live backend state.
-    Never trust the session alone -- a project can be revoked or expire
-    between page loads. Returns the project_id, or None if the user has no
-    active approved project (or none selected).
-    """
-    project_id = request.session.get("current_project_id")
-    if not project_id:
-        return None
+def _project_choices_for(user) -> list[dict]:
+    """Projects to offer on a submission form's project_id field, fetched
+    live. Superusers get their auto-provisioned bypass project ensured
+    first, so it's always among their choices."""
     try:
-        active = backend_client.list_user_active_projects(request.user.username)
+        if user.is_superuser:
+            backend_client.ensure_superuser_bypass_project(user.username)
+        return backend_client.list_user_active_projects(user.username)
     except backend_client.BackendError:
-        return None
-    if not any(p["project_id"] == project_id for p in active):
-        return None
-    return project_id
+        return []
+
+
+def _users_projects(user) -> list[dict]:
+    """Every project (any status) `user` belongs to -- used to scope
+    results visibility, which is about viewing your own history, not about
+    being allowed to start new jobs (so, deliberately, no status filter)."""
+    try:
+        return backend_client.list_projects(username=user.username)
+    except backend_client.BackendError:
+        return []
 
 
 @login_required
 def dashboard(request):
-    project_id = _require_active_project(request)
+    projects = _project_choices_for(request.user)
     jobs = []
-    if project_id:
+    for p in projects:
         try:
-            jobs = backend_client.list_project_jobs(project_id)[:10]
+            jobs.extend(backend_client.list_project_jobs(p["project_id"]))
         except backend_client.BackendError:
-            jobs = []
-    return render(request, "jobs/dashboard.html", {"project_id": project_id, "recent_jobs": jobs})
+            pass
+    jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    return render(request, "jobs/dashboard.html", {"projects": projects, "recent_jobs": jobs[:10]})
 
 
 def _stage_batch_job(request, kind: str, uploaded_file, extra: dict, project_id: str) -> str:
@@ -86,87 +100,84 @@ def _stage_batch_job(request, kind: str, uploaded_file, extra: dict, project_id:
 
 @login_required
 def import_single(request):
-    project_id = _require_active_project(request)
-    result = None
+    projects = _project_choices_for(request.user)
+    job_id = None
     if request.method == "POST":
-        if not project_id:
-            messages.error(request, "You need an active approved project to import data.")
-            return redirect("research_projects:list")
         form = SingleImportForm(request.POST)
+        form.set_project_choices(projects)
         if form.is_valid():
-            job_id = str(uuid.uuid4())
-            try:
-                result = backend_client.single_import(
-                    job_id, form.cleaned_data["mrn"], form.cleaned_data["import_level"],
-                    project_id, request.user.username,
-                )
-            except backend_client.BackendError as e:
-                messages.error(request, f"Import failed: {e.detail}")
-            else:
-                if result.get("type") == "error":
-                    messages.error(request, f"Import failed: {result.get('error')}")
-                else:
-                    messages.success(request, f"Imported {result.get('mrn')}.")
+            csv_bytes = f"patient_id\n{form.cleaned_data['mrn']}\n".encode()
+            job_id = _stage_batch_job(
+                request, kind="import_batch",
+                uploaded_file=ContentFile(csv_bytes, name="single_patient.csv"),
+                extra={"import_level": form.cleaned_data["import_level"]},
+                project_id=form.cleaned_data["project_id"],
+            )
+            form = SingleImportForm()  # fresh form, ready for another entry
+            form.set_project_choices(projects)
     else:
         form = SingleImportForm()
-    return render(request, "jobs/import_single.html", {"form": form, "project_id": project_id, "result": result})
+        form.set_project_choices(projects)
+    return render(request, "jobs/import_single.html", {
+        "form": form, "job_id": job_id, "has_projects": bool(projects),
+    })
 
 
 @login_required
 def import_batch(request):
-    project_id = _require_active_project(request)
+    projects = _project_choices_for(request.user)
     if request.method == "POST":
-        if not project_id:
-            messages.error(request, "You need an active approved project to import data.")
-            return redirect("research_projects:list")
         form = BatchImportForm(request.POST, request.FILES)
+        form.set_project_choices(projects)
         if form.is_valid():
             job_id = _stage_batch_job(
                 request, kind="import_batch", uploaded_file=form.cleaned_data["file"],
-                extra={"import_level": form.cleaned_data["import_level"]}, project_id=project_id,
+                extra={"import_level": form.cleaned_data["import_level"]},
+                project_id=form.cleaned_data["project_id"],
             )
             return redirect("jobs:job_watch", job_id=job_id)
     else:
         form = BatchImportForm()
-    return render(request, "jobs/import_batch.html", {"form": form, "project_id": project_id})
+        form.set_project_choices(projects)
+    return render(request, "jobs/import_batch.html", {"form": form, "has_projects": bool(projects)})
 
 
 @login_required
 def export_dicom(request):
-    project_id = _require_active_project(request)
+    projects = _project_choices_for(request.user)
     if request.method == "POST":
-        if not project_id:
-            messages.error(request, "You need an active approved project to export data.")
-            return redirect("research_projects:list")
         form = DicomExportForm(request.POST, request.FILES)
+        form.set_project_choices(projects)
         if form.is_valid():
             job_id = _stage_batch_job(
                 request, kind="export_dicom", uploaded_file=form.cleaned_data["file"],
-                extra={"destination": form.cleaned_data["destination"]}, project_id=project_id,
+                extra={"destination": form.cleaned_data["destination"]},
+                project_id=form.cleaned_data["project_id"],
             )
             return redirect("jobs:job_watch", job_id=job_id)
     else:
         form = DicomExportForm()
-    return render(request, "jobs/export_dicom.html", {"form": form, "project_id": project_id})
+        form.set_project_choices(projects)
+    return render(request, "jobs/export_dicom.html", {"form": form, "has_projects": bool(projects)})
 
 
 @login_required
 def export_proknow(request):
-    project_id = _require_active_project(request)
+    projects = _project_choices_for(request.user)
     if request.method == "POST":
-        if not project_id:
-            messages.error(request, "You need an active approved project to export data.")
-            return redirect("research_projects:list")
         form = ProKnowExportForm(request.POST, request.FILES)
+        form.set_project_choices(projects)
         if form.is_valid():
             job_id = _stage_batch_job(
                 request, kind="export_proknow", uploaded_file=form.cleaned_data["file"],
-                extra={"collection": form.cleaned_data["collection"]}, project_id=project_id,
+                extra={"collection": form.cleaned_data["collection"]},
+                project_id=form.cleaned_data["project_id"],
             )
             return redirect("jobs:job_watch", job_id=job_id)
     else:
         form = ProKnowExportForm()
-    return render(request, "jobs/export_proknow.html", {"form": form, "project_id": project_id})
+        form.set_project_choices(projects)
+    return render(request, "jobs/export_proknow.html", {"form": form, "has_projects": bool(projects)})
 
 
 @login_required
@@ -260,49 +271,93 @@ def cancel_job(request, job_id):
     return redirect("jobs:job_watch", job_id=job_id)
 
 
+def _job_is_visible_to(request, job_info: dict, user_project_ids: list[str]) -> bool:
+    return request.user.is_staff or job_info.get("project_id") in user_project_ids
+
+
 @login_required
 def job_detail(request, job_id):
     try:
-        summary = backend_client.job_summary(job_id)
-        patients = backend_client.job_patients(job_id)
+        job_info = backend_client.job_summary(job_id)
     except backend_client.BackendError as e:
         messages.error(request, f"Could not load job: {e.detail}")
         return redirect("jobs:dashboard")
+
+    user_project_ids = [p["project_id"] for p in _users_projects(request.user)]
+    if not _job_is_visible_to(request, job_info, user_project_ids):
+        messages.error(request, "You don't have access to that job.")
+        return redirect("jobs:dashboard")
+
+    try:
+        patients = backend_client.job_patients(job_id)["patients"]
+        patient_summary = {p["mrn"]: p for p in backend_client.job_patients_summary(job_id)["patients"]}
+    except backend_client.BackendError as e:
+        messages.error(request, f"Could not load job: {e.detail}")
+        return redirect("jobs:dashboard")
+
     return render(request, "jobs/job_detail.html", {
-        "job_id": job_id, "summary": summary["summary"], "patients": patients["patients"],
+        "job_id": job_id, "summary": job_info["summary"], "patients": patients,
+        "patient_summary": patient_summary,
     })
 
 
 @login_required
 def results_lookup(request):
+    users_projects = _users_projects(request.user)
+    user_project_ids = [p["project_id"] for p in users_projects]
+
+    project_jobs = []
+    for p in users_projects:
+        try:
+            for j in backend_client.list_project_jobs(p["project_id"]):
+                project_jobs.append({**j, "project_title": p["title"]})
+        except backend_client.BackendError:
+            pass
+    project_jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+
     lookup = request.GET.get("lookup", "job")
     job_form = JobLookupForm(request.GET if lookup == "job" else None)
     patient_form = PatientLookupForm(request.GET if lookup == "patient" else None)
     summary = None
     patients = None
+    patient_summary = None
     events = None
     error = None
 
     if lookup == "job" and job_form.is_valid():
         job_id = job_form.cleaned_data["job_id"]
         try:
-            summary = backend_client.job_summary(job_id)["summary"]
-            patients = backend_client.job_patients(job_id)["patients"]
+            job_info = backend_client.job_summary(job_id)
+            if not _job_is_visible_to(request, job_info, user_project_ids):
+                error = "You don't have access to that job."
+            else:
+                summary = job_info["summary"]
+                patients = backend_client.job_patients(job_id)["patients"]
+                patient_summary = {p["mrn"]: p for p in backend_client.job_patients_summary(job_id)["patients"]}
         except backend_client.BackendError as e:
             error = e.detail
 
     if lookup == "patient" and patient_form.is_valid():
         mrn = patient_form.cleaned_data["mrn"]
         job_id = patient_form.cleaned_data["job_id"]
-        try:
-            if job_id:
-                events = backend_client.patient_timeline(job_id, mrn)["events"]
-            else:
-                events = backend_client.patient_timeline_all(mrn)["events"]
-        except backend_client.BackendError as e:
-            error = e.detail
+        if not job_id and not request.user.is_staff:
+            error = "You must specify a job ID to look up a patient."
+        else:
+            try:
+                if job_id:
+                    job_info = backend_client.job_summary(job_id)
+                    if not _job_is_visible_to(request, job_info, user_project_ids):
+                        error = "You don't have access to that job."
+                    else:
+                        events = backend_client.patient_timeline(job_id, mrn)["events"]
+                else:
+                    events = backend_client.patient_timeline_all(mrn)["events"]
+            except backend_client.BackendError as e:
+                error = e.detail
 
     return render(request, "jobs/results_lookup.html", {
+        "project_jobs": project_jobs,
         "lookup": lookup, "job_form": job_form, "patient_form": patient_form,
-        "summary": summary, "patients": patients, "events": events, "error": error,
+        "summary": summary, "patients": patients, "patient_summary": patient_summary,
+        "events": events, "error": error,
     })

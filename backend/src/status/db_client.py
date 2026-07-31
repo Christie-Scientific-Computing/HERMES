@@ -86,3 +86,29 @@ class StatusDB:
             cur.execute("SELECT cancelled FROM jobs WHERE job_id = %s", (job_id,))
             row = cur.fetchone()
             return bool(row[0]) if row else False
+
+    def get_job(self, job_id: str) -> Optional[dict]:
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM jobs WHERE job_id = %s", (job_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_latest_retrieve_details(self, job_id: str) -> dict[str, dict]:
+        """
+        Most recent retrieve-stage success `details` per patient in a job --
+        e.g. {"in_mosaiq": bool, "in_pinnacle": bool, "in_proknow": bool, "status": ...}
+        as returned by Importer.handle_patient. Only patients with at least
+        one successful retrieve event appear; a patient with only failures
+        (or an export-only job) simply isn't in the returned dict.
+        """
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (mrn) mrn, details
+                FROM events
+                WHERE job_id = %s AND stage = 'retrieve' AND event_type = 'success'
+                ORDER BY mrn, ts DESC
+                """,
+                (job_id,),
+            )
+            return {row["mrn"]: (row["details"] or {}) for row in cur.fetchall()}

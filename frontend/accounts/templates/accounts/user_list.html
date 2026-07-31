@@ -3,9 +3,14 @@
 {% block content %}
 <div class="flex items-center justify-between mb-4">
   <h1 class="text-xl font-semibold text-gray-900">Users</h1>
-  <a href="{% url 'accounts:invite' %}" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
-    Invite user
-  </a>
+  <div class="flex gap-2">
+    <a href="{% url 'accounts:invite' %}" class="rounded-md bg-gray-100 text-gray-700 px-4 py-2 text-sm font-medium hover:bg-gray-200">
+      Invite user
+    </a>
+    <a href="{% url 'accounts:create_user' %}" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+      Create user directly
+    </a>
+  </div>
 </div>
 <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
   <table class="min-w-full divide-y divide-gray-200 text-sm">

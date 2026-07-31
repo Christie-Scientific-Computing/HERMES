@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}HERMES{% endblock %}</title>
-  <link rel="icon" href="{% static 'img/hermes-logo.svg' %}" type="image/svg+xml">
+  <link rel="icon" href="{% static 'img/hermes-icon-dark-navbar.svg' %}" type="image/svg+xml">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js"></script>
@@ -52,7 +52,7 @@
       <div class="flex h-16 items-center justify-between">
         <div class="flex items-center gap-6">
           <a href="{% url 'jobs:dashboard' %}" class="flex items-center space-x-3">
-            <img src="{% static 'img/hermes-logo.svg' %}" alt="HERMES" class="h-8 w-8">
+            <img src="{% static 'img/hermes-icon-dark-navbar.svg' %}" alt="HERMES" class="h-16 w-16">
             <span class="text-white text-lg font-bold tracking-tight">HERMES</span>
           </a>
           {% if user.is_authenticated %}
@@ -62,7 +62,7 @@
             <a href="{% url 'jobs:results_lookup' %}" class="text-hermes-200 hover:text-white">Results</a>
             {% if user.is_staff %}
               <a href="{% url 'research_projects:review_queue' %}" class="text-hermes-200 hover:text-white">Review Queue</a>
-              <a href="{% url 'accounts:invite' %}" class="text-hermes-200 hover:text-white">Invite User</a>
+              <a href="{% url 'research_projects:all_projects' %}" class="text-hermes-200 hover:text-white">All Projects</a>
               <a href="{% url 'accounts:user_list' %}" class="text-hermes-200 hover:text-white">Users</a>
             {% endif %}
             {% if user.is_superuser %}
@@ -73,19 +73,6 @@
         </div>
         <div class="flex items-center space-x-4">
           {% if user.is_authenticated %}
-            {% if nav_active_projects %}
-            <form method="post" action="{% url 'research_projects:set_current' %}" class="hidden sm:block">
-              {% csrf_token %}
-              <select name="project_id" onchange="this.form.submit()"
-                      class="rounded-md bg-hermes-800 text-hermes-100 text-sm border-hermes-700 py-1">
-                {% for p in nav_active_projects %}
-                  <option value="{{ p.project_id }}" {% if nav_current_project and p.project_id == nav_current_project.project_id %}selected{% endif %}>
-                    {{ p.title }}
-                  </option>
-                {% endfor %}
-              </select>
-            </form>
-            {% endif %}
             <span class="text-gray-300 text-sm">{{ user.get_full_name|default:user.username }}</span>
             <form method="post" action="{% url 'accounts:logout' %}" class="inline">
               {% csrf_token %}
@@ -99,10 +86,10 @@
     </div>
   </nav>
 
-  {% if user.is_authenticated and not nav_active_projects %}
+  {% if user.is_authenticated and not user.is_superuser and not nav_active_projects %}
   <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 mt-4">
     <div class="rounded-md p-4 bg-yellow-50 text-yellow-800 border border-yellow-200 text-sm">
-      You don't belong to any approved ethics project yet, so import/export are unavailable.
+      You don't belong to any approved ethics project yet. You can still browse the import/export pages, but you'll need a project to actually submit anything.
       <a href="{% url 'research_projects:create' %}" class="underline font-medium">Request a new project</a>
       to get started.
     </div>

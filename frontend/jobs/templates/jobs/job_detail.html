@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load jobs_extras %}
 {% block title %}Job {{ job_id }} — HERMES{% endblock %}
 {% block content %}
 <h1 class="text-xl font-semibold text-gray-900 mb-1">Job</h1>
@@ -31,10 +32,13 @@
     <h2 class="text-sm font-semibold text-gray-900 mb-4">Patients ({{ patients|length }})</h2>
     <ul class="text-sm divide-y divide-gray-50 max-h-80 overflow-y-auto">
       {% for mrn in patients %}
-      <li class="py-1.5">
+      {% with p=patient_summary|get_item:mrn %}
+      <li class="py-2 flex items-center justify-between gap-4">
         <a class="text-hermes-700 hover:underline font-mono"
            href="{% url 'jobs:results_lookup' %}?lookup=patient&mrn={{ mrn }}&job_id={{ job_id }}">{{ mrn }}</a>
+        <c-source-badges :mosaiq="p.in_mosaiq" :pinnacle="p.in_pinnacle" :proknow="p.in_proknow" />
       </li>
+      {% endwith %}
       {% empty %}
       <li class="py-4 text-center text-gray-400">No patients recorded.</li>
       {% endfor %}

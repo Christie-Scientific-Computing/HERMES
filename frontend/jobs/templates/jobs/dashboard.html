@@ -2,10 +2,10 @@
 {% block title %}Dashboard — HERMES{% endblock %}
 {% block content %}
 <h1 class="text-2xl font-semibold text-gray-900 mb-1">Dashboard</h1>
-{% if project_id %}
-<p class="text-sm text-gray-500 mb-6">Working under project <span class="font-medium">{{ nav_current_project.title }}</span>.</p>
+{% if projects %}
+<p class="text-sm text-gray-500 mb-6">Member of {{ projects|length }} active project{{ projects|pluralize }}. Pick which one a job belongs to when you submit it.</p>
 {% else %}
-<p class="text-sm text-gray-500 mb-6">Select or request a project to get started.</p>
+<p class="text-sm text-gray-500 mb-6">You can browse import/export below, but you'll need an active project to submit anything.</p>
 {% endif %}
 
 <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
@@ -28,7 +28,7 @@
 </div>
 
 <div class="bg-white border border-gray-200 rounded-lg p-6">
-  <h2 class="text-sm font-semibold text-gray-900 mb-4">Recent jobs {% if project_id %}for this project{% endif %}</h2>
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Recent jobs across your projects</h2>
   {% if recent_jobs %}
   <table class="min-w-full text-sm divide-y divide-gray-100">
     <thead><tr>

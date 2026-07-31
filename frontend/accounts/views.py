@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
-from accounts.forms import InviteUserForm
+from accounts.forms import CreateUserForm, InviteUserForm
 
 User = get_user_model()
 
@@ -45,6 +45,22 @@ def invite_user(request):
     else:
         form = InviteUserForm()
     return render(request, "accounts/invite.html", {"form": form})
+
+
+@login_required
+@user_passes_test(_is_data_custodian)
+def create_user(request):
+    """Admin sets username+password directly -- no email, no activation
+    link, active immediately. Sits alongside invite_user, doesn't replace it."""
+    if request.method == "POST":
+        form = CreateUserForm(request.POST)
+        if form.is_valid():
+            user = form.save()
+            messages.success(request, f"Created account for {user.username}. They can sign in immediately.")
+            return redirect("accounts:user_list")
+    else:
+        form = CreateUserForm()
+    return render(request, "accounts/create_user.html", {"form": form})
 
 
 def activate_account(request, uidb64, token):

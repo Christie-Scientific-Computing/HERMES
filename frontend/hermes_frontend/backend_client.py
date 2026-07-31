@@ -18,10 +18,12 @@ Two call shapes:
     browser. No read timeout -- batch jobs can run long (see
     webui/core/backend_client.py, which had to special-case this too).
 """
+from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 import httpx
 from django.conf import settings
+from django.core.cache import cache
 
 
 def _headers() -> dict:
@@ -117,10 +119,77 @@ def list_project_jobs(project_id: str) -> list[dict]:
 
 
 def list_user_active_projects(username: str) -> list[dict]:
-    """Active (approved, non-expired) projects `username` belongs to -- used to
-    populate the project switcher and to re-validate the session's current
-    project on every job-starting request."""
+    """Active (approved, non-expired) projects `username` belongs to -- used
+    to populate the project_id choices on every submission form, live, on
+    every request (never cached/reused across a GET/POST pair)."""
     return [p for p in list_projects(username=username, status="approved")]
+
+
+# ---- Superuser bypass project ----
+#
+# Superusers shouldn't need ethics approval to use the tool -- but rather
+# than threading a new trusted `is_superuser` field through every gated
+# backend endpoint (more surface area in fail-closed security code, for no
+# real benefit), Django auto-provisions one genuine, permanently-approved
+# project and makes the superuser a real member of it. The backend's
+# enforcement (backend/src/projects/enforcement.py) is completely
+# untouched -- a superuser is just an ordinary active project member as far
+# as require_project_member is concerned.
+
+_SUPERUSER_BYPASS_MARKER = "__SUPERUSER_BYPASS__"
+_SUPERUSER_BYPASS_SYSTEM_USER = "system"
+_SUPERUSER_BYPASS_CACHE_KEY = "hermes:superuser_bypass_project_id"
+_FAR_FUTURE_EXPIRY = datetime(9999, 12, 31, tzinfo=timezone.utc)
+
+
+def _find_or_create_superuser_bypass_project() -> str:
+    # Approving requires a non-null expiry_date (POST /projects/{id}/review
+    # rejects approved=True with none) -- there's no "never expires" option
+    # through this API, so a far-future sentinel stands in for one.
+    existing = [
+        p for p in list_projects(status="approved")
+        if p.get("ethics_reference") == _SUPERUSER_BYPASS_MARKER
+    ]
+    if existing:
+        return existing[0]["project_id"]
+
+    project = create_project(
+        title="Administrative Access (superuser bypass)",
+        created_by=_SUPERUSER_BYPASS_SYSTEM_USER,
+        description="Auto-provisioned project granting Django superusers import/export access without ethics review.",
+        ethics_reference=_SUPERUSER_BYPASS_MARKER,
+    )
+    project_id = project["project_id"]
+    submit_project(project_id, _SUPERUSER_BYPASS_SYSTEM_USER)
+    review_project(
+        project_id, reviewer=_SUPERUSER_BYPASS_SYSTEM_USER, approved=True,
+        comment="Auto-approved: administrative bypass project", expiry_date=_FAR_FUTURE_EXPIRY,
+    )
+    # Accepted, harmless race: two processes racing on first-ever use could
+    # each create a duplicate bypass project (no unique constraint exists or
+    # is needed for this) -- membership is what gates authorization, and
+    # either project works identically for whoever ends up in it.
+    return project_id
+
+
+def ensure_superuser_bypass_project(username: str) -> str:
+    """Ensure `username` is an active member of the bypass project, creating
+    it on first-ever use, and return its project_id. Cache is a pure perf
+    optimization -- correctness never depends on it (each process falls
+    back to the live lookup if its cache is empty, which matters once this
+    runs under multiple uvicorn workers, since the default LocMemCache is
+    per-process)."""
+    project_id = cache.get(_SUPERUSER_BYPASS_CACHE_KEY)
+    if project_id is None:
+        project_id = _find_or_create_superuser_bypass_project()
+        cache.set(_SUPERUSER_BYPASS_CACHE_KEY, project_id, timeout=None)
+
+    # added_by must always be the fixed system identity, never the target
+    # user's own username: the add-member endpoint requires added_by to
+    # already be a project member, and "system" (auto-added as owner at
+    # creation) always qualifies, whereas a brand-new superuser wouldn't yet.
+    add_member(project_id, username, added_by=_SUPERUSER_BYPASS_SYSTEM_USER)
+    return project_id
 
 
 # ---- Import (jobs/ app) ----
@@ -164,6 +233,12 @@ def job_summary(job_id: str) -> dict:
 
 def job_patients(job_id: str) -> dict:
     return _get(f"/results/job/{job_id}/patients")
+
+
+def job_patients_summary(job_id: str) -> dict:
+    """Per-patient source-system presence (in_mosaiq/in_pinnacle/in_proknow)
+    for an import job -- null for each key on export-only jobs/patients."""
+    return _get(f"/results/job/{job_id}/patients/summary")
 
 
 def patient_timeline(job_id: str, mrn: str) -> dict:

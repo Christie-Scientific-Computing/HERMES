@@ -2,24 +2,30 @@
 {% block title %}Single Import — HERMES{% endblock %}
 {% block content %}
 <h1 class="text-xl font-semibold text-gray-900 mb-4">Import — single patient</h1>
-<form method="post" class="max-w-md space-y-4 bg-white border border-gray-200 rounded-lg p-6">
-  {% csrf_token %}
-  {% for field in form %}
-    <div>
-      <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
-      {{ field }}
-    </div>
-  {% endfor %}
-  <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
-    Import
-  </button>
-</form>
+<div class="grid gap-6 lg:grid-cols-2">
+  <div>
+    {% if has_projects %}
+    <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+      {% csrf_token %}
+      {% for field in form %}
+        <div>
+          <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
+          {{ field }}
+        </div>
+      {% endfor %}
+      <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+        Import
+      </button>
+    </form>
+    {% else %}
+    <c-no-projects-notice />
+    {% endif %}
+  </div>
 
-{% if result %}
-<div class="max-w-md mt-6 rounded-lg border p-4 {% if result.type == 'success' %}border-green-200 bg-green-50{% else %}border-red-200 bg-red-50{% endif %}">
-  <p class="text-sm font-medium">{{ result.type|title }} &mdash; {{ result.mrn }}</p>
-  {% if result.error %}<p class="text-sm text-red-700 mt-1">{{ result.error }}</p>{% endif %}
-  {% if result.status %}<p class="text-sm text-gray-600 mt-1">Status: {{ result.status }}</p>{% endif %}
+  {% if job_id %}
+  <div>
+    <c-job-progress job_id="{{ job_id }}" />
+  </div>
+  {% endif %}
 </div>
-{% endif %}
 {% endblock %}

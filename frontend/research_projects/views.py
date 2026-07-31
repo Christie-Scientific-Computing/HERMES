@@ -1,7 +1,6 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, user_passes_test
-from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
+from django.shortcuts import redirect, render
 
 from hermes_frontend import backend_client
 from research_projects.forms import AddMemberForm, CreateProjectForm, ProjectDocumentForm, ReviewProjectForm
@@ -169,9 +168,15 @@ def upload_document(request, project_id):
 
 
 @login_required
-def set_current_project(request):
-    if request.method == "POST":
-        project_id = request.POST.get("project_id")
-        if project_id:
-            request.session["current_project_id"] = project_id
-    return redirect(request.META.get("HTTP_REFERER") or reverse("jobs:dashboard"))
+@user_passes_test(_is_data_custodian)
+def all_projects(request):
+    """Every project regardless of status or membership -- staff only.
+    Users can't hide a project from an admin: there's no membership filter
+    here at all, unlike project_list (which is always scoped to "mine")."""
+    status = request.GET.get("status") or None
+    try:
+        projects = backend_client.list_projects(status=status)
+    except backend_client.BackendError as e:
+        messages.error(request, f"Could not load projects: {e.detail}")
+        projects = []
+    return render(request, "research_projects/all_projects.html", {"projects": projects, "status": status})

@@ -2,6 +2,7 @@
 {% block title %}ProKnow Export — HERMES{% endblock %}
 {% block content %}
 <h1 class="text-xl font-semibold text-gray-900 mb-4">Export — ProKnow</h1>
+{% if has_projects %}
 <form method="post" enctype="multipart/form-data" class="max-w-md space-y-4 bg-white border border-gray-200 rounded-lg p-6">
   {% csrf_token %}
   {% for field in form %}
@@ -14,4 +15,7 @@
     Start upload
   </button>
 </form>
+{% else %}
+<c-no-projects-notice />
+{% endif %}
 {% endblock %}

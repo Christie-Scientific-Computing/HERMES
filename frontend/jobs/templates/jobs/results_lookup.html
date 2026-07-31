@@ -1,8 +1,40 @@
 {% extends "base.html" %}
+{% load jobs_extras %}
 {% block title %}Results — HERMES{% endblock %}
 {% block content %}
-<h1 class="text-xl font-semibold text-gray-900 mb-4">Results lookup</h1>
+<h1 class="text-xl font-semibold text-gray-900 mb-1">Results</h1>
+<p class="text-sm text-gray-500 mb-6">
+  {% if user.is_staff %}Jobs across your own projects, by default. Staff can also search any job or patient below.
+  {% else %}Jobs across the projects you belong to.{% endif %}
+</p>
 
+<div class="bg-white border border-gray-200 rounded-lg p-6 mb-8">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Your jobs ({{ project_jobs|length }})</h2>
+  {% if project_jobs %}
+  <table class="min-w-full text-sm divide-y divide-gray-100">
+    <thead><tr>
+      <th class="text-left py-1 font-medium text-gray-500">Job</th>
+      <th class="text-left py-1 font-medium text-gray-500">Project</th>
+      <th class="text-left py-1 font-medium text-gray-500">Description</th>
+      <th class="text-left py-1 font-medium text-gray-500">Created</th>
+    </tr></thead>
+    <tbody class="divide-y divide-gray-50">
+      {% for job in project_jobs %}
+      <tr>
+        <td class="py-1"><a class="text-hermes-700 hover:underline font-mono" href="{% url 'jobs:job_detail' job.job_id %}">{{ job.job_id }}</a></td>
+        <td class="py-1 text-gray-600">{{ job.project_title }}</td>
+        <td class="py-1 text-gray-600">{{ job.description }}</td>
+        <td class="py-1 text-gray-500">{{ job.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-gray-400 text-sm">No jobs under any of your projects yet.</p>
+  {% endif %}
+</div>
+
+<h2 class="text-sm font-semibold text-gray-900 mb-2">Narrow your search</h2>
 <div class="flex gap-4 border-b border-gray-200 mb-6 text-sm">
   <a href="?lookup=job" class="pb-2 {% if lookup == 'job' %}border-b-2 border-hermes-700 text-hermes-700 font-medium{% else %}text-gray-500{% endif %}">By job</a>
   <a href="?lookup=patient" class="pb-2 {% if lookup == 'patient' %}border-b-2 border-hermes-700 text-hermes-700 font-medium{% else %}text-gray-500{% endif %}">By patient</a>
@@ -31,7 +63,14 @@
   <div class="bg-white border border-gray-200 rounded-lg p-6">
     <h2 class="text-sm font-semibold text-gray-900 mb-4">Patients ({{ patients|length }})</h2>
     <ul class="text-sm divide-y divide-gray-50 max-h-80 overflow-y-auto">
-      {% for mrn in patients %}<li class="py-1.5 font-mono">{{ mrn }}</li>{% endfor %}
+      {% for mrn in patients %}
+      {% with p=patient_summary|get_item:mrn %}
+      <li class="py-2 flex items-center justify-between gap-4">
+        <span class="font-mono">{{ mrn }}</span>
+        <c-source-badges :mosaiq="p.in_mosaiq" :pinnacle="p.in_pinnacle" :proknow="p.in_proknow" />
+      </li>
+      {% endwith %}
+      {% endfor %}
     </ul>
   </div>
 </div>
@@ -48,7 +87,11 @@
   <div>
     <label class="block text-sm font-medium text-gray-700">{{ patient_form.job_id.label }}</label>
     {{ patient_form.job_id }}
+    {% if user.is_staff %}
     <p class="text-xs text-gray-400 mt-1">{{ patient_form.job_id.help_text }}</p>
+    {% else %}
+    <p class="text-xs text-gray-400 mt-1">Required — you can only look up a patient within one of your own jobs.</p>
+    {% endif %}
   </div>
   <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">Look up</button>
 </form>

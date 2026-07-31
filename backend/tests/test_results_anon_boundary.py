@@ -47,6 +47,47 @@ def test_job_patients_returns_anon_id_never_real(client, job_id):
     assert REAL_MRN not in resp.text
 
 
+def test_job_summary_includes_job_metadata(client, job_id):
+    status_db.create_job(job_id, description="a batch", created_by="alice", project_id=None)
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["description"] == "a batch"
+    assert body["created_by"] == "alice"
+    assert body["project_id"] is None
+    assert body["cancelled"] is False
+
+
+def test_job_patients_summary_includes_source_presence_and_anon_id(client, job_id):
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="retrieve", event_type="success",
+        details={"in_mosaiq": True, "in_pinnacle": False, "in_proknow": True, "status": "imported"},
+    )
+
+    resp = client.get(f"/results/job/{job_id}/patients/summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["patients"] == [{
+        "mrn": ANON_MRN, "in_mosaiq": True, "in_pinnacle": False, "in_proknow": True, "status": "imported",
+    }]
+    assert REAL_MRN not in resp.text
+
+
+def test_job_patients_summary_null_for_export_only_patient(client, job_id):
+    status_db.create_job(job_id)
+    status_db.add_event(job_id, REAL_MRN, stage="export", event_type="success", details={"status": "exported"})
+
+    resp = client.get(f"/results/job/{job_id}/patients/summary")
+    assert resp.status_code == 200
+    patient = resp.json()["patients"][0]
+    assert patient["mrn"] == ANON_MRN
+    assert patient["in_mosaiq"] is None
+    assert patient["in_pinnacle"] is None
+    assert patient["in_proknow"] is None
+
+
 def test_patient_timeline_translates_inbound_and_outbound(client, job_id):
     status_db.create_job(job_id)
     status_db.add_event(job_id, REAL_MRN, stage="retrieve", event_type="start")
