@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Batch Import — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-4">Import — batch (CSV)</h1>
+<form method="post" enctype="multipart/form-data" class="max-w-md space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+  {% csrf_token %}
+  {% for field in form %}
+    <div>
+      <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
+      {{ field }}
+      {% if field.help_text %}<p class="text-xs text-gray-400 mt-1">{{ field.help_text }}</p>{% endif %}
+    </div>
+  {% endfor %}
+  <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+    Start import
+  </button>
+</form>
+{% endblock %}

@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Results — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-4">Results lookup</h1>
+
+<div class="flex gap-4 border-b border-gray-200 mb-6 text-sm">
+  <a href="?lookup=job" class="pb-2 {% if lookup == 'job' %}border-b-2 border-hermes-700 text-hermes-700 font-medium{% else %}text-gray-500{% endif %}">By job</a>
+  <a href="?lookup=patient" class="pb-2 {% if lookup == 'patient' %}border-b-2 border-hermes-700 text-hermes-700 font-medium{% else %}text-gray-500{% endif %}">By patient</a>
+</div>
+
+{% if lookup == "job" %}
+<form method="get" class="max-w-md flex gap-2 mb-6">
+  <input type="hidden" name="lookup" value="job">
+  {{ job_form.job_id }}
+  <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800 whitespace-nowrap">Look up</button>
+</form>
+{% if summary is not None %}
+<div class="grid gap-6 lg:grid-cols-2">
+  <div class="bg-white border border-gray-200 rounded-lg p-6">
+    <h2 class="text-sm font-semibold text-gray-900 mb-4">Summary</h2>
+    <table class="min-w-full text-sm divide-y divide-gray-100">
+      <tbody class="divide-y divide-gray-50">
+        {% for row in summary %}
+        <tr><td class="py-1">{{ row.stage }}</td><td class="py-1">{{ row.event_type }}</td><td class="py-1">{{ row.cnt }}</td></tr>
+        {% empty %}
+        <tr><td class="py-4 text-center text-gray-400">No events recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="bg-white border border-gray-200 rounded-lg p-6">
+    <h2 class="text-sm font-semibold text-gray-900 mb-4">Patients ({{ patients|length }})</h2>
+    <ul class="text-sm divide-y divide-gray-50 max-h-80 overflow-y-auto">
+      {% for mrn in patients %}<li class="py-1.5 font-mono">{{ mrn }}</li>{% endfor %}
+    </ul>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+{% if lookup == "patient" %}
+<form method="get" class="max-w-md space-y-3 mb-6">
+  <input type="hidden" name="lookup" value="patient">
+  <div>
+    <label class="block text-sm font-medium text-gray-700">{{ patient_form.mrn.label }}</label>
+    {{ patient_form.mrn }}
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700">{{ patient_form.job_id.label }}</label>
+    {{ patient_form.job_id }}
+    <p class="text-xs text-gray-400 mt-1">{{ patient_form.job_id.help_text }}</p>
+  </div>
+  <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">Look up</button>
+</form>
+{% if events is not None %}
+<div class="bg-white border border-gray-200 rounded-lg p-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Timeline ({{ events|length }} events)</h2>
+  <table class="min-w-full text-sm divide-y divide-gray-100">
+    <thead><tr>
+      <th class="text-left py-1 font-medium text-gray-500">When</th>
+      <th class="text-left py-1 font-medium text-gray-500">Stage</th>
+      <th class="text-left py-1 font-medium text-gray-500">Event</th>
+      <th class="text-left py-1 font-medium text-gray-500">Attempt</th>
+      <th class="text-left py-1 font-medium text-gray-500">Error</th>
+    </tr></thead>
+    <tbody class="divide-y divide-gray-50">
+      {% for e in events %}
+      <tr>
+        <td class="py-1">{{ e.ts }}</td>
+        <td class="py-1">{{ e.stage }}</td>
+        <td class="py-1">{{ e.event_type }}</td>
+        <td class="py-1">{{ e.attempt }}</td>
+        <td class="py-1 text-red-600">{{ e.error_message|default:"" }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="5" class="py-4 text-center text-gray-400">No events found.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endif %}
+
+{% if error %}
+<div class="max-w-md mt-4 rounded-md bg-red-50 border border-red-200 p-4 text-sm text-red-700">{{ error }}</div>
+{% endif %}
+{% endblock %}

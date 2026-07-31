@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}My Projects — HERMES{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-xl font-semibold text-gray-900">My Projects</h1>
+  <a href="{% url 'research_projects:create' %}" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+    New project
+  </a>
+</div>
+{% if projects %}
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for project in projects %}
+    <c-project-card :project="project" />
+  {% endfor %}
+</div>
+{% else %}
+<div class="text-center py-16 text-gray-400">
+  <p>You're not part of any project yet.</p>
+  <a href="{% url 'research_projects:create' %}" class="text-hermes-700 underline">Request one</a> to get started.
+</div>
+{% endif %}
+{% endblock %}

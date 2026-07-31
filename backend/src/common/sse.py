@@ -93,6 +93,8 @@ async def run_batch_job(
     worker: Callable[[BatchItem], Optional[dict]],
     status_db,
     description: Optional[str] = None,
+    created_by: Optional[str] = None,
+    project_id: Optional[str] = None,
 ):
     """
     Generic SSE batch-job generator.
@@ -101,10 +103,15 @@ async def run_batch_job(
     actual work for one item and returns a dict of extra fields to merge
     into the success event (or None/{} if there's nothing extra to report).
     It should raise on failure.
+
+    `created_by`/`project_id` trace the job back to the Django user and
+    ethics-approved project that authorized it (see
+    backend/src/projects/enforcement.py, which callers must have already
+    checked before calling this) -- purely bookkeeping here, not enforcement.
     """
     if status_db:
         try:
-            status_db.create_job(job_id, description=description)
+            status_db.create_job(job_id, description=description, created_by=created_by, project_id=project_id)
         except Exception as e:
             logger.warning("Could not create job in status DB: %s", e)
 

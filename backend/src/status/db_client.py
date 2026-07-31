@@ -12,15 +12,21 @@ from backend.src.db import get_conn
 
 
 class StatusDB:
-    def create_job(self, job_id: str, description: Optional[str] = None, created_by: Optional[str] = None):
+    def create_job(
+        self,
+        job_id: str,
+        description: Optional[str] = None,
+        created_by: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ):
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO jobs(job_id, created_at, created_by, description)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO jobs(job_id, created_at, created_by, description, project_id)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (job_id) DO NOTHING
                 """,
-                (job_id, datetime.now(timezone.utc), created_by, description),
+                (job_id, datetime.now(timezone.utc), created_by, description, project_id),
             )
 
     def add_patient(self, job_id: str, mrn: str, input_path: Optional[str] = None):

@@ -8,7 +8,7 @@ import time
 import numpy as np
 import requests as http_requests
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from pydantic import BaseModel
 from proknow import ProKnow
 from dotenv import load_dotenv
@@ -18,11 +18,13 @@ from backend.src.export.logic import Exporter
 from backend.src.status.db_client import StatusDB
 from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
 from backend.src.identity import anon
+from backend.src.projects import enforcement
+from backend.src.projects.enforcement import verify_internal_key
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix='/export', tags=["export"])
+router = APIRouter(prefix='/export', tags=["export"], dependencies=[Depends(verify_internal_key)])
 
 # StatusDB init — connects via the shared pool in backend/src/db.py (DATABASE_URL)
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -48,6 +50,8 @@ PROKNOW_WORKSPACE = 'RBV - Christie'
 
 class Request(BaseModel):
     job_id: str
+    project_id: str
+    username: str
     mrn: str | None = None
     path_to_csv: str | None = None
     destination: str | None = None # DICOM AE
@@ -58,7 +62,8 @@ class Response(BaseModel):
     status: str | None = None
 
 @router.get("/get_orthanc_modalities")
-async def get_orthanc_modalities():
+async def get_orthanc_modalities(username: str = Query(...)):
+    enforcement.require_any_active_project(username)
     try:
         client = Orthanc(url=ORTHANC_URL, username=ORTHANC_USER,
                 password=ORTHANC_PASS, verify=False,
@@ -70,7 +75,8 @@ async def get_orthanc_modalities():
         raise HTTPException(status_code=502, detail=f"Orthanc query failed: {exc}")
 
 @router.get("/get_proknow_collections")
-async def get_proknow_collections():
+async def get_proknow_collections(username: str = Query(...)):
+    enforcement.require_any_active_project(username)
     try:
         pk = ProKnow(PROKNOW_URL, credentials_file='credentials.json')
         logger.debug("Connected to Proknow")
@@ -111,6 +117,7 @@ def _build_export_items(path_to_csv: str) -> list[BatchItem]:
 async def dicom_move(body: Request):
     req = body.model_dump()
     logger.info(req)
+    enforcement.require_project_member(req['project_id'], req['username'])
     items = _build_export_items(req['path_to_csv'])
     return StreamingResponse(
         run_batch_job(
@@ -118,6 +125,8 @@ async def dicom_move(body: Request):
             worker=_dicom_move_worker(req['destination']),
             status_db=status_db,
             description=f"Batch export to {req['destination']}",
+            created_by=req['username'],
+            project_id=req['project_id'],
         ),
         media_type="text/event-stream",
         headers = {
@@ -130,6 +139,7 @@ async def dicom_move(body: Request):
 async def proknow_upload(body: Request):
     req = body.model_dump()
     logger.info(req)
+    enforcement.require_project_member(req['project_id'], req['username'])
     items = _build_export_items(req['path_to_csv'])
     return StreamingResponse(
         run_batch_job(
@@ -137,6 +147,8 @@ async def proknow_upload(body: Request):
             worker=_proknow_worker(req['collection']),
             status_db=status_db,
             description=f"Batch ProKnow upload to {req['collection']}",
+            created_by=req['username'],
+            project_id=req['project_id'],
         ),
         media_type="text/event-stream",
         headers = {
@@ -149,6 +161,7 @@ async def proknow_upload(body: Request):
 async def proknow_upload_patient(body: Request):
     req = body.model_dump()
     logger.info(req)
+    enforcement.require_project_member(req['project_id'], req['username'])
     job_id = req.get('job_id', 'manual')
     try:
         real_mrn = anon.resolve_real_id(req['mrn'])
@@ -161,7 +174,10 @@ async def proknow_upload_patient(body: Request):
     # Record patient and start
     if status_db:
         try:
-            status_db.create_job(job_id, description=f"Single ProKnow upload to {req.get('collection')}")
+            status_db.create_job(
+                job_id, description=f"Single ProKnow upload to {req.get('collection')}",
+                created_by=req['username'], project_id=req['project_id'],
+            )
             status_db.add_patient(job_id, real_mrn, input_path=None)
             status_db.add_event(job_id, real_mrn, stage='export', event_type='start')
         except Exception as e:
@@ -198,9 +214,12 @@ async def proknow_upload_patient(body: Request):
 async def dicom_move_file(
     file: UploadFile = File(..., description="CSV with a patient_id column"),
     job_id: str = Form(...),
+    project_id: str = Form(...),
+    username: str = Form(...),
     destination: str = Form(..., description="Orthanc modality AE title"),
 ):
-    """Accept a CSV file upload and stream DICOM C-MOVE progress via SSE. Used by the proxy/frontend."""
+    """Accept a CSV file upload and stream DICOM C-MOVE progress via SSE. Used by the frontend."""
+    enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
@@ -213,6 +232,8 @@ async def dicom_move_file(
             worker=_dicom_move_worker(destination),
             status_db=status_db,
             description=f"Batch export to {destination}",
+            created_by=username,
+            project_id=project_id,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
@@ -223,9 +244,12 @@ async def dicom_move_file(
 async def proknow_upload_file(
     file: UploadFile = File(..., description="CSV with a patient_id column"),
     job_id: str = Form(...),
+    project_id: str = Form(...),
+    username: str = Form(...),
     collection: str = Form(..., description="ProKnow collection name"),
 ):
-    """Accept a CSV file upload and stream ProKnow upload progress via SSE. Used by the proxy/frontend."""
+    """Accept a CSV file upload and stream ProKnow upload progress via SSE. Used by the frontend."""
+    enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
@@ -238,6 +262,8 @@ async def proknow_upload_file(
             worker=_proknow_worker(collection),
             status_db=status_db,
             description=f"Batch ProKnow upload to {collection}",
+            created_by=username,
+            project_id=project_id,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
@@ -331,6 +357,8 @@ def _uid_move_worker(destination: str):
 async def dicom_move_uids_file(
     file: UploadFile = File(..., description="CSV with study_instance_uid and optionally series_instance_uid columns"),
     job_id: str = Form(...),
+    project_id: str = Form(...),
+    username: str = Form(...),
     destination: str = Form(..., description="Orthanc modality AE title"),
     level: str = Form("study", description="'study' to move whole study, 'series' to move individual series"),
 ):
@@ -339,6 +367,7 @@ async def dicom_move_uids_file(
     Accepts the CSV produced by the Studies page (already PACS-filtered if requested).
     Deduplicates rows before moving.
     """
+    enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
@@ -352,6 +381,8 @@ async def dicom_move_uids_file(
             worker=_uid_move_worker(destination),
             status_db=status_db,
             description=f"UID C-MOVE ({level}) to {destination}",
+            created_by=username,
+            project_id=project_id,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},

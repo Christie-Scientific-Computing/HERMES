@@ -50,7 +50,8 @@ def _parse_sse(text: str) -> list[dict]:
     return [json.loads(line[len("data: "):]) for line in text.splitlines() if line.startswith("data: ")]
 
 
-def test_dicom_move_events_use_anon_id_not_real(client, tmp_path):
+def test_dicom_move_events_use_anon_id_not_real(client, tmp_path, active_project):
+    project_id, username = active_project
     csv_path = tmp_path / "patients.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -61,6 +62,7 @@ def test_dicom_move_events_use_anon_id_not_real(client, tmp_path):
     job_id = f"export-anon-{uuid.uuid4()}"
     resp = client.post("/export/dicom_move", json={
         "job_id": job_id, "path_to_csv": str(csv_path), "destination": "SOME_AE",
+        "project_id": project_id, "username": username,
     })
     assert resp.status_code == 200
     events = _parse_sse(resp.text)
@@ -76,7 +78,8 @@ def test_dicom_move_events_use_anon_id_not_real(client, tmp_path):
     assert [e["event_type"] for e in history] == ["start", "success"]
 
 
-def test_dicom_move_unknown_anon_id_in_csv_returns_422(client, tmp_path):
+def test_dicom_move_unknown_anon_id_in_csv_returns_422(client, tmp_path, active_project):
+    project_id, username = active_project
     csv_path = tmp_path / "patients.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -85,21 +88,25 @@ def test_dicom_move_unknown_anon_id_in_csv_returns_422(client, tmp_path):
 
     resp = client.post("/export/dicom_move", json={
         "job_id": f"export-anon-{uuid.uuid4()}", "path_to_csv": str(csv_path), "destination": "SOME_AE",
+        "project_id": project_id, "username": username,
     })
     assert resp.status_code == 422
 
 
-def test_dicom_move_missing_csv_returns_400_not_500(client):
+def test_dicom_move_missing_csv_returns_400_not_500(client, active_project):
+    project_id, username = active_project
     resp = client.post("/export/dicom_move", json={
         "job_id": f"export-anon-{uuid.uuid4()}",
         "path_to_csv": "/nonexistent/path/patients.csv",
         "destination": "SOME_AE",
+        "project_id": project_id, "username": username,
     })
     assert resp.status_code == 400
     assert resp.json()["detail"]
 
 
-def test_dicom_move_anon_db_unreachable_returns_503(client, tmp_path, monkeypatch):
+def test_dicom_move_anon_db_unreachable_returns_503(client, tmp_path, monkeypatch, active_project):
+    project_id, username = active_project
     csv_path = tmp_path / "patients.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -111,6 +118,7 @@ def test_dicom_move_anon_db_unreachable_returns_503(client, tmp_path, monkeypatc
     try:
         resp = client.post("/export/dicom_move", json={
             "job_id": f"export-anon-{uuid.uuid4()}", "path_to_csv": str(csv_path), "destination": "SOME_AE",
+            "project_id": project_id, "username": username,
         })
         assert resp.status_code == 503
         assert resp.json()["detail"]
@@ -118,27 +126,32 @@ def test_dicom_move_anon_db_unreachable_returns_503(client, tmp_path, monkeypatc
         monkeypatch.setattr(anon, "_pool", None)
 
 
-def test_get_orthanc_modalities_failure_returns_502_not_bare_500(client, monkeypatch):
+def test_get_orthanc_modalities_failure_returns_502_not_bare_500(client, monkeypatch, active_project):
+    _, username = active_project
+
     def boom(*args, **kwargs):
         raise ConnectionError("no route to host")
 
     monkeypatch.setattr(export_endpoints, "Orthanc", boom)
-    resp = client.get("/export/get_orthanc_modalities")
+    resp = client.get("/export/get_orthanc_modalities", params={"username": username})
     assert resp.status_code == 502
     assert resp.json()["detail"]
 
 
-def test_get_proknow_collections_failure_returns_502_not_bare_500(client, monkeypatch):
+def test_get_proknow_collections_failure_returns_502_not_bare_500(client, monkeypatch, active_project):
+    _, username = active_project
+
     def boom(*args, **kwargs):
         raise FileNotFoundError("credentials.json")
 
     monkeypatch.setattr(export_endpoints, "ProKnow", boom)
-    resp = client.get("/export/get_proknow_collections")
+    resp = client.get("/export/get_proknow_collections", params={"username": username})
     assert resp.status_code == 502
     assert resp.json()["detail"]
 
 
-def test_cancel_mid_batch_stops_remaining_items(client, tmp_path, monkeypatch):
+def test_cancel_mid_batch_stops_remaining_items(client, tmp_path, monkeypatch, active_project):
+    project_id, username = active_project
     csv_path = tmp_path / "patients.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -165,6 +178,7 @@ def test_cancel_mid_batch_stops_remaining_items(client, tmp_path, monkeypatch):
 
     resp = client.post("/export/dicom_move", json={
         "job_id": job_id, "path_to_csv": str(csv_path), "destination": "SOME_AE",
+        "project_id": project_id, "username": username,
     })
     events = _parse_sse(resp.text)
     assert call_count == 1

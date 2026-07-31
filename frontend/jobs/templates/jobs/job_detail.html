@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job_id }} — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-1">Job</h1>
+<p class="text-sm text-gray-500 mb-6 font-mono">{{ job_id }}</p>
+
+<div class="grid gap-6 lg:grid-cols-2">
+  <div class="bg-white border border-gray-200 rounded-lg p-6">
+    <h2 class="text-sm font-semibold text-gray-900 mb-4">Summary</h2>
+    <table class="min-w-full text-sm divide-y divide-gray-100">
+      <thead><tr>
+        <th class="text-left py-1 font-medium text-gray-500">Stage</th>
+        <th class="text-left py-1 font-medium text-gray-500">Event</th>
+        <th class="text-left py-1 font-medium text-gray-500">Count</th>
+      </tr></thead>
+      <tbody class="divide-y divide-gray-50">
+        {% for row in summary %}
+        <tr>
+          <td class="py-1">{{ row.stage }}</td>
+          <td class="py-1">{{ row.event_type }}</td>
+          <td class="py-1">{{ row.cnt }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="3" class="py-4 text-center text-gray-400">No events recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="bg-white border border-gray-200 rounded-lg p-6">
+    <h2 class="text-sm font-semibold text-gray-900 mb-4">Patients ({{ patients|length }})</h2>
+    <ul class="text-sm divide-y divide-gray-50 max-h-80 overflow-y-auto">
+      {% for mrn in patients %}
+      <li class="py-1.5">
+        <a class="text-hermes-700 hover:underline font-mono"
+           href="{% url 'jobs:results_lookup' %}?lookup=patient&mrn={{ mrn }}&job_id={{ job_id }}">{{ mrn }}</a>
+      </li>
+      {% empty %}
+      <li class="py-4 text-center text-gray-400">No patients recorded.</li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endblock %}

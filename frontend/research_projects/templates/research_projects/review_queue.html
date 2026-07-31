@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Review Queue — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-4">Projects awaiting review</h1>
+{% if projects %}
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for project in projects %}
+    <c-project-card :project="project" />
+  {% endfor %}
+</div>
+{% else %}
+<p class="text-gray-400 text-center py-16">Nothing waiting for review.</p>
+{% endif %}
+{% endblock %}

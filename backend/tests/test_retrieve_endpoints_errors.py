@@ -33,28 +33,32 @@ def client():
     return TestClient(app)
 
 
-def test_batch_import_missing_csv_returns_400_not_500(client):
+def test_batch_import_missing_csv_returns_400_not_500(client, active_project):
+    project_id, username = active_project
     resp = client.post("/import/batch_import", json={
         "job_id": f"import-err-{uuid.uuid4()}",
         "path_to_csv": "/nonexistent/path/patients.csv",
         "import_level": "Planning data",
+        "project_id": project_id, "username": username,
     })
     assert resp.status_code == 400
     assert resp.json()["detail"]
 
 
-def test_find_patient_anon_db_unreachable_returns_503(client, monkeypatch):
+def test_find_patient_anon_db_unreachable_returns_503(client, monkeypatch, active_project):
+    _, username = active_project
     monkeypatch.setattr(anon, "ANON_DB_PORT", 1)
     monkeypatch.setattr(anon, "_pool", None)
     try:
-        resp = client.get(f"/import/find_patient?mrn={ANON_MRN}")
+        resp = client.get(f"/import/find_patient?mrn={ANON_MRN}&username={username}")
         assert resp.status_code == 503
         assert resp.json()["detail"]
     finally:
         monkeypatch.setattr(anon, "_pool", None)
 
 
-def test_batch_import_anon_db_unreachable_returns_503(client, tmp_path, monkeypatch):
+def test_batch_import_anon_db_unreachable_returns_503(client, tmp_path, monkeypatch, active_project):
+    project_id, username = active_project
     import csv
     csv_path = tmp_path / "patients.csv"
     with open(csv_path, "w", newline="") as f:
@@ -67,6 +71,7 @@ def test_batch_import_anon_db_unreachable_returns_503(client, tmp_path, monkeypa
     try:
         resp = client.post("/import/batch_import", json={
             "job_id": f"import-err-{uuid.uuid4()}", "path_to_csv": str(csv_path), "import_level": "Planning data",
+            "project_id": project_id, "username": username,
         })
         assert resp.status_code == 503
         assert resp.json()["detail"]
