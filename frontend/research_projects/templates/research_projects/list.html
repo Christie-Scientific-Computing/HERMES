@@ -1,12 +1,29 @@
 {% extends "base.html" %}
-{% block title %}My Projects — HERMES{% endblock %}
+{% block title %}Projects — HERMES{% endblock %}
 {% block content %}
-<div class="flex items-center justify-between mb-4">
-  <h1 class="text-xl font-semibold text-gray-900">My Projects</h1>
-  <a href="{% url 'research_projects:create' %}" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
-    New project
-  </a>
+<div class="flex items-center justify-between mb-1">
+  <h1 class="text-xl font-semibold text-gray-900">{% if user.is_staff %}Projects{% else %}My Projects{% endif %}</h1>
+  <div class="flex items-center gap-3">
+    {% if user.is_staff %}
+    <form method="get" class="flex items-center gap-2">
+      <select name="status" onchange="this.form.submit()" class="text-sm">
+        <option value="" {% if not status %}selected{% endif %}>All statuses</option>
+        <option value="draft" {% if status == "draft" %}selected{% endif %}>Draft</option>
+        <option value="submitted" {% if status == "submitted" %}selected{% endif %}>Submitted</option>
+        <option value="approved" {% if status == "approved" %}selected{% endif %}>Approved</option>
+        <option value="rejected" {% if status == "rejected" %}selected{% endif %}>Rejected</option>
+        <option value="revoked" {% if status == "revoked" %}selected{% endif %}>Revoked</option>
+      </select>
+    </form>
+    {% endif %}
+    <a href="{% url 'research_projects:create' %}" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800 whitespace-nowrap">
+      New project
+    </a>
+  </div>
 </div>
+<p class="text-sm text-gray-500 mb-4">
+  {% if user.is_staff %}Every project in the system, regardless of status or membership.{% else %}Projects you belong to.{% endif %}
+</p>
 {% if projects %}
 <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
   {% for project in projects %}
@@ -15,8 +32,8 @@
 </div>
 {% else %}
 <div class="text-center py-16 text-gray-400">
-  <p>You're not part of any project yet.</p>
-  <a href="{% url 'research_projects:create' %}" class="text-hermes-700 underline">Request one</a> to get started.
+  <p>{% if user.is_staff %}No projects match this filter.{% else %}You're not part of any project yet.{% endif %}</p>
+  {% if not user.is_staff %}<a href="{% url 'research_projects:create' %}" class="text-hermes-700 underline">Request one</a> to get started.{% endif %}
 </div>
 {% endif %}
 {% endblock %}

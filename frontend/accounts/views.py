@@ -3,19 +3,35 @@ from django.contrib.auth import get_user_model, login
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.tokens import default_token_generator
+from django.contrib.auth.views import LoginView
 from django.core.mail import send_mail
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
-from accounts.forms import CreateUserForm, InviteUserForm
+from accounts.forms import CreateUserForm, HermesAuthenticationForm, InviteUserForm
 
 User = get_user_model()
 
 
 def _is_data_custodian(user) -> bool:
     return user.is_active and user.is_staff
+
+
+class HermesLoginView(LoginView):
+    template_name = "registration/login.html"
+    authentication_form = HermesAuthenticationForm
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        # Django's SESSION_COOKIE_AGE default (2 weeks) already persists
+        # sessions regardless of this checkbox -- "remember me" unchecked is
+        # the behavior that needs adding (expire when the browser closes),
+        # not the reverse.
+        if not form.cleaned_data.get("remember_me"):
+            self.request.session.set_expiry(0)
+        return response
 
 
 @login_required

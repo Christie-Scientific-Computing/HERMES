@@ -99,85 +99,109 @@ def _stage_batch_job(request, kind: str, uploaded_file, extra: dict, project_id:
 
 
 @login_required
-def import_single(request):
+def collect_data(request):
+    """Single-patient and batch (CSV) import, combined on one page as two
+    tabs -- purely a presentation merge, each mode's staging logic is
+    unchanged from when they were separate pages."""
     projects = _project_choices_for(request.user)
+    single_form = SingleImportForm()
+    batch_form = BatchImportForm()
+    single_form.set_project_choices(projects)
+    batch_form.set_project_choices(projects)
     job_id = None
+    active_tab = request.POST.get("mode", "single")
+
     if request.method == "POST":
-        form = SingleImportForm(request.POST)
-        form.set_project_choices(projects)
-        if form.is_valid():
-            csv_bytes = f"patient_id\n{form.cleaned_data['mrn']}\n".encode()
-            job_id = _stage_batch_job(
-                request, kind="import_batch",
-                uploaded_file=ContentFile(csv_bytes, name="single_patient.csv"),
-                extra={"import_level": form.cleaned_data["import_level"]},
-                project_id=form.cleaned_data["project_id"],
-            )
-            form = SingleImportForm()  # fresh form, ready for another entry
-            form.set_project_choices(projects)
-    else:
-        form = SingleImportForm()
-        form.set_project_choices(projects)
-    return render(request, "jobs/import_single.html", {
-        "form": form, "job_id": job_id, "has_projects": bool(projects),
+        mode = request.POST.get("mode")
+        if mode == "single":
+            single_form = SingleImportForm(request.POST)
+            single_form.set_project_choices(projects)
+            if single_form.is_valid():
+                csv_bytes = f"patient_id\n{single_form.cleaned_data['mrn']}\n".encode()
+                job_id = _stage_batch_job(
+                    request, kind="import_batch",
+                    uploaded_file=ContentFile(csv_bytes, name="single_patient.csv"),
+                    extra={"import_level": single_form.cleaned_data["import_level"]},
+                    project_id=single_form.cleaned_data["project_id"],
+                )
+                single_form = SingleImportForm()  # fresh form, ready for another entry
+                single_form.set_project_choices(projects)
+        elif mode == "batch":
+            batch_form = BatchImportForm(request.POST, request.FILES)
+            batch_form.set_project_choices(projects)
+            if batch_form.is_valid():
+                job_id = _stage_batch_job(
+                    request, kind="import_batch", uploaded_file=batch_form.cleaned_data["file"],
+                    extra={"import_level": batch_form.cleaned_data["import_level"]},
+                    project_id=batch_form.cleaned_data["project_id"],
+                )
+                return redirect("jobs:job_watch", job_id=job_id)
+
+    return render(request, "jobs/collect_data.html", {
+        "single_form": single_form, "batch_form": batch_form, "job_id": job_id,
+        "has_projects": bool(projects), "active_tab": active_tab,
     })
 
 
 @login_required
-def import_batch(request):
+def retrieve_data(request):
+    """DICOM (C-MOVE) and ProKnow export, combined on one page as two tabs --
+    same presentation-merge approach as collect_data. Destination/collection
+    are real dropdowns, populated live from the backend (empty + an inline
+    warning if Orthanc/ProKnow can't be reached, rather than blocking the
+    whole page)."""
     projects = _project_choices_for(request.user)
+
+    modalities, modalities_error = [], None
+    collections, collections_error = [], None
+    if projects:
+        try:
+            modalities = backend_client.get_orthanc_modalities(request.user.username)
+        except backend_client.BackendError as e:
+            modalities_error = e.detail
+        try:
+            collections = backend_client.get_proknow_collections(request.user.username)
+        except backend_client.BackendError as e:
+            collections_error = e.detail
+
+    dicom_form = DicomExportForm()
+    proknow_form = ProKnowExportForm()
+    dicom_form.set_project_choices(projects)
+    dicom_form.set_destination_choices(modalities)
+    proknow_form.set_project_choices(projects)
+    proknow_form.set_collection_choices(collections)
+    active_tab = request.POST.get("mode", "dicom")
+
     if request.method == "POST":
-        form = BatchImportForm(request.POST, request.FILES)
-        form.set_project_choices(projects)
-        if form.is_valid():
-            job_id = _stage_batch_job(
-                request, kind="import_batch", uploaded_file=form.cleaned_data["file"],
-                extra={"import_level": form.cleaned_data["import_level"]},
-                project_id=form.cleaned_data["project_id"],
-            )
-            return redirect("jobs:job_watch", job_id=job_id)
-    else:
-        form = BatchImportForm()
-        form.set_project_choices(projects)
-    return render(request, "jobs/import_batch.html", {"form": form, "has_projects": bool(projects)})
+        mode = request.POST.get("mode")
+        if mode == "dicom":
+            dicom_form = DicomExportForm(request.POST, request.FILES)
+            dicom_form.set_project_choices(projects)
+            dicom_form.set_destination_choices(modalities)
+            if dicom_form.is_valid():
+                job_id = _stage_batch_job(
+                    request, kind="export_dicom", uploaded_file=dicom_form.cleaned_data["file"],
+                    extra={"destination": dicom_form.cleaned_data["destination"]},
+                    project_id=dicom_form.cleaned_data["project_id"],
+                )
+                return redirect("jobs:job_watch", job_id=job_id)
+        elif mode == "proknow":
+            proknow_form = ProKnowExportForm(request.POST, request.FILES)
+            proknow_form.set_project_choices(projects)
+            proknow_form.set_collection_choices(collections)
+            if proknow_form.is_valid():
+                job_id = _stage_batch_job(
+                    request, kind="export_proknow", uploaded_file=proknow_form.cleaned_data["file"],
+                    extra={"collection": proknow_form.cleaned_data["collection"]},
+                    project_id=proknow_form.cleaned_data["project_id"],
+                )
+                return redirect("jobs:job_watch", job_id=job_id)
 
-
-@login_required
-def export_dicom(request):
-    projects = _project_choices_for(request.user)
-    if request.method == "POST":
-        form = DicomExportForm(request.POST, request.FILES)
-        form.set_project_choices(projects)
-        if form.is_valid():
-            job_id = _stage_batch_job(
-                request, kind="export_dicom", uploaded_file=form.cleaned_data["file"],
-                extra={"destination": form.cleaned_data["destination"]},
-                project_id=form.cleaned_data["project_id"],
-            )
-            return redirect("jobs:job_watch", job_id=job_id)
-    else:
-        form = DicomExportForm()
-        form.set_project_choices(projects)
-    return render(request, "jobs/export_dicom.html", {"form": form, "has_projects": bool(projects)})
-
-
-@login_required
-def export_proknow(request):
-    projects = _project_choices_for(request.user)
-    if request.method == "POST":
-        form = ProKnowExportForm(request.POST, request.FILES)
-        form.set_project_choices(projects)
-        if form.is_valid():
-            job_id = _stage_batch_job(
-                request, kind="export_proknow", uploaded_file=form.cleaned_data["file"],
-                extra={"collection": form.cleaned_data["collection"]},
-                project_id=form.cleaned_data["project_id"],
-            )
-            return redirect("jobs:job_watch", job_id=job_id)
-    else:
-        form = ProKnowExportForm()
-        form.set_project_choices(projects)
-    return render(request, "jobs/export_proknow.html", {"form": form, "has_projects": bool(projects)})
+    return render(request, "jobs/retrieve_data.html", {
+        "dicom_form": dicom_form, "proknow_form": proknow_form,
+        "has_projects": bool(projects), "active_tab": active_tab,
+        "modalities_error": modalities_error, "collections_error": collections_error,
+    })
 
 
 @login_required

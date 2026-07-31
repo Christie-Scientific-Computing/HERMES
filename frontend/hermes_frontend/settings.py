@@ -137,3 +137,18 @@ BACKEND_URL = f"http://{BACKEND_URI}:{BACKEND_PORT}"
 # backend/src/projects/enforcement.py. Must match the backend's own
 # HERMES_INTERNAL_KEY. Unset in both places -> no-op (dev/internal-only).
 HERMES_INTERNAL_KEY = os.getenv("HERMES_INTERNAL_KEY")
+
+
+# --- Email ------------------------------------------------------------------
+# No SMTP server exists for this deployment today. Left unconfigured, Django
+# defaults to SMTP against localhost:25, which just fails/hangs -- the
+# console backend is an explicit, safe default (invite emails print to the
+# server log) rather than a silent trap. The in-app activation-link message
+# on the Invite User page works regardless of whether this is ever pointed
+# at a real relay.
+EMAIL_BACKEND = os.getenv("DJANGO_EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = os.getenv("DJANGO_EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("DJANGO_EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("DJANGO_EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("DJANGO_EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("DJANGO_EMAIL_USE_TLS", "true").lower() == "true"

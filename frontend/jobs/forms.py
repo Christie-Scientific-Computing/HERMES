@@ -24,6 +24,9 @@ class ProjectScopedForm(forms.Form):
     def set_project_choices(self, projects: list[dict]) -> None:
         self.fields["project_id"].choices = [(p["project_id"], p["title"]) for p in projects]
 
+    def _set_choices(self, field_name: str, values: list[str]) -> None:
+        self.fields[field_name].choices = [(v, v) for v in values]
+
 
 class SingleImportForm(ProjectScopedForm):
     mrn = forms.CharField(label="Patient ID (anon)", max_length=100)
@@ -37,12 +40,18 @@ class BatchImportForm(ProjectScopedForm):
 
 class DicomExportForm(ProjectScopedForm):
     file = forms.FileField(label="CSV file (patient_id column)")
-    destination = forms.CharField(label="Orthanc modality AE title", max_length=200)
+    destination = forms.ChoiceField(label="Orthanc modality AE title", choices=[])
+
+    def set_destination_choices(self, modalities: list[str]) -> None:
+        self._set_choices("destination", modalities)
 
 
 class ProKnowExportForm(ProjectScopedForm):
     file = forms.FileField(label="CSV file (patient_id column)")
-    collection = forms.CharField(label="ProKnow collection", max_length=200)
+    collection = forms.ChoiceField(label="ProKnow collection", choices=[])
+
+    def set_collection_choices(self, collections: list[str]) -> None:
+        self._set_choices("collection", collections)
 
 
 class JobLookupForm(forms.Form):

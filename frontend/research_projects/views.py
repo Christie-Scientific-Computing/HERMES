@@ -13,12 +13,18 @@ def _is_data_custodian(user) -> bool:
 
 @login_required
 def project_list(request):
+    """Staff see every project regardless of status/membership (no user can
+    hide a project from an admin); everyone else sees only their own."""
+    status = request.GET.get("status") or None if request.user.is_staff else None
     try:
-        projects = backend_client.list_projects(username=request.user.username)
+        if request.user.is_staff:
+            projects = backend_client.list_projects(status=status)
+        else:
+            projects = backend_client.list_projects(username=request.user.username)
     except backend_client.BackendError as e:
         messages.error(request, f"Could not load projects: {e.detail}")
         projects = []
-    return render(request, "research_projects/list.html", {"projects": projects})
+    return render(request, "research_projects/list.html", {"projects": projects, "status": status})
 
 
 @login_required
@@ -167,16 +173,3 @@ def upload_document(request, project_id):
     return redirect("research_projects:detail", project_id=project_id)
 
 
-@login_required
-@user_passes_test(_is_data_custodian)
-def all_projects(request):
-    """Every project regardless of status or membership -- staff only.
-    Users can't hide a project from an admin: there's no membership filter
-    here at all, unlike project_list (which is always scoped to "mine")."""
-    status = request.GET.get("status") or None
-    try:
-        projects = backend_client.list_projects(status=status)
-    except backend_client.BackendError as e:
-        messages.error(request, f"Could not load projects: {e.detail}")
-        projects = []
-    return render(request, "research_projects/all_projects.html", {"projects": projects, "status": status})

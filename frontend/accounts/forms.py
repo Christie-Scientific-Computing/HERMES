@@ -1,5 +1,6 @@
 from django import forms
 from django.contrib.auth import get_user_model
+from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.password_validation import validate_password
 
 from accounts.models import Profile
@@ -7,11 +8,15 @@ from accounts.models import Profile
 User = get_user_model()
 
 
+class HermesAuthenticationForm(AuthenticationForm):
+    remember_me = forms.BooleanField(required=False, initial=True, label="Remember me")
+
+
 class _UserIdentityForm(forms.Form):
     """Shared identity fields for both account-creation paths."""
 
     username = forms.CharField(max_length=150)
-    email = forms.EmailField()
+    email = forms.EmailField(required=False)
     first_name = forms.CharField(max_length=150, required=False)
     last_name = forms.CharField(max_length=150, required=False)
     department = forms.CharField(max_length=200, required=False)
@@ -43,7 +48,11 @@ class _UserIdentityForm(forms.Form):
 
 class InviteUserForm(_UserIdentityForm):
     """Creates an unusable-password account and an activation link the
-    invitee uses to set their own password."""
+    invitee uses to set their own password. Needs a real address to be any
+    use at all, so overrides email back to required (subclass field
+    declarations replace the inherited one -- doesn't affect CreateUserForm)."""
+
+    email = forms.EmailField()
 
     def save(self) -> User:
         user = self._create_user()

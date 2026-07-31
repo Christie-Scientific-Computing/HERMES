@@ -8,22 +8,14 @@
 <p class="text-sm text-gray-500 mb-6">You can browse import/export below, but you'll need an active project to submit anything.</p>
 {% endif %}
 
-<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-  <a href="{% url 'jobs:import_single' %}" class="rounded-lg border border-gray-200 bg-white p-5 hover:border-hermes-300 hover:shadow-sm">
-    <p class="font-medium text-gray-900">Import — single patient</p>
-    <p class="text-sm text-gray-500 mt-1">Look up and import one patient by ID.</p>
+<div class="grid gap-4 sm:grid-cols-2 mb-8">
+  <a href="{% url 'jobs:collect_data' %}" class="rounded-lg border border-gray-200 bg-white p-5 hover:border-hermes-300 hover:shadow-sm">
+    <p class="font-medium text-gray-900">Collect data</p>
+    <p class="text-sm text-gray-500 mt-1">Import one patient by ID, or a CSV batch — watch live progress.</p>
   </a>
-  <a href="{% url 'jobs:import_batch' %}" class="rounded-lg border border-gray-200 bg-white p-5 hover:border-hermes-300 hover:shadow-sm">
-    <p class="font-medium text-gray-900">Import — batch (CSV)</p>
-    <p class="text-sm text-gray-500 mt-1">Upload a CSV of patient IDs, watch live progress.</p>
-  </a>
-  <a href="{% url 'jobs:export_dicom' %}" class="rounded-lg border border-gray-200 bg-white p-5 hover:border-hermes-300 hover:shadow-sm">
-    <p class="font-medium text-gray-900">Export — DICOM (C-MOVE)</p>
-    <p class="text-sm text-gray-500 mt-1">Send a batch of patients to a DICOM modality.</p>
-  </a>
-  <a href="{% url 'jobs:export_proknow' %}" class="rounded-lg border border-gray-200 bg-white p-5 hover:border-hermes-300 hover:shadow-sm">
-    <p class="font-medium text-gray-900">Export — ProKnow</p>
-    <p class="text-sm text-gray-500 mt-1">Upload a batch of patients to a ProKnow collection.</p>
+  <a href="{% url 'jobs:retrieve_data' %}" class="rounded-lg border border-gray-200 bg-white p-5 hover:border-hermes-300 hover:shadow-sm">
+    <p class="font-medium text-gray-900">Retrieve data</p>
+    <p class="text-sm text-gray-500 mt-1">Send a batch of patients to a DICOM modality or ProKnow.</p>
   </a>
 </div>
 

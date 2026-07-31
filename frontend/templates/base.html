@@ -62,7 +62,6 @@
             <a href="{% url 'jobs:results_lookup' %}" class="text-hermes-200 hover:text-white">Results</a>
             {% if user.is_staff %}
               <a href="{% url 'research_projects:review_queue' %}" class="text-hermes-200 hover:text-white">Review Queue</a>
-              <a href="{% url 'research_projects:all_projects' %}" class="text-hermes-200 hover:text-white">All Projects</a>
               <a href="{% url 'accounts:user_list' %}" class="text-hermes-200 hover:text-white">Users</a>
             {% endif %}
             {% if user.is_superuser %}
