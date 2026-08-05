@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% load jobs_extras %}
 {% block title %}Results — HERMES{% endblock %}
 {% block content %}
 <h1 class="text-xl font-semibold text-gray-900 mb-1">Results</h1>
@@ -47,32 +46,27 @@
   <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800 whitespace-nowrap">Look up</button>
 </form>
 {% if summary is not None %}
-<div class="grid gap-6 lg:grid-cols-2">
-  <div class="bg-white border border-gray-200 rounded-lg p-6">
-    <h2 class="text-sm font-semibold text-gray-900 mb-4">Summary</h2>
+<div class="bg-white border border-gray-200 rounded-lg p-6 mb-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Summary</h2>
+  <div class="overflow-x-auto">
     <table class="min-w-full text-sm divide-y divide-gray-100">
       <tbody class="divide-y divide-gray-50">
         {% for row in summary %}
-        <tr><td class="py-1">{{ row.stage }}</td><td class="py-1">{{ row.event_type }}</td><td class="py-1">{{ row.cnt }}</td></tr>
+        <tr><td class="py-1">{{ row.stage }}</td><td class="py-1">{{ row.event_type }}</td><td class="py-1 tabular-nums">{{ row.cnt }}</td></tr>
         {% empty %}
         <tr><td class="py-4 text-center text-gray-400">No events recorded.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
-  <div class="bg-white border border-gray-200 rounded-lg p-6">
-    <h2 class="text-sm font-semibold text-gray-900 mb-4">Patients ({{ patients|length }})</h2>
-    <ul class="text-sm divide-y divide-gray-50 max-h-80 overflow-y-auto">
-      {% for mrn in patients %}
-      {% with p=patient_summary|get_item:mrn %}
-      <li class="py-2 flex items-center justify-between gap-4">
-        <span class="font-mono">{{ mrn }}</span>
-        <c-source-badges :mosaiq="p.in_mosaiq" :pinnacle="p.in_pinnacle" :proknow="p.in_proknow" />
-      </li>
-      {% endwith %}
-      {% endfor %}
-    </ul>
-  </div>
+</div>
+<div class="bg-white border border-gray-200 rounded-lg p-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">
+    Patients ({{ total }})
+    {% if rows|length != total %}<span class="font-normal text-gray-400">— showing {{ rows|length }}</span>{% endif %}
+  </h2>
+  <c-patient-table :rows="rows" :pills="pills" job_id="{{ looked_up_job_id }}" :total="total"
+                   base_query="lookup=job&job_id={{ looked_up_job_id }}&" />
 </div>
 {% endif %}
 {% endif %}

@@ -12,8 +12,13 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+# disable_existing_loggers=False -- the fileConfig default (True) silently
+# disables every logger already created and not listed in alembic.ini's
+# [loggers] section (uvicorn's, every backend.src.* module's, ...), since
+# this runs at backend startup via setup_status_db(), after those loggers
+# already exist.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # DATABASE_URL always wins over whatever's in alembic.ini — keeps the DSN
 # (and any credentials in it) out of a checked-in config file.

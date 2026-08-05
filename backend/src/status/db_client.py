@@ -112,3 +112,28 @@ class StatusDB:
                 (job_id,),
             )
             return {row["mrn"]: (row["details"] or {}) for row in cur.fetchall()}
+
+    def get_latest_event_per_patient(self, job_id: str) -> dict[str, dict]:
+        """
+        Most recent event per patient in a job, whatever its stage or type.
+
+        Deliberately broader than get_latest_retrieve_details, which only looks
+        at successful retrieve events and therefore cannot see a patient that
+        only ever failed -- exactly the patient someone debugging is looking
+        for. Use this for a patient's outcome and latest error; use the other
+        for source-system presence.
+
+        `id DESC` breaks ties: two events written in the same transaction can
+        share a `ts`, and without it the "latest" would be arbitrary.
+        """
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (mrn) mrn, stage, event_type, ts, error_message
+                FROM events
+                WHERE job_id = %s
+                ORDER BY mrn, ts DESC, id DESC
+                """,
+                (job_id,),
+            )
+            return {row["mrn"]: dict(row) for row in cur.fetchall()}

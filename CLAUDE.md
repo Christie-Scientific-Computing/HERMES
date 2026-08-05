@@ -49,6 +49,8 @@ Reuses the same `BACKEND_URI`/`BACKEND_PORT` convention `webui/` already used (s
 
 Apps: `accounts` (users/roles), `research_projects` (ethics workflow; also the one place with a HERMES-specific local model, `ProjectDocument`, for ethics-certificate uploads — everything else project/job-related is backend-owned, fetched fresh via the API), `jobs` (import/export/results, the SSE relay).
 
+**Job → patient drill-down.** The job page's patient list is a shared cotton component (`templates/cotton/patient_table.html`, used by both `job_detail` and `results_lookup`) with `?filter=` pills — `failed`, `not_found`, `missing_mosaiq|pinnacle|proknow` — resolved server-side in the view over the already-fetched summary, no extra backend call. Each MRN links to `jobs/<job_id>/patients/<mrn>/` (`patient_detail`), which shows that patient's Pinnacle plans with a `?status=` filter plus the job-scoped event timeline. Two invariants worth preserving: source presence is **tri-state** (`None` means "never checked", so every `missing_*` predicate tests `is False`, not falsiness), and filter pill counts are computed from the *unfiltered* rows so they don't collapse as you filter. Plans are per-patient, not per-job — the page is job-scoped only so `_job_is_visible_to` governs access.
+
 ### `webui/` — throwaway Django test UI (superseded by `frontend/`)
 
 A minimal Django app for manually exercising the backend during development — plain forms for Import/Export/Results, no live SSE progress (it blocks until the batch finishes and shows a results table), no anonymisation-awareness, no auth, no styling beyond readability. Talks directly to `BACKEND_URI`/`BACKEND_PORT`.
@@ -65,6 +67,7 @@ Backend, required in `.env` (not committed) — see `.env.example` for the full 
 | `BACKEND_URI`, `BACKEND_PORT` | FastAPI location (used by `webui/`, the throwaway test frontend, and reused by `frontend/`, the production one) |
 | `DATABASE_URL` | Postgres DSN for HermesDB — job/event tracking today, more HERMES-owned data planned. **Not** the anon-mapping DB below; entirely separate database, never conflate the two |
 | `PINN_DB` | Path to Pinnacle's own read-only SQLite export cache (not HERMES-owned) |
+| `PINNACLE_SCHEMA` | Postgres schema **inside HermesDB's database** holding PinnacleExport's own `status`/`errors`/`plans` tables. Read-only to HERMES, no Alembic migrations, owned entirely by PinnacleExport. Defaults to `pinnacle_export`; if absent, the patient page reports plans as unavailable rather than erroring |
 | `PINNACLE_PUSH_HOST`, `PINNACLE_PUSH_PORT`, `PINNACLE_PUSH_AE_TITLE` | Destination the Pinnacle export submodule pushes to (defaults preserve the historical hardcoded values) |
 | `PULL_MODALITY_AET_ONE`, `PULL_MODALITY_AET_TWO` | DICOM AE titles to pull from |
 | `PATH_TO_CERT`, `PATH_TO_KEY` | TLS certificates for Orthanc |
@@ -132,6 +135,7 @@ backend/main.py                ← FastAPI app, all features
 - `export/logic.py` — `Exporter` class: C-MOVE to registered modalities or ProKnow SDK upload
 - `studies/endpoints.py` — read-only study/series browsing directly against Orthanc's `/tools/find`; translates `patient_id` at the anon boundary and redacts `patient_name` (no mapping exists for names) when anonymisation is configured
 - `identity/anon.py` — `resolve_real_id(s)`/`to_display_id(s)`: the anon ⇄ real ID translation boundary. Read-only against the external mapping DB; passthrough when `ANON_DB_HOST` is unset
+- `plans/db_client.py` — `PlansDB`: read-only access to PinnacleExport's `plans` table (see HermesDB Schema below). Backs `GET /results/patient/{mrn}/plans` and the frontend's patient-detail page
 - `common/sse.py` — `BatchItem`, `run_batch_job()`: the one shared SSE batch-job generator used by every import/export batch endpoint (create job → `start` → per-item cancel-check/StatusDB-write/yield → terminal `{"type": "done"}`). Every event, including the terminal one, carries `"type"`. Also threads `created_by`/`project_id` into `StatusDB.create_job` for traceability
 - `status/db_client.py` — `StatusDB`: job/patient/event tracking against HermesDB, via the shared pool in `db.py`. `cancel_job`/`is_cancelled` back cancellation (a column on `jobs`, not an in-process dict — safe under multiple worker processes)
 - `projects/` — ethics/research-project workflow, HermesDB-owned (not Django-local): `db_client.py`'s `ProjectsDB` (create/submit/review/revoke, membership, audit log — see HermesDB Schema below), `endpoints.py`'s `/projects` router, and `enforcement.py`'s two fail-closed dependency tiers (`require_any_active_project` for read-only lookups, `require_project_member` for data-moving import/export endpoints) plus `verify_internal_key` (the `HERMES_INTERNAL_KEY` shared-secret check)
@@ -148,7 +152,7 @@ backend/main.py                ← FastAPI app, all features
 
 **Cancellation** — Each batch job gets a UUID. `POST /import/cancel/{job_id}` / `POST /export/cancel/{job_id}` call `StatusDB.cancel_job(job_id)`, which sets the `jobs.cancelled` column; `run_batch_job()` checks `StatusDB.is_cancelled(job_id)` once per item. Backed by Postgres rather than an in-process dict, so it works correctly even if the backend runs as multiple worker processes.
 
-**Anonymisation boundary** — When `ANON_DB_*` is configured, every endpoint handling a patient/study identifier resolves inbound anon IDs to real IDs (`backend/src/identity/anon.py`, failing closed with a 422 on unknown IDs) before doing any Mosaiq/Pinnacle/ProKnow/Orthanc work, and translates real IDs back to anon IDs in every outbound response/SSE event. The backend is the only place a real ID is ever read or written (logs, HermesDB rows) — it simply never crosses back out to the proxy or any external-facing frontend. Passthrough (no-op) when `ANON_DB_HOST` is unset.
+**Anonymisation boundary** — When `ANON_DB_*` is configured, every endpoint handling a patient/study identifier resolves inbound anon IDs to real IDs (`backend/src/identity/anon.py`, failing closed with a 422 on unknown IDs) before doing any Mosaiq/Pinnacle/ProKnow/Orthanc work, and translates real IDs back to anon IDs in every outbound response/SSE event. **Structured ID columns aren't the only exposure**: free text carries real MRNs too — `events.error_message` is `str(exception)` from a worker and routinely quotes the id it was handed, `events.details` is a worker's own return value, and Pinnacle's `plans.path`/`comment`/`error_message` are built from or quote the MRN. `results/endpoints.py`'s `_scrub`/`_scrub_json` substitute the anon id into all of those on the way out; anything new that returns worker-generated prose needs the same treatment. The backend is the only place a real ID is ever read or written (logs, HermesDB rows) — it simply never crosses back out to the proxy or any external-facing frontend. Passthrough (no-op) when `ANON_DB_HOST` is unset.
 
 **Async threading** — FastAPI endpoints are `async` but the heavy sync I/O (Orthanc, ProKnow, Pinnacle) runs via `asyncio.to_thread()` (inside `run_batch_job()` for batch jobs) to avoid blocking the event loop.
 
@@ -174,6 +178,17 @@ project_audit_log(id, project_id, username, action, ts, details JSONB)
 ```
 
 `stage` is `'retrieve'` or `'export'`; `event_type` is `'start'`, `'success'`, or `'failure'`. `jobs.cancelled`/`cancelled_at` back cancellation (see Cancellation above). `jobs.project_id` (nullable, added in `8aa3a51c978c_*`) traces a job back to the ethics-approved project that authorized it — see `common/sse.py`'s `run_batch_job` and `single_import`/`proknow_upload_patient`, which now populate both it and the previously-always-`NULL` `created_by`. `mrn` columns store the real patient ID — only authorised users have access to the backend/HermesDB, so this is fine; the anonymisation boundary is strictly about what crosses back out over HTTP.
+
+**A third set of tables lives in the same database but is NOT HERMES-owned.** PinnacleExport creates and migrates its own schema (`PINNACLE_SCHEMA`, default `pinnacle_export`) inside HermesDB's database:
+
+```
+pinnacle_export.plans(id, mrn, path, plan_id, plan_name, plan_date,
+                      primary_image_set, pinnacle_version, comment, status, error_message)
+pinnacle_export.status(id, mrn, path, process_datetime, status)
+pinnacle_export.errors(id, status_id, mrn, path, error_message)
+```
+
+HERMES only ever `SELECT`s here (`backend/src/plans/db_client.py`) — **never add an Alembic migration for these tables**; PinnacleExport owns them. `plans.mrn` is the real MRN and joins directly to `events.mrn`, but there's no `job_id`: plans belong to a patient, not a HERMES job, and `(mrn, plan_id)` isn't unique (re-exporting from a different `path` adds a row). `PlansDB.list_plans_for_patient` returns `None` (not `[]`) when the schema is absent, so the UI can distinguish "PinnacleExport isn't deployed here" from "this patient has no plans". Only `plans` is read today; `errors` (joined via `status_id`) is the natural next increment.
 
 `research_projects.status` is one of `draft`/`submitted`/`approved`/`rejected`/`revoked` (see `backend/src/projects/db_client.py`'s `ProjectsDB`); "expired" isn't a separate status, it's `approved` with a past `expiry_date`, computed at query time (`is_project_active`/`is_active_member`). `project_memberships` has no FK to a user table — there isn't one; Django (`frontend/`) is the sole source of truth for user identity, and `username` here is trusted from it. `project_audit_log` is deliberately a separate table from `events` (not a repurposing of it) since `events.mrn` is semantically a patient MRN — project lifecycle is a different concern, mirroring the mutable-state/immutable-audit split pattern from `example_project/plans/models.py` (`ApprovalLog` vs `AuditLog`).
 

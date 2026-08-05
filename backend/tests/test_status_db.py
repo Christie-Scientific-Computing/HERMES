@@ -126,3 +126,42 @@ def test_get_latest_retrieve_details_ignores_export_stage(db, job_id):
     db.create_job(job_id)
     db.add_event(job_id, mrn="MRN1", stage="export", event_type="success", details={"status": "exported"})
     assert db.get_latest_retrieve_details(job_id) == {}
+
+
+def test_get_latest_event_per_patient_sees_failure_only_patients(db, job_id):
+    """
+    The gap get_latest_retrieve_details leaves: a patient that only ever failed
+    is absent from that dict entirely, which is exactly the patient someone
+    debugging is looking for.
+    """
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="start")
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="failure", error_message="boom")
+
+    assert "MRN1" not in db.get_latest_retrieve_details(job_id)
+
+    latest = db.get_latest_event_per_patient(job_id)
+    assert latest["MRN1"]["event_type"] == "failure"
+    assert latest["MRN1"]["error_message"] == "boom"
+
+
+def test_get_latest_event_per_patient_reports_a_trailing_start_as_in_flight(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="start")
+
+    latest = db.get_latest_event_per_patient(job_id)
+    assert latest["MRN1"]["event_type"] == "start"
+    assert latest["MRN1"]["error_message"] is None
+
+
+def test_get_latest_event_per_patient_picks_the_newest_across_stages(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success")
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="failure", error_message="c-move refused")
+    db.add_event(job_id, mrn="MRN2", stage="retrieve", event_type="success")
+
+    latest = db.get_latest_event_per_patient(job_id)
+    assert latest["MRN1"]["stage"] == "export"
+    assert latest["MRN1"]["event_type"] == "failure"
+    assert latest["MRN2"]["event_type"] == "success"
+    assert set(latest) == {"MRN1", "MRN2"}

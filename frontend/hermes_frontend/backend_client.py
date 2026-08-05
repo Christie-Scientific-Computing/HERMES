@@ -249,6 +249,13 @@ def patient_timeline_all(mrn: str) -> dict:
     return _get(f"/results/patient/timeline/{mrn}/all")
 
 
+def patient_plans(mrn: str) -> dict:
+    """Every plan PinnacleExport recorded for this patient, across all jobs --
+    the plans table has no job_id. `available` is False when PinnacleExport's
+    schema isn't present at all, which is not the same as "no plans"."""
+    return _get(f"/results/patient/{mrn}/plans")
+
+
 # ---- Cancellation ----
 
 def cancel_import(job_id: str) -> dict:

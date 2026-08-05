@@ -299,6 +299,44 @@ def _job_is_visible_to(request, job_info: dict, user_project_ids: list[str]) -> 
     return request.user.is_staff or job_info.get("project_id") in user_project_ids
 
 
+# `in_*` is tri-state: True/False are answers, None means "we never checked"
+# (an export-only job, or a patient with no successful retrieve event). Every
+# predicate below therefore tests `is False`, never falsiness -- treating None
+# as "missing" would invent failures that were never observed.
+PATIENT_FILTERS = [
+    ("", "All", lambda r: True),
+    ("failed", "Failed", lambda r: r.get("outcome") == "failure"),
+    ("not_found", "Found nowhere", lambda r: all(
+        r.get(k) is False for k in ("in_mosaiq", "in_pinnacle", "in_proknow")
+    )),
+    ("missing_mosaiq", "No Mosaiq", lambda r: r.get("in_mosaiq") is False),
+    ("missing_pinnacle", "No Pinnacle", lambda r: r.get("in_pinnacle") is False),
+    ("missing_proknow", "No ProKnow", lambda r: r.get("in_proknow") is False),
+]
+
+
+def _patient_rows(patients: list[str], patient_summary: dict) -> list[dict]:
+    """Flatten the two backend calls into one row per patient, so templates
+    don't need dict-lookup-by-variable gymnastics."""
+    return [{"mrn": mrn, **(patient_summary.get(mrn) or {})} for mrn in patients]
+
+
+def _filter_patient_rows(rows: list[dict], active: str) -> tuple[list[dict], list[dict]]:
+    """
+    Returns (visible rows, filter pills).
+
+    Counts come from the *unfiltered* rows so the pills keep showing how much
+    is behind each option rather than collapsing to the current selection.
+    """
+    pills = [
+        {"key": key, "label": label, "count": sum(1 for r in rows if pred(r)), "active": key == active}
+        for key, label, pred in PATIENT_FILTERS
+    ]
+    predicate = next((p for k, _, p in PATIENT_FILTERS if k == active), None)
+    visible = [r for r in rows if predicate(r)] if predicate else rows
+    return visible, pills
+
+
 @login_required
 def job_detail(request, job_id):
     try:
@@ -319,10 +357,88 @@ def job_detail(request, job_id):
         messages.error(request, f"Could not load job: {e.detail}")
         return redirect("jobs:dashboard")
 
+    rows = _patient_rows(patients, patient_summary)
+    visible, pills = _filter_patient_rows(rows, request.GET.get("filter", ""))
+
     return render(request, "jobs/job_detail.html", {
-        "job_id": job_id, "summary": job_info["summary"], "patients": patients,
-        "patient_summary": patient_summary,
+        "job_id": job_id, "summary": job_info["summary"],
+        "rows": visible, "pills": pills, "total": len(rows),
     })
+
+
+@login_required
+def patient_detail(request, job_id, mrn):
+    """
+    One patient, reached through a job so the job's own visibility check
+    applies. The timeline is job-scoped; the plans are not -- PinnacleExport's
+    plans table has no job_id, so it shows everything recorded for this
+    patient, whichever job touched them.
+    """
+    try:
+        job_info = backend_client.job_summary(job_id)
+    except backend_client.BackendError as e:
+        messages.error(request, f"Could not load job: {e.detail}")
+        return redirect("jobs:dashboard")
+
+    user_project_ids = [p["project_id"] for p in _users_projects(request.user)]
+    if not _job_is_visible_to(request, job_info, user_project_ids):
+        messages.error(request, "You don't have access to that job.")
+        return redirect("jobs:dashboard")
+
+    # Deliberately separate try blocks: a plans failure must not blank the
+    # timeline, and vice versa -- either half is useful on its own.
+    events, events_error = None, None
+    try:
+        events = backend_client.patient_timeline(job_id, mrn)["events"]
+    except backend_client.BackendError as e:
+        events_error = e.detail
+
+    plans, plans_available, plans_error = [], False, None
+    try:
+        payload = backend_client.patient_plans(mrn)
+        plans, plans_available = payload["plans"], payload["available"]
+    except backend_client.BackendError as e:
+        plans_error = e.detail
+
+    active_status = request.GET.get("status", "")
+    status_pills = _plan_status_pills(plans, active_status)
+    if active_status:
+        plans = [p for p in plans if (p.get("status") or "") == active_status]
+
+    # Source badges for the header. Best-effort: the page is still worth
+    # rendering without them.
+    summary = {}
+    try:
+        summary = next(
+            (p for p in backend_client.job_patients_summary(job_id)["patients"] if p["mrn"] == mrn),
+            {},
+        )
+    except backend_client.BackendError:
+        pass
+
+    return render(request, "jobs/patient_detail.html", {
+        "job_id": job_id, "mrn": mrn, "summary": summary,
+        "events": events, "events_error": events_error,
+        "plans": plans, "plans_available": plans_available, "plans_error": plans_error,
+        "status_pills": status_pills, "active_status": active_status,
+    })
+
+
+def _plan_status_pills(plans: list[dict], active: str) -> list[dict]:
+    """
+    Filter pills built from the statuses actually present, not a hardcoded
+    list -- the real vocabulary lives in PinnacleExport, not here. Counts come
+    from the unfiltered plans so they don't collapse as you filter.
+    """
+    counts: dict[str, int] = {}
+    for plan in plans:
+        counts[plan.get("status") or ""] = counts.get(plan.get("status") or "", 0) + 1
+    pills = [{"key": "", "label": "All", "count": len(plans), "active": not active}]
+    pills += [
+        {"key": status, "label": status or "(none)", "count": count, "active": status == active}
+        for status, count in sorted(counts.items())
+    ]
+    return pills
 
 
 @login_required
@@ -343,8 +459,10 @@ def results_lookup(request):
     job_form = JobLookupForm(request.GET if lookup == "job" else None)
     patient_form = PatientLookupForm(request.GET if lookup == "patient" else None)
     summary = None
-    patients = None
-    patient_summary = None
+    rows = None
+    pills = None
+    total = 0
+    looked_up_job_id = None
     events = None
     error = None
 
@@ -358,6 +476,10 @@ def results_lookup(request):
                 summary = job_info["summary"]
                 patients = backend_client.job_patients(job_id)["patients"]
                 patient_summary = {p["mrn"]: p for p in backend_client.job_patients_summary(job_id)["patients"]}
+                all_rows = _patient_rows(patients, patient_summary)
+                total = len(all_rows)
+                rows, pills = _filter_patient_rows(all_rows, request.GET.get("filter", ""))
+                looked_up_job_id = job_id
         except backend_client.BackendError as e:
             error = e.detail
 
@@ -382,6 +504,7 @@ def results_lookup(request):
     return render(request, "jobs/results_lookup.html", {
         "project_jobs": project_jobs,
         "lookup": lookup, "job_form": job_form, "patient_form": patient_form,
-        "summary": summary, "patients": patients, "patient_summary": patient_summary,
+        "summary": summary, "rows": rows, "pills": pills, "total": total,
+        "looked_up_job_id": looked_up_job_id,
         "events": events, "error": error,
     })
