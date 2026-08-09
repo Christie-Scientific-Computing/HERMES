@@ -1,6 +1,3 @@
-[submodule "src/PinnacleExport"]
-	path = src/PinnacleExport
-	url = git@github.com:Christie-Scientific-Computing/PinnacleExport.git
-[submodule "backend/src/import_/PinnacleExport"]
-	path = backend/src/import_/PinnacleExport
-	url = git@github.com:Christie-Scientific-Computing/PinnacleExport.git
+[submodule "backend/src/retrieve/PinnacleExport"]
+	path = backend/src/retrieve/PinnacleExport
+	url = https://github.com/Christie-Scientific-Computing/PinnacleExport.git

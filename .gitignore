@@ -5,4 +5,8 @@ logs
 __pycache__
 .env
 credentials.json
-config/
+.venv
+.venv-dev
+.pytest_cache
+db.sqlite3
+media

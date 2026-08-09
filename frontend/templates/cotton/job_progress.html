@@ -1,0 +1,84 @@
+<c-vars job_id="" />
+<div class="bg-white border border-gray-200 rounded-lg p-6">
+  <div class="flex items-center justify-between mb-2">
+    <span id="status-label-{{ job_id }}" class="text-sm font-medium text-gray-700">Starting&hellip;</span>
+    <form method="post" action="{% url 'jobs:cancel_job' job_id %}" onsubmit="return confirm('Cancel this job? Items already in progress will finish, but no further items will start.');">
+      {% csrf_token %}
+      <button type="submit" class="text-xs text-red-600 hover:underline">Cancel</button>
+    </form>
+  </div>
+  <div class="w-full bg-gray-100 rounded-full h-2 mb-4">
+    <div id="progress-bar-{{ job_id }}" class="bg-hermes-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+  </div>
+  <p id="progress-count-{{ job_id }}" class="text-xs text-gray-400 mb-4">0 / 0</p>
+
+  <ul id="event-log-{{ job_id }}" class="divide-y divide-gray-100 text-sm max-h-96 overflow-y-auto"></ul>
+</div>
+
+<script>
+(function () {
+  const streamUrl = "{% url 'jobs:job_stream' job_id %}";
+  const es = new EventSource(streamUrl);
+  const statusLabel = document.getElementById('status-label-{{ job_id }}');
+  const progressBar = document.getElementById('progress-bar-{{ job_id }}');
+  const progressCount = document.getElementById('progress-count-{{ job_id }}');
+  const eventLog = document.getElementById('event-log-{{ job_id }}');
+  let total = 0, done = 0;
+
+  function addRow(text, colorClass) {
+    const li = document.createElement('li');
+    li.className = 'py-1.5 ' + (colorClass || 'text-gray-600');
+    li.textContent = text;
+    eventLog.prepend(li);
+  }
+
+  function updateProgress() {
+    progressCount.textContent = done + ' / ' + total;
+    if (total > 0) {
+      progressBar.style.width = Math.min(100, Math.round((done / total) * 100)) + '%';
+    }
+  }
+
+  es.addEventListener('start', (e) => {
+    const data = JSON.parse(e.data);
+    total = data.total || 0;
+    statusLabel.textContent = 'Running (' + total + ' item' + (total === 1 ? '' : 's') + ')';
+    updateProgress();
+  });
+
+  es.addEventListener('progress', (e) => {
+    const data = JSON.parse(e.data);
+    addRow('Working on ' + data.current + '…', 'text-gray-500');
+  });
+
+  es.addEventListener('success', (e) => {
+    const data = JSON.parse(e.data);
+    done += 1;
+    addRow('✓ ' + data.mrn + (data.status ? ' — ' + data.status : ''), 'text-green-700');
+    updateProgress();
+  });
+
+  es.addEventListener('error', (e) => {
+    const data = JSON.parse(e.data);
+    done += 1;
+    addRow('✗ ' + (data.mrn || '') + ' — ' + (data.error || 'failed'), 'text-red-700');
+    updateProgress();
+  });
+
+  es.addEventListener('cancelled', () => {
+    statusLabel.textContent = 'Cancelled';
+    addRow('Job cancelled — no further items will start.', 'text-yellow-700 font-medium');
+  });
+
+  es.addEventListener('done', () => {
+    statusLabel.textContent = 'Finished';
+    es.close();
+  });
+
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {
+      statusLabel.textContent = statusLabel.textContent === 'Finished' ? 'Finished' : 'Connection closed';
+    }
+  };
+})();
+</script>

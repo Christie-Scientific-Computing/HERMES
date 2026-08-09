@@ -1,0 +1,13 @@
+# Deployment manifest for the DMZ-hosted proxy. Run this on the DMZ
+# machine, separate from the main docker-compose.yml (which runs the
+# backend + core Streamlit UI on the internal network).
+services:
+  proxy:
+    build: .
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    env_file: .env
+    environment:
+      # Address of the HERMES backend on the internal network
+      HERMES_URL: http://192.168.x.x:8000

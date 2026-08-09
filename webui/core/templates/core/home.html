@@ -1,0 +1,10 @@
+{% extends "core/base.html" %}
+{% block content %}
+<h1>HERMES — test UI</h1>
+<p>A minimal frontend for exercising the HERMES backend during development. Each page submits a request and waits for it to finish (no live progress bar) — fine for testing, not how the real frontend will work.</p>
+<ul>
+  <li><a href="{% url 'core:import' %}">Import</a> — single MRN or CSV batch</li>
+  <li><a href="{% url 'core:export' %}">Export</a> — DICOM C-MOVE or ProKnow upload from a CSV</li>
+  <li><a href="{% url 'core:results' %}">Results</a> — look up a job or a patient's event history</li>
+</ul>
+{% endblock %}

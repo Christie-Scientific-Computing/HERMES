@@ -1,5 +1,14 @@
 services:
 
+  hermes-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hermes
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: hermes
+    volumes:
+      - hermes_db:/var/lib/postgresql/data
+
   backend:
     image: ghcr.io/christie-scientific-computing/hermes:v0.1.3
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
@@ -7,16 +16,21 @@ services:
       - "8000:8000"
     env_file: .env
     environment:
-      # SQLite job-tracking DB — persisted in the named volume below
-      STATUS_DB: /data/status.db
+      # Central Postgres — job/event tracking today, more HERMES-owned data later.
+      # Not the anon-mapping DB (ANON_DB_*) — that's a separate, externally-owned database.
+      DATABASE_URL: postgresql://hermes:hermes@hermes-db:5432/hermes
+      # Anon-mapping DB (optional). Unset here → passthrough (no anonymisation),
+      # appropriate for an internal-only deployment. Set these when this
+      # backend is reachable from outside the secured network (via proxy/).
+      # ANON_DB_HOST: <externally-owned Postgres host, reachable from this backend>
+      # ANON_DB_PORT: "5432"
+      # ANON_DB_NAME: <db name>
+      # ANON_DB_USER: <read-only user>
+      # ANON_DB_PASS: <password>
+    depends_on:
+      - hermes-db
     volumes:
-      # Persistent job-tracking database
-      - status_db:/data
       # Pinnacle DB (read-only host file — adjust path to match your system)
-      - type: bind
-        source: ./db/pinn_db.sqlite
-        target: /pinn/pinn_db.sqlite
-        read_only: true
       # TLS certs for Orthanc (adjust paths to match your system)
       # - type: bind
       #   source: /path/to/cert.pem
@@ -48,4 +62,4 @@ services:
       - backend
 
 volumes:
-  status_db:
+  hermes_db:

@@ -1,0 +1,38 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}HERMES (test UI){% endblock %}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    nav { margin-bottom: 2rem; border-bottom: 1px solid #ccc; padding-bottom: 1rem; }
+    nav a { margin-right: 1.5rem; text-decoration: none; color: #444; font-weight: 600; }
+    nav a:hover { color: #000; }
+    h1 { font-size: 1.4rem; }
+    form { margin-bottom: 1.5rem; }
+    label { display: block; margin-top: 0.75rem; font-weight: 600; }
+    input, select { padding: 0.35rem; margin-top: 0.25rem; }
+    button { margin-top: 1rem; padding: 0.5rem 1.25rem; cursor: pointer; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.9rem; }
+    th { background: #f5f5f5; }
+    .error { color: #b00020; font-weight: 600; }
+    .banner { background: #fff3cd; border: 1px solid #e0c060; padding: 0.75rem 1rem; margin-bottom: 1.5rem; font-size: 0.9rem; }
+    .success { color: #1a7a1a; }
+    .failure { color: #b00020; }
+    fieldset { border: 1px solid #ddd; margin-bottom: 1.5rem; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="banner">Test UI only — not anonymisation-aware, no live progress, no auth. Talks directly to BACKEND_URL.</div>
+  <nav>
+    <a href="{% url 'core:home' %}">Home</a>
+    <a href="{% url 'core:import' %}">Import</a>
+    <a href="{% url 'core:export' %}">Export</a>
+    <a href="{% url 'core:results' %}">Results</a>
+  </nav>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</body>
+</html>

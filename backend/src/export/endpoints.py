@@ -3,45 +3,42 @@ Endpoints for the export page
 """
 import os
 import csv as csv_mod
-import json
 import logging
 import time
-import asyncio
 import numpy as np
 import requests as http_requests
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from pydantic import BaseModel
 from proknow import ProKnow
 from dotenv import load_dotenv
-from pyorthanc import Orthanc, find_series
+from pyorthanc import Orthanc
 from fastapi.responses import StreamingResponse
 from backend.src.export.logic import Exporter
-import threading
 from backend.src.status.db_client import StatusDB
+from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
+from backend.src.identity import anon
+from backend.src.projects import enforcement
+from backend.src.projects.enforcement import verify_internal_key
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix='/export', tags=["export"])
+router = APIRouter(prefix='/export', tags=["export"], dependencies=[Depends(verify_internal_key)])
 
-# Cancellation flags
-cancel_lock = threading.Lock()
-cancel_flags: dict[str, bool] = {} ## Holds cancellation status for every job
-
-# StatusDB init
-STATUS_DB = os.getenv('STATUS_DB')
-if STATUS_DB:
+# StatusDB init — connects via the shared pool in backend/src/db.py (DATABASE_URL)
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL:
     try:
-        status_db = StatusDB(STATUS_DB)
+        status_db = StatusDB()
         logger.debug("StatusDB initialized")
     except Exception as e:
         logger.error("Failed to init StatusDB: %s", e)
         raise ValueError(f"Failed to init StatusDB: {e}")
-     
+
 else:
-    logger.error("STATUS_DB not set; status events will not be recorded")
-    raise ValueError("STATUS_DB not set; status events will not be recorded")
+    logger.error("DATABASE_URL not set; status events will not be recorded")
+    raise ValueError("DATABASE_URL not set; status events will not be recorded")
 
 
 ORTHANC_URL = os.getenv('ORTHANC_URL')
@@ -53,268 +50,179 @@ PROKNOW_WORKSPACE = 'RBV - Christie'
 
 class Request(BaseModel):
     job_id: str
+    project_id: str
+    username: str
     mrn: str | None = None
     path_to_csv: str | None = None
     destination: str | None = None # DICOM AE
     collection: str | None = None # ProKnow collection
 
+# Note: _dicom_move_worker/_proknow_worker (below) dump this with
+# exclude_none=True, since their output feeds events.details/the SSE payload
+# for every batch endpoint and these new fields are still unpopulated
+# (nothing sets them until D2 lands) -- exclude_none keeps those payloads
+# from filling up with nulls in the meantime. proknow_upload_patient, which
+# doesn't route through run_batch_job, doesn't do this -- not a deliberate
+# inconsistency, just that path has no live caller today (per D0 review) so
+# it wasn't worth reconciling yet. Revisit if/when it grows one.
 class Response(BaseModel):
     mrn: str | int
     status: str | None = None
+    series_count: int | None = None
+    instance_count: int | None = None
+    study_uids: list[str] | None = None
+    series_uids: list[str] | None = None
+    checksums: dict[str, str] | None = None
+    destination: str | None = None
+    destination_type: str | None = None
+    submitted_by: str | None = None
 
 @router.get("/get_orthanc_modalities")
-async def get_orthanc_modalities():
+async def get_orthanc_modalities(username: str = Query(...)):
+    enforcement.require_any_active_project(username)
     try:
         client = Orthanc(url=ORTHANC_URL, username=ORTHANC_USER,
                 password=ORTHANC_PASS, verify=False,
                 timeout=14000.0,)
         logger.debug("Connected to Orthanc")
+        return client.get_modalities()
     except Exception as exc:
-        logger.error(f"Failed to connect to Orthanc: {exc}")
-        raise
-
-    res = client.get_modalities()
-
-    return res
+        logger.exception("Failed to fetch Orthanc modalities")
+        raise HTTPException(status_code=502, detail=f"Orthanc query failed: {exc}")
 
 @router.get("/get_proknow_collections")
-async def get_proknow_collections():
+async def get_proknow_collections(username: str = Query(...)):
+    enforcement.require_any_active_project(username)
     try:
         pk = ProKnow(PROKNOW_URL, credentials_file='credentials.json')
         logger.debug("Connected to Proknow")
+        return [x.name for x in pk.collections.query(workspace=PROKNOW_WORKSPACE)]
     except Exception as exc:
-        logger.error(f"Failed to connect to ProKnow: {exc}")
-        raise
-    
-    return [x.name for x in pk.collections.query(workspace=PROKNOW_WORKSPACE)]
+        logger.exception("Failed to fetch ProKnow collections")
+        raise HTTPException(status_code=502, detail=f"ProKnow query failed: {exc}")
 
 
-async def export_event_stream(job_id: str, path_to_csv: str, destination: str, **kwargs):
-    """ 
-    Generator that yields SSE-formatted events, one per patient.
-    """
-    with cancel_lock:
-        cancel_flags[job_id] = False
+def _dicom_move_worker(destination: str):
+    def worker(item: BatchItem) -> dict:
+        res = Exporter(destination=destination).dicom_c_move(item.real_id)
+        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
+    return worker
 
-    rows = Exporter.read_input_file(path_to_csv)
-    total = len(rows)
-    logger.info(f"Exporting {total} rows")
 
-    # Create job
-    if status_db:
-        try:
-            status_db.create_job(job_id, description=f"Batch export to {destination}")
-        except Exception as e:
-            logger.warning("Could not create export job in status DB: %s", e)
+def _proknow_worker(collection: str):
+    def worker(item: BatchItem) -> dict:
+        res = Exporter(destination=collection).upload_to_proknow(item.real_id)
+        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
+    return worker
 
-    yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
-    for row in rows:
-        with cancel_lock:
-            if cancel_flags.get(job_id):
-                logger.info("Client cancelled request, aborting")
-                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-                break
-
-        patient_id = row['patient_id']
-
-        # Record patient & start event
-        if status_db:
-            try:
-                status_db.add_patient(job_id, str(patient_id), input_path=path_to_csv)
-                status_db.add_event(job_id, str(patient_id), stage='export', event_type='start')
-            except Exception as e:
-                logger.warning("Status DB write failed: %s", e)
-
-        # Starting patient
-        yield f"data: {json.dumps({'type': 'progress', 'current': patient_id})}\n\n"
-        start = time.time()
-        try:
-            res = await asyncio.to_thread(
-                Exporter(destination=destination).dicom_c_move, patient_id
-            )
-            response = Response(mrn=patient_id, **res)
-
-            # Record success
-            if status_db:
-                try:
-                    status_db.add_event(job_id, str(patient_id), stage='export', event_type='success', details=res)
-                except Exception as e:
-                    logger.warning("Status DB write failed: %s", e)
-
-            yield f"data: {json.dumps({
-                'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
-
-        except Exception as e:
-            logger.error("Failed to export patient %s: %s", patient_id, e)
-
-            # Record failure
-            if status_db:
-                try:
-                    status_db.add_event(job_id, str(patient_id), stage='export', event_type='failure', error_message=str(e))
-                except Exception as ex:
-                    logger.warning("Status DB write failed: %s", ex)
-
-            yield f"data: {json.dumps({'type': 'error',
-                'execution_time': np.round(time.time() - start, 2),
-                'mrn': patient_id,
-                'error': str(e)})}\n\n"
-    
-    with cancel_lock:
-        if job_id in cancel_flags:
-            del cancel_flags[job_id]
-    yield f"data: {json.dumps({'done': True})}\n\n"
-    
+def _build_export_items(path_to_csv: str) -> list[BatchItem]:
+    try:
+        rows = Exporter.read_input_file(path_to_csv)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
+    try:
+        return build_patient_id_batch(rows, input_path=path_to_csv)
+    except anon.AnonLookupError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/dicom_move")
 async def dicom_move(body: Request):
     req = body.model_dump()
     logger.info(req)
+    enforcement.require_project_member(req['project_id'], req['username'])
+    items = _build_export_items(req['path_to_csv'])
     return StreamingResponse(
-        export_event_stream(**req),
+        run_batch_job(
+            req['job_id'], items, stage='export',
+            worker=_dicom_move_worker(req['destination']),
+            status_db=status_db,
+            description=f"Batch export to {req['destination']}",
+            created_by=req['username'],
+            project_id=req['project_id'],
+        ),
         media_type="text/event-stream",
         headers = {
             "Cache-Control": "no-cache",
         }
-    ) 
+    )
 
-async def proknow_upload_stream(job_id: str, path_to_csv: str, collection: str=None, **kwargs):
-    """
-    Generator for uploading to ProKnow that records status events.
-    """
-    with cancel_lock:
-        cancel_flags[job_id] = False
 
-    rows = Exporter.read_input_file(path_to_csv)
-    total = len(rows)
-    logger.info(f"Exporting {total} rows")
-
-    # Create job
-    if status_db:
-        try:
-            status_db.create_job(job_id, description=f"Batch ProKnow upload to {collection}")
-        except Exception as e:
-            logger.warning("Could not create export job in status DB: %s", e)
-
-    yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
-
-    for row in rows:
-        with cancel_lock:
-            if cancel_flags.get(job_id):
-                logger.info("Client cancelled request, aborting")
-                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-                break
-
-        patient_id = row['patient_id']
-
-        # Record patient & start event
-        if status_db:
-            try:
-                status_db.add_patient(job_id, str(patient_id), input_path=path_to_csv)
-                status_db.add_event(job_id, str(patient_id), stage='export', event_type='start')
-            except Exception as e:
-                logger.warning("Status DB write failed: %s", e)
-
-        # Starting patient
-        yield f"data: {json.dumps({'type': 'progress', 'current': patient_id})}\n\n"
-        start = time.time()
-        try:
-            res = await asyncio.to_thread(
-                Exporter(destination=collection).upload_to_proknow, patient_id
-            )
-            response = Response(mrn=patient_id, **res)
-
-            # Record success
-            if status_db:
-                try:
-                    status_db.add_event(job_id, str(patient_id), stage='export', event_type='success', details=res)
-                except Exception as e:
-                    logger.warning("Status DB write failed: %s", e)
-
-            yield f"data: {json.dumps({
-                'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
-
-        except Exception as e:
-            logger.error("Failed to export patient %s: %s", patient_id, e)
-
-            # Record failure
-            if status_db:
-                try:
-                    status_db.add_event(job_id, str(patient_id), stage='export', event_type='failure', error_message=str(e))
-                except Exception as ex:
-                    logger.warning("Status DB write failed: %s", ex)
-
-            yield f"data: {json.dumps({'type': 'error',
-                'execution_time': np.round(time.time() - start, 2),
-                'mrn': patient_id,
-                'error': str(e)})}\n\n"
-    
-    with cancel_lock:
-        if job_id in cancel_flags:
-            del cancel_flags[job_id]
-    yield f"data: {json.dumps({'done': True})}\n\n"
-    
-    
-    
 @router.post("/proknow_upload")
 async def proknow_upload(body: Request):
     req = body.model_dump()
     logger.info(req)
-    
+    enforcement.require_project_member(req['project_id'], req['username'])
+    items = _build_export_items(req['path_to_csv'])
     return StreamingResponse(
-        proknow_upload_stream(**req),
+        run_batch_job(
+            req['job_id'], items, stage='export',
+            worker=_proknow_worker(req['collection']),
+            status_db=status_db,
+            description=f"Batch ProKnow upload to {req['collection']}",
+            created_by=req['username'],
+            project_id=req['project_id'],
+        ),
         media_type="text/event-stream",
         headers = {
             "Cache-Control": "no-cache",
         }
-    ) 
+    )
 
 
 @router.post("/proknow_upload_patient")
 async def proknow_upload_patient(body: Request):
     req = body.model_dump()
     logger.info(req)
+    enforcement.require_project_member(req['project_id'], req['username'])
     job_id = req.get('job_id', 'manual')
-    mrn = req['mrn']
+    try:
+        real_mrn = anon.resolve_real_id(req['mrn'])
+        display_mrn = anon.to_display_id(real_mrn)
+    except anon.AnonLookupError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except anon.AnonServiceError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     # Record patient and start
     if status_db:
         try:
-            status_db.create_job(job_id, description=f"Single ProKnow upload to {req.get('collection')}")
-            status_db.add_patient(job_id, str(mrn), input_path=None)
-            status_db.add_event(job_id, str(mrn), stage='export', event_type='start')
+            status_db.create_job(
+                job_id, description=f"Single ProKnow upload to {req.get('collection')}",
+                created_by=req['username'], project_id=req['project_id'],
+            )
+            status_db.add_patient(job_id, real_mrn, input_path=None)
+            status_db.add_event(job_id, real_mrn, stage='export', event_type='start')
         except Exception as e:
             logger.warning("Status DB write failed: %s", e)
 
     exp = Exporter(destination=req['collection'])
     start = time.time()
-    try: 
-        res = exp.upload_to_proknow(req['mrn'])
-        response = Response(mrn=req['mrn'], **res)
+    try:
+        res = exp.upload_to_proknow(real_mrn)
+        response = Response(mrn=display_mrn, **res)
 
         # Record success
         if status_db:
             try:
-                status_db.add_event(job_id, str(mrn), stage='export', event_type='success', details=res)
+                status_db.add_event(job_id, real_mrn, stage='export', event_type='success', details=res)
             except Exception as e:
                 logger.warning("Status DB write failed: %s", e)
 
-        return f"data: {json.dumps({
-                    'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()})}\n\n"
+        return {'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()}
 
     except Exception as e:
         # Record failure
         if status_db:
             try:
-                status_db.add_event(job_id, str(mrn), stage='export', event_type='failure', error_message=str(e))
+                status_db.add_event(job_id, real_mrn, stage='export', event_type='failure', error_message=str(e))
             except Exception as ex:
                 logger.warning("Status DB write failed: %s", ex)
 
-        return f"data: {json.dumps({'type': 'error',
-                'execution_time': np.round(time.time() - start, 2),
-                'mrn': req['mrn'],
-                'error': str(e)})}\n\n"
+        return {'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn, 'error': str(e)}
 
 
 
@@ -322,16 +230,27 @@ async def proknow_upload_patient(body: Request):
 async def dicom_move_file(
     file: UploadFile = File(..., description="CSV with a patient_id column"),
     job_id: str = Form(...),
+    project_id: str = Form(...),
+    username: str = Form(...),
     destination: str = Form(..., description="Orthanc modality AE title"),
 ):
-    """Accept a CSV file upload and stream DICOM C-MOVE progress via SSE. Used by the gateway frontend."""
+    """Accept a CSV file upload and stream DICOM C-MOVE progress via SSE. Used by the frontend."""
+    enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
     tmp_path.write_bytes(await file.read())
 
+    items = _build_export_items(str(tmp_path))
     return StreamingResponse(
-        export_event_stream(job_id=job_id, path_to_csv=str(tmp_path), destination=destination),
+        run_batch_job(
+            job_id, items, stage='export',
+            worker=_dicom_move_worker(destination),
+            status_db=status_db,
+            description=f"Batch export to {destination}",
+            created_by=username,
+            project_id=project_id,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
@@ -341,16 +260,27 @@ async def dicom_move_file(
 async def proknow_upload_file(
     file: UploadFile = File(..., description="CSV with a patient_id column"),
     job_id: str = Form(...),
+    project_id: str = Form(...),
+    username: str = Form(...),
     collection: str = Form(..., description="ProKnow collection name"),
 ):
-    """Accept a CSV file upload and stream ProKnow upload progress via SSE. Used by the gateway frontend."""
+    """Accept a CSV file upload and stream ProKnow upload progress via SSE. Used by the frontend."""
+    enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
     tmp_path.write_bytes(await file.read())
 
+    items = _build_export_items(str(tmp_path))
     return StreamingResponse(
-        proknow_upload_stream(job_id=job_id, path_to_csv=str(tmp_path), collection=collection),
+        run_batch_job(
+            job_id, items, stage='export',
+            worker=_proknow_worker(collection),
+            status_db=status_db,
+            description=f"Batch ProKnow upload to {collection}",
+            created_by=username,
+            project_id=project_id,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
@@ -373,108 +303,103 @@ def _c_move_by_uid(ae_title: str, study_uid: str, series_uid: str | None = None)
     return resp.json()
 
 
-async def export_by_uid_stream(
-    job_id: str,
-    path_to_csv: str,
-    destination: str,
-    level: str = "study",
-):
+def _build_uid_items(path_to_csv: str, level: str) -> list[BatchItem]:
     """
-    SSE generator for UID-based C-MOVE.
-    Reads a CSV with study_instance_uid / series_instance_uid columns,
-    deduplicates, and moves each unique study or series.
-    PACS filtering is handled upstream by the gateway before this is called.
+    Read a study/series-UID CSV. Study/series UIDs are DICOM identifiers,
+    not part of the patient anon-mapping scheme, so they pass straight
+    through as both the real id and the display id (there is nothing to
+    anonymise them against here). The optional `patient_id` column is pure
+    bookkeeping metadata for StatusDB -- best-effort resolved through the
+    anon boundary, falling back to the value as submitted if it doesn't
+    resolve (e.g. because no patient_id column was supplied and it defaulted
+    to the study UID, which was never a patient id to begin with).
     """
-    with cancel_lock:
-        cancel_flags[job_id] = False
-
     seen: set = set()
-    items: list[dict] = []
-    with open(path_to_csv, newline="") as f:
-        for row in csv_mod.DictReader(f):
-            study_uid  = (row.get("study_instance_uid")  or "").strip()
-            series_uid = (row.get("series_instance_uid") or "").strip()
-            if not study_uid:
-                continue
-            use_series = level == "series" and bool(series_uid)
-            key   = (study_uid, series_uid) if use_series else study_uid
-            label = series_uid if use_series else study_uid
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append({
-                "study_uid":  study_uid,
-                "series_uid": series_uid if use_series else None,
-                "label":      label,
-                "patient_id": (row.get("patient_id") or study_uid).strip(),
-            })
+    items: list[BatchItem] = []
+    try:
+        with open(path_to_csv, newline="") as f:
+            rows = list(csv_mod.DictReader(f))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
 
-    total = len(items)
+    for row in rows:
+        study_uid  = (row.get("study_instance_uid")  or "").strip()
+        series_uid = (row.get("series_instance_uid") or "").strip()
+        if not study_uid:
+            continue
+        use_series = level == "series" and bool(series_uid)
+        key   = (study_uid, series_uid) if use_series else study_uid
+        label = series_uid if use_series else study_uid
+        if key in seen:
+            continue
+        seen.add(key)
 
-    if status_db:
-        try:
-            status_db.create_job(job_id, description=f"UID C-MOVE ({level}) to {destination}")
-        except Exception as e:
-            logger.warning("Could not create job: %s", e)
+        submitted_patient_id = (row.get("patient_id") or "").strip()
+        if submitted_patient_id:
+            try:
+                status_mrn = anon.resolve_real_id(submitted_patient_id)
+            except anon.AnonLookupError:
+                logger.warning(
+                    "patient_id %r in UID CSV has no anon mapping; using as-is for StatusDB bookkeeping only",
+                    submitted_patient_id,
+                )
+                status_mrn = submitted_patient_id
+            except anon.AnonServiceError as e:
+                # Unlike an unknown id, a dead anon service is a real problem worth
+                # failing the whole request over, not silently degrading every row.
+                raise HTTPException(status_code=503, detail=str(e))
+        else:
+            status_mrn = study_uid
 
-    yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
+        items.append(BatchItem(
+            real_id=study_uid,       # not used directly; worker reads extra["study_uid"]/["series_uid"]
+            display_id=label,
+            status_mrn=status_mrn,
+            input_path=path_to_csv,
+            extra={"study_uid": study_uid, "series_uid": series_uid if use_series else None},
+        ))
 
-    for item in items:
-        with cancel_lock:
-            if cancel_flags.get(job_id):
-                yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
-                break
+    return items
 
-        yield f"data: {json.dumps({'type': 'progress', 'current': item['label']})}\n\n"
-        start = time.time()
-        try:
-            await asyncio.to_thread(_c_move_by_uid, destination, item["study_uid"], item["series_uid"])
 
-            if status_db:
-                try:
-                    status_db.add_patient(job_id, item["patient_id"], input_path=path_to_csv)
-                    status_db.add_event(job_id, item["patient_id"], stage="export", event_type="success")
-                except Exception as e:
-                    logger.warning("Status DB write failed: %s", e)
-
-            yield f"data: {json.dumps({'type': 'success', 'mrn': item['label'], 'execution_time': np.round(time.time() - start, 2)})}\n\n"
-
-        except Exception as e:
-            logger.error("C-MOVE failed for %s: %s", item["label"], e)
-
-            if status_db:
-                try:
-                    status_db.add_event(job_id, item["patient_id"], stage="export", event_type="failure", error_message=str(e))
-                except Exception as ex:
-                    logger.warning("Status DB write failed: %s", ex)
-
-            yield f"data: {json.dumps({'type': 'error', 'mrn': item['label'], 'error': str(e), 'execution_time': np.round(time.time() - start, 2)})}\n\n"
-
-    with cancel_lock:
-        if job_id in cancel_flags:
-            del cancel_flags[job_id]
-    yield f"data: {json.dumps({'done': True})}\n\n"
+def _uid_move_worker(destination: str):
+    def worker(item: BatchItem) -> dict:
+        _c_move_by_uid(destination, item.extra["study_uid"], item.extra["series_uid"])
+        return {}
+    return worker
 
 
 @router.post("/dicom_move_uids_file")
 async def dicom_move_uids_file(
     file: UploadFile = File(..., description="CSV with study_instance_uid and optionally series_instance_uid columns"),
     job_id: str = Form(...),
+    project_id: str = Form(...),
+    username: str = Form(...),
     destination: str = Form(..., description="Orthanc modality AE title"),
     level: str = Form("study", description="'study' to move whole study, 'series' to move individual series"),
 ):
     """
     C-MOVE specific studies or series identified by DICOM UIDs.
-    Accepts the CSV produced by the gateway Studies page (already PACS-filtered if requested).
+    Accepts the CSV produced by the Studies page (already PACS-filtered if requested).
     Deduplicates rows before moving.
     """
+    enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
     tmp_path.write_bytes(await file.read())
 
+    items = _build_uid_items(str(tmp_path), level)
+
     return StreamingResponse(
-        export_by_uid_stream(job_id=job_id, path_to_csv=str(tmp_path), destination=destination, level=level),
+        run_batch_job(
+            job_id, items, stage='export',
+            worker=_uid_move_worker(destination),
+            status_db=status_db,
+            description=f"UID C-MOVE ({level}) to {destination}",
+            created_by=username,
+            project_id=project_id,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
@@ -482,8 +407,6 @@ async def dicom_move_uids_file(
 
 @router.post("/cancel/{job_id}")
 async def cancel_export(job_id: str):
-    with cancel_lock:
-        cancel_flags[job_id] = True
+    status_db.cancel_job(job_id)
     logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}
-
