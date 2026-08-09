@@ -10,7 +10,7 @@ import polars as pl
 import requests
 from proknow import ProKnow
 from collections import defaultdict
-from pyorthanc import Orthanc, Modality, find_series, upload
+from pyorthanc import Orthanc, Modality, find_series, find_studies, upload
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -105,11 +105,13 @@ class Importer():
         Handles a single patient:
         1. Searches locations
         2. Imports from known locations
+        3. Verifies against Orthanc ground truth (post-cleanup)
 
         """
         locations: dict[str, bool] = self.find_patient(mrn)
         self.import_patient(mrn, locations)
-        return {'status': 'success', **locations}
+        verification = self.verify_on_orthanc(mrn)
+        return {'status': 'success', **locations, **verification}
 
 
     def find_patient(self, mrn: int) -> dict[str, bool]:
@@ -145,6 +147,18 @@ class Importer():
 
         ## Clean orthanc after importing all data.
         self._cleanup_orthanc(mrn)
+
+
+    ## ============= Methods for verification ===========================
+    def verify_on_orthanc(self, mrn: int) -> dict:
+        """Ground truth: what does Orthanc actually hold for this patient,
+        right now, regardless of what find_patient predicted beforehand."""
+        studies = find_studies(client=self.ot, query={"PatientID": str(mrn)})
+        return {
+            "imported": bool(studies),
+            "study_count": len(studies),
+            "study_uids": [s.main_dicom_tags.get("StudyInstanceUID") for s in studies],
+        }
 
 
     ## ============= Methods for importing ===========================
