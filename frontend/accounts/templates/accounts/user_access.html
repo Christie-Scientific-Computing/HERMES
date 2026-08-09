@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Export access — {{ target_user.username }} — HERMES{% endblock %}
+{% block content %}
+<a href="{% url 'accounts:user_list' %}" class="text-sm text-hermes-700 hover:underline">&larr; Users</a>
+
+<div class="mt-2">
+  <h1 class="text-2xl font-semibold text-gray-900">Export destinations — {{ target_user.username }}</h1>
+  <p class="mt-1 text-sm text-gray-500">
+    Restrict which Orthanc modalities / ProKnow collections this user may export to,
+    independent of project membership. If no destinations are listed below, this user
+    is unrestricted (today's default behavior) and may export to any registered
+    destination their project membership otherwise allows.
+  </p>
+</div>
+
+<div class="mt-6 grid gap-6 lg:grid-cols-3">
+  <div class="lg:col-span-2">
+    <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      <table class="min-w-full divide-y divide-gray-200 text-sm">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-2 text-left font-medium text-gray-500">Type</th>
+            <th class="px-4 py-2 text-left font-medium text-gray-500">Destination</th>
+            <th class="px-4 py-2 text-left font-medium text-gray-500">Added by</th>
+            <th class="px-4 py-2 text-left font-medium text-gray-500">Added at</th>
+            <th class="px-4 py-2 text-left font-medium text-gray-500"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {% for d in destinations %}
+          <tr>
+            <td class="px-4 py-2">
+              {% if d.destination_type == "dicom_modality" %}DICOM modality{% else %}ProKnow collection{% endif %}
+            </td>
+            <td class="px-4 py-2">{{ d.destination }}</td>
+            <td class="px-4 py-2 text-gray-500">{{ d.added_by }}</td>
+            <td class="px-4 py-2 text-gray-500">{{ d.added_at }}</td>
+            <td class="px-4 py-2 text-right">
+              <form method="post" action="{% url 'accounts:user_access_remove' target_user.username d.id %}">
+                {% csrf_token %}
+                <button type="submit" class="text-red-600 hover:underline text-xs">Remove</button>
+              </form>
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="5" class="px-4 py-6 text-center text-gray-400">
+              No restrictions configured — this user may export to any registered destination.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="space-y-6">
+    <div class="bg-white border border-gray-200 rounded-lg p-6">
+      <h2 class="text-sm font-semibold text-gray-900 mb-4">Add destination</h2>
+      {% if modalities_error %}
+      <p class="text-xs text-red-600 mb-2">Could not load Orthanc modalities: {{ modalities_error }}</p>
+      {% endif %}
+      {% if collections_error %}
+      <p class="text-xs text-red-600 mb-2">Could not load ProKnow collections: {{ collections_error }}</p>
+      {% endif %}
+      <form method="post" class="space-y-2">
+        {% csrf_token %}
+        <label class="block text-xs font-medium text-gray-700">{{ form.destination.label }}</label>
+        {{ form.destination }}
+        {% if form.destination.errors %}
+        <p class="text-xs text-red-600">{{ form.destination.errors|join:", " }}</p>
+        {% endif %}
+        <button type="submit" class="w-full rounded-md bg-gray-100 text-gray-700 px-3 py-1.5 text-xs font-medium hover:bg-gray-200">
+          Add destination
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

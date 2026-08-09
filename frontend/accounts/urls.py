@@ -11,5 +11,7 @@ urlpatterns = [
     path("invite/", views.invite_user, name="invite"),
     path("users/", views.user_list, name="user_list"),
     path("users/create/", views.create_user, name="create_user"),
+    path("users/<str:username>/access/", views.user_access, name="user_access"),
+    path("users/<str:username>/access/<int:id>/remove/", views.user_access_remove, name="user_access_remove"),
     path("activate/<uidb64>/<token>/", views.activate_account, name="activate"),
 ]

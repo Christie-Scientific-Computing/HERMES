@@ -192,6 +192,22 @@ def ensure_superuser_bypass_project(username: str) -> str:
     return project_id
 
 
+# ---- Per-user export destination allow-list (accounts/ app, safety-plan §A) ----
+
+def list_access(username: str) -> list[dict]:
+    return _get(f"/access/{username}")["destinations"]
+
+
+def add_access(username: str, destination_type: str, destination: str, added_by: str) -> list[dict]:
+    return _post(f"/access/{username}", json={
+        "destination_type": destination_type, "destination": destination, "added_by": added_by,
+    })["destinations"]
+
+
+def remove_access(username: str, id: int) -> list[dict]:
+    return _delete(f"/access/{username}/{id}")["destinations"]
+
+
 # ---- Import (jobs/ app) ----
 
 def single_import(job_id: str, mrn: str, import_level: str, project_id: str, username: str) -> dict:

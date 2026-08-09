@@ -5,12 +5,13 @@ from django.contrib.auth.forms import SetPasswordForm
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.views import LoginView
 from django.core.mail import send_mail
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
-from accounts.forms import CreateUserForm, HermesAuthenticationForm, InviteUserForm
+from hermes_frontend import backend_client
+from accounts.forms import AddDestinationForm, CreateUserForm, HermesAuthenticationForm, InviteUserForm
 
 User = get_user_model()
 
@@ -106,3 +107,72 @@ def activate_account(request, uidb64, token):
 def user_list(request):
     users = User.objects.select_related("profile").order_by("username")
     return render(request, "accounts/user_list.html", {"users": users})
+
+
+@login_required
+@user_passes_test(_is_data_custodian)
+def user_access(request, username):
+    """
+    Staff-only page (safety-plan §A): manage a single user's export
+    destination allow-list, independent of project membership. Zero rows
+    for this user means unrestricted (see AccessDB.is_allowed on the
+    backend) -- the table below is empty in exactly that case, not an
+    error state.
+    """
+    target_user = get_object_or_404(User, username=username)
+
+    modalities, modalities_error = [], None
+    collections, collections_error = [], None
+    try:
+        modalities = backend_client.get_orthanc_modalities(request.user.username)
+    except backend_client.BackendError as e:
+        modalities_error = e.detail
+    try:
+        collections = backend_client.get_proknow_collections(request.user.username)
+    except backend_client.BackendError as e:
+        collections_error = e.detail
+
+    if request.method == "POST":
+        form = AddDestinationForm(request.POST)
+        form.set_destination_choices(modalities, collections)
+        if form.is_valid():
+            try:
+                backend_client.add_access(
+                    username, form.destination_type, form.destination_value,
+                    added_by=request.user.username,
+                )
+            except backend_client.BackendError as e:
+                messages.error(request, f"Could not add destination: {e.detail}")
+            else:
+                messages.success(request, "Destination added.")
+            return redirect("accounts:user_access", username=username)
+    else:
+        form = AddDestinationForm()
+        form.set_destination_choices(modalities, collections)
+
+    try:
+        destinations = backend_client.list_access(username)
+    except backend_client.BackendError as e:
+        messages.error(request, f"Could not load destinations: {e.detail}")
+        destinations = []
+
+    return render(request, "accounts/user_access.html", {
+        "target_user": target_user,
+        "destinations": destinations,
+        "form": form,
+        "modalities_error": modalities_error,
+        "collections_error": collections_error,
+    })
+
+
+@login_required
+@user_passes_test(_is_data_custodian)
+def user_access_remove(request, username, id):
+    if request.method == "POST":
+        try:
+            backend_client.remove_access(username, id)
+        except backend_client.BackendError as e:
+            messages.error(request, f"Could not remove destination: {e.detail}")
+        else:
+            messages.success(request, "Destination removed.")
+    return redirect("accounts:user_access", username=username)

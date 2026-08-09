@@ -90,3 +90,39 @@ class CreateUserForm(_UserIdentityForm):
         user.set_password(self.cleaned_data["password1"])
         user.save()
         return user
+
+
+class AddDestinationForm(forms.Form):
+    """
+    Add one destination to a user's export allow-list (accounts/views.py's
+    user_access, safety-plan §A). A single field, not a type radio +
+    separate dropdown -- the view populates choices from live
+    backend_client.get_orthanc_modalities/get_proknow_collections calls
+    (same source the export forms themselves use, so an admin only ever
+    picks a real, currently-registered destination), grouped into two
+    optgroups. The value encodes "<destination_type>:<destination>" so a
+    single ChoiceField can cover both kinds without any JS to swap a second
+    field's options based on the first.
+    """
+    destination = forms.ChoiceField(label="Destination", choices=[])
+
+    def set_destination_choices(self, modalities: list[str], collections: list[str]) -> None:
+        self.fields["destination"].choices = [
+            ("DICOM modalities", [(f"dicom_modality:{m}", m) for m in modalities]),
+            ("ProKnow collections", [(f"proknow_collection:{c}", c) for c in collections]),
+        ]
+
+    def clean_destination(self):
+        value = self.cleaned_data["destination"]
+        destination_type, sep, destination = value.partition(":")
+        if not sep or destination_type not in ("dicom_modality", "proknow_collection") or not destination:
+            raise forms.ValidationError("Invalid destination selection.")
+        return value
+
+    @property
+    def destination_type(self) -> str:
+        return self.cleaned_data["destination"].split(":", 1)[0]
+
+    @property
+    def destination_value(self) -> str:
+        return self.cleaned_data["destination"].split(":", 1)[1]
