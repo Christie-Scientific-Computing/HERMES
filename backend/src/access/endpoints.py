@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.src.access.db_client import AccessDB
+from backend.src.export.endpoints import fetch_orthanc_modalities, fetch_proknow_collections
 from backend.src.projects.enforcement import verify_internal_key
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,30 @@ class AddDestinationRequest(BaseModel):
     destination_type: str
     destination: str
     added_by: str
+
+
+@router.get("/reference/orthanc_modalities")
+async def reference_orthanc_modalities():
+    """
+    Every registered Orthanc modality -- populates the "add destination"
+    dropdown on accounts/views.py's user_access page. Deliberately NOT
+    gated by require_any_active_project the way export/endpoints.py's
+    get_orthanc_modalities is: the caller here is a staff admin managing
+    someone else's allow-list, not exporting themselves, and routinely
+    isn't a project member at all (a data-custodian/admin role is distinct
+    from "researcher who exports data" in this app). verify_internal_key
+    (this router's dependency) plus Django's own is_staff gate
+    (_is_data_custodian, enforced before this endpoint is ever called) is
+    the intended authorization here -- same posture as list_access/
+    add_access/remove_access above.
+    """
+    return fetch_orthanc_modalities()
+
+
+@router.get("/reference/proknow_collections")
+async def reference_proknow_collections():
+    """ProKnow counterpart to reference_orthanc_modalities -- see its docstring."""
+    return fetch_proknow_collections()
 
 
 @router.get("/{username}")
@@ -51,7 +76,7 @@ async def add_access(username: str, body: AddDestinationRequest):
     return {"username": username, "destinations": access_db.list_for_user(username)}
 
 
-@router.delete("/{username}/{id}")
-async def remove_access(username: str, id: int):
-    access_db.remove(username, id)
+@router.delete("/{username}/{destination_id}")
+async def remove_access(username: str, destination_id: int):
+    access_db.remove(username, destination_id)
     return {"username": username, "destinations": access_db.list_for_user(username)}

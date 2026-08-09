@@ -204,8 +204,31 @@ def add_access(username: str, destination_type: str, destination: str, added_by:
     })["destinations"]
 
 
-def remove_access(username: str, id: int) -> list[dict]:
-    return _delete(f"/access/{username}/{id}")["destinations"]
+def remove_access(username: str, destination_id: int) -> list[dict]:
+    return _delete(f"/access/{username}/{destination_id}")["destinations"]
+
+
+def list_orthanc_modalities_for_admin() -> list[str]:
+    """
+    Every registered Orthanc modality -- for populating the "add
+    destination" dropdown on accounts/views.py's user_access page.
+
+    Deliberately NOT get_orthanc_modalities(request.user.username) below:
+    that call is gated backend-side by require_any_active_project, which
+    403s for a data-custodian admin who isn't themselves an active project
+    member -- a common case, since "staff who administer other users'
+    access" and "researchers who are project members" are distinct roles
+    here. This hits backend/src/access/endpoints.py's /access/reference/*
+    routes instead, which carry no project-membership requirement -- only
+    verify_internal_key plus Django's own is_staff gate on this call site
+    (_is_data_custodian, already enforced before user_access ever runs).
+    """
+    return _get("/access/reference/orthanc_modalities")
+
+
+def list_proknow_collections_for_admin() -> list[str]:
+    """ProKnow counterpart to list_orthanc_modalities_for_admin -- see its docstring."""
+    return _get("/access/reference/proknow_collections")
 
 
 # ---- Import (jobs/ app) ----

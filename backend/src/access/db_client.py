@@ -41,11 +41,11 @@ class AccessDB:
                 (username, destination_type, destination, added_by, now),
             )
 
-    def remove(self, username: str, id: int) -> None:
+    def remove(self, username: str, destination_id: int) -> None:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM user_export_destinations WHERE username = %s AND id = %s",
-                (username, id),
+                (username, destination_id),
             )
 
     def is_allowed(self, username: str, destination_type: str, destination: str) -> bool:

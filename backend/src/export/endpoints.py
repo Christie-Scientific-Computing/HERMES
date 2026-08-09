@@ -61,9 +61,15 @@ class Response(BaseModel):
     mrn: str | int
     status: str | None = None
 
-@router.get("/get_orthanc_modalities")
-async def get_orthanc_modalities(username: str = Query(...)):
-    enforcement.require_any_active_project(username)
+def fetch_orthanc_modalities() -> list[str]:
+    """
+    The actual Orthanc query, factored out of get_orthanc_modalities so it
+    can also back backend/src/access/endpoints.py's admin/reference route,
+    which deliberately does NOT require project membership (see that
+    module's docstring for why). Callers are responsible for whatever
+    authorization gate is appropriate for them -- this function itself does
+    none.
+    """
     try:
         client = Orthanc(url=ORTHANC_URL, username=ORTHANC_USER,
                 password=ORTHANC_PASS, verify=False,
@@ -74,9 +80,9 @@ async def get_orthanc_modalities(username: str = Query(...)):
         logger.exception("Failed to fetch Orthanc modalities")
         raise HTTPException(status_code=502, detail=f"Orthanc query failed: {exc}")
 
-@router.get("/get_proknow_collections")
-async def get_proknow_collections(username: str = Query(...)):
-    enforcement.require_any_active_project(username)
+
+def fetch_proknow_collections() -> list[str]:
+    """Same factoring-out as fetch_orthanc_modalities, for ProKnow."""
     try:
         pk = ProKnow(PROKNOW_URL, credentials_file='credentials.json')
         logger.debug("Connected to Proknow")
@@ -84,6 +90,17 @@ async def get_proknow_collections(username: str = Query(...)):
     except Exception as exc:
         logger.exception("Failed to fetch ProKnow collections")
         raise HTTPException(status_code=502, detail=f"ProKnow query failed: {exc}")
+
+
+@router.get("/get_orthanc_modalities")
+async def get_orthanc_modalities(username: str = Query(...)):
+    enforcement.require_any_active_project(username)
+    return fetch_orthanc_modalities()
+
+@router.get("/get_proknow_collections")
+async def get_proknow_collections(username: str = Query(...)):
+    enforcement.require_any_active_project(username)
+    return fetch_proknow_collections()
 
 
 def _dicom_move_worker(destination: str):

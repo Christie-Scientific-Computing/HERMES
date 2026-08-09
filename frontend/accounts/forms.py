@@ -97,11 +97,13 @@ class AddDestinationForm(forms.Form):
     Add one destination to a user's export allow-list (accounts/views.py's
     user_access, safety-plan §A). A single field, not a type radio +
     separate dropdown -- the view populates choices from live
-    backend_client.get_orthanc_modalities/get_proknow_collections calls
-    (same source the export forms themselves use, so an admin only ever
-    picks a real, currently-registered destination), grouped into two
-    optgroups. The value encodes "<destination_type>:<destination>" so a
-    single ChoiceField can cover both kinds without any JS to swap a second
+    backend_client.list_orthanc_modalities_for_admin/
+    list_proknow_collections_for_admin calls (an admin/reference lookup, not
+    project-membership-gated the way the export form's own
+    get_orthanc_modalities/get_proknow_collections calls are -- see those
+    functions' docstrings), grouped into two optgroups. The value encodes
+    "<destination_type>:<destination>" so a single ChoiceField can cover both
+    kinds without any JS to swap a second
     field's options based on the first.
     """
     destination = forms.ChoiceField(label="Destination", choices=[])

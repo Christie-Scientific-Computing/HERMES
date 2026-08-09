@@ -124,11 +124,11 @@ def user_access(request, username):
     modalities, modalities_error = [], None
     collections, collections_error = [], None
     try:
-        modalities = backend_client.get_orthanc_modalities(request.user.username)
+        modalities = backend_client.list_orthanc_modalities_for_admin()
     except backend_client.BackendError as e:
         modalities_error = e.detail
     try:
-        collections = backend_client.get_proknow_collections(request.user.username)
+        collections = backend_client.list_proknow_collections_for_admin()
     except backend_client.BackendError as e:
         collections_error = e.detail
 
@@ -167,10 +167,10 @@ def user_access(request, username):
 
 @login_required
 @user_passes_test(_is_data_custodian)
-def user_access_remove(request, username, id):
+def user_access_remove(request, username, destination_id):
     if request.method == "POST":
         try:
-            backend_client.remove_access(username, id)
+            backend_client.remove_access(username, destination_id)
         except backend_client.BackendError as e:
             messages.error(request, f"Could not remove destination: {e.detail}")
         else:

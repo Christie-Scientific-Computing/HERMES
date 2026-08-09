@@ -51,8 +51,8 @@ class _StubbedBackend(TestCase):
         nav_patcher.start()
         self.addCleanup(nav_patcher.stop)
 
-        self.backend.get_orthanc_modalities.return_value = ["AE_ONE", "AE_TWO"]
-        self.backend.get_proknow_collections.return_value = ["SomeCollection", "OtherCollection"]
+        self.backend.list_orthanc_modalities_for_admin.return_value = ["AE_ONE", "AE_TWO"]
+        self.backend.list_proknow_collections_for_admin.return_value = ["SomeCollection", "OtherCollection"]
         self.backend.list_access.return_value = DESTINATIONS
         self.backend.add_access.return_value = DESTINATIONS
         self.backend.remove_access.return_value = []
@@ -98,12 +98,31 @@ class UserAccessPageRenderingTests(_StubbedBackend):
         self.assertContains(resp, "OtherCollection")
 
     def test_modalities_error_is_shown_but_page_still_renders(self):
-        self.backend.get_orthanc_modalities.side_effect = _FakeBackendError("orthanc down")
+        self.backend.list_orthanc_modalities_for_admin.side_effect = _FakeBackendError("orthanc down")
         resp = self.client.get(reverse("accounts:user_access", args=[TARGET_USERNAME]))
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "orthanc down")
         # ProKnow collections still render even though Orthanc failed.
         self.assertContains(resp, "SomeCollection")
+
+    def test_dropdown_lookup_does_not_depend_on_the_viewing_admins_own_username(self):
+        """
+        Regression test for the bug found by review: this page used to call
+        get_orthanc_modalities(request.user.username)/get_proknow_collections
+        (request.user.username), which 403 backend-side for any staff admin
+        who isn't themselves an active project member -- a common case, since
+        "data custodian" and "project member" are distinct roles here. The
+        fix (list_orthanc_modalities_for_admin/list_proknow_collections_for_admin)
+        must be called with no arguments at all -- see
+        backend/tests/test_access_reference_endpoints.py for the
+        corresponding backend-side proof that those routes skip the
+        membership gate entirely.
+        """
+        self.client.get(reverse("accounts:user_access", args=[TARGET_USERNAME]))
+        self.backend.list_orthanc_modalities_for_admin.assert_called_once_with()
+        self.backend.list_proknow_collections_for_admin.assert_called_once_with()
+        self.backend.get_orthanc_modalities.assert_not_called()
+        self.backend.get_proknow_collections.assert_not_called()
 
 
 class UserAccessAddFormTests(_StubbedBackend):
