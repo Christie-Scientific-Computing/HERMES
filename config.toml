@@ -5,5 +5,3 @@ log-to-file=false
 log-dir='./logs/' 
 # Detail to print when logging. Should be DEBUG in dev.
 log-level="INFO"
-#Path to pinnacleDB
-pinnacle-db='./db/pinn_db.sqlite'

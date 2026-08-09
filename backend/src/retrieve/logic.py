@@ -34,9 +34,9 @@ PATH_TO_KEY = os.getenv('PATH_TO_KEY')
 PINN_DB = os.getenv('PINN_DB')
 
 # Destination the Pinnacle export submodule pushes to (was hardcoded)
-PINNACLE_PUSH_HOST = os.getenv('PINNACLE_PUSH_HOST', '192.168.117.5')
-PINNACLE_PUSH_PORT = int(os.getenv('PINNACLE_PUSH_PORT', '32806'))
-PINNACLE_PUSH_AE_TITLE = os.getenv('PINNACLE_PUSH_AE_TITLE', 'old_mosaiq_router')
+PINNACLE_PUSH_HOST = os.getenv('PINNACLE_PUSH_HOST')
+PINNACLE_PUSH_PORT = int(os.getenv('PINNACLE_PUSH_PORT'))
+PINNACLE_PUSH_AE_TITLE = os.getenv('PINNACLE_PUSH_AE_TITLE')
 
 #Proknow setup
 PROKNOW_URL = 'https://nhs.proknow.com'
