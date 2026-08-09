@@ -39,6 +39,7 @@ behavior, unchanged":
 import os
 import time
 import logging
+import threading
 from typing import Optional
 
 import psycopg2
@@ -87,6 +88,15 @@ _pool: Optional[SimpleConnectionPool] = None
 _lookup_window_start: Optional[float] = None
 _lookup_window_count: int = 0
 _lookup_window_warned: bool = False
+# Guards the three globals above. Safe today without it, since every current
+# caller runs synchronously on the single asyncio event-loop thread (no
+# `await` between reading and writing this state) -- but that's an unstated
+# invariant elsewhere in this module's own callers, not an enforced one, and
+# the lock is nearly free. Cheap defense-in-depth against a future change
+# (e.g. anon lookups moving into asyncio.to_thread the way §D1 does for
+# StatusDB calls in docs/safety-plan.md), which would make concurrent OS
+# threads race on this read-modify-write for the first time.
+_lookup_lock = threading.Lock()
 
 
 class AnonLookupError(Exception):
@@ -140,25 +150,31 @@ def _note_lookup_volume(count: int) -> None:
     if count <= 0:
         return
 
-    now = time.monotonic()
-    if (
-        _lookup_window_start is None
-        or now - _lookup_window_start >= ANON_LOOKUP_WARN_WINDOW_SECONDS
-    ):
-        _lookup_window_start = now
-        _lookup_window_count = 0
-        _lookup_window_warned = False
+    should_warn = False
+    with _lookup_lock:
+        now = time.monotonic()
+        if (
+            _lookup_window_start is None
+            or now - _lookup_window_start >= ANON_LOOKUP_WARN_WINDOW_SECONDS
+        ):
+            _lookup_window_start = now
+            _lookup_window_count = 0
+            _lookup_window_warned = False
 
-    _lookup_window_count += count
+        _lookup_window_count += count
 
-    if _lookup_window_count > ANON_LOOKUP_WARN_THRESHOLD and not _lookup_window_warned:
+        if _lookup_window_count > ANON_LOOKUP_WARN_THRESHOLD and not _lookup_window_warned:
+            _lookup_window_warned = True
+            should_warn = True
+        window_count = _lookup_window_count
+
+    if should_warn:
         logger.warning(
             "Anonymisation ID lookup volume (%d) exceeded threshold (%d) "
             "within the last %ds -- possible bulk re-identification attempt",
-            _lookup_window_count, ANON_LOOKUP_WARN_THRESHOLD,
+            window_count, ANON_LOOKUP_WARN_THRESHOLD,
             ANON_LOOKUP_WARN_WINDOW_SECONDS,
         )
-        _lookup_window_warned = True
 
 
 def _to_bigints(ids: list[str]) -> dict[str, int]:
