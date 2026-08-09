@@ -42,6 +42,14 @@ class Request(BaseModel):
     path_to_csv: str | None = None
     import_level: str | None = None
 
+# Note: _import_worker (below) dumps this with exclude_none=True, since its
+# output feeds events.details/the SSE payload for every batch endpoint and
+# these new fields are still unpopulated (nothing sets them until D1/D3/E
+# land) -- exclude_none keeps those payloads from filling up with nulls in
+# the meantime. single_import/find_patient, which don't route through
+# run_batch_job, don't do this -- not a deliberate inconsistency, just that
+# those paths have no live caller today (per D0 review) so it wasn't worth
+# reconciling yet. Revisit if/when they grow one.
 class Response(BaseModel):
     mrn: str | int
     status: str | None = None
