@@ -16,8 +16,28 @@ Configuration (backend .env):
 If ANON_DB_HOST is not set, is_configured() returns False and callers should
 operate in passthrough mode (no anonymisation) -- e.g. internal-only
 deployments that don't need this at all.
+
+Optional hardening (see docs/safety-plan.md §B1), both opt-in and unset by
+default -- matching this module's existing idiom of "unset means today's
+behavior, unchanged":
+    ANON_DB_SSLMODE      -- standard libpq sslmode (e.g. "require",
+                            "verify-full"). This is standard TLS opt-in, NOT
+                            certificate pinning -- normal PKI validation
+                            against whatever certificate/CA the server
+                            already presents.
+    ANON_DB_SSLROOTCERT  -- filesystem path to a CA/root certificate, used
+                            alongside ANON_DB_SSLMODE="verify-full" (or
+                            "verify-ca") to confirm server identity.
+    ANON_LOOKUP_WARN_THRESHOLD, ANON_LOOKUP_WARN_WINDOW_SECONDS -- app-side
+                            monitoring: a rolling in-process counter of IDs
+                            looked up, logged as a warning if it exceeds the
+                            threshold within the window. A sudden spike in ID
+                            resolutions is a plausible signal of bulk
+                            re-identification/exfiltration; this is purely
+                            informational (nothing is blocked or rejected).
 """
 import os
+import time
 import logging
 from typing import Optional
 
@@ -31,6 +51,17 @@ ANON_DB_PORT = int(os.getenv("ANON_DB_PORT", "5432"))
 ANON_DB_NAME = os.getenv("ANON_DB_NAME", "")
 ANON_DB_USER = os.getenv("ANON_DB_USER", "")
 ANON_DB_PASS = os.getenv("ANON_DB_PASS", "")
+
+# Standard TLS opt-in -- NOT certificate pinning. Both unset by default,
+# preserving today's behavior unchanged. See module docstring above.
+ANON_DB_SSLMODE = os.getenv("ANON_DB_SSLMODE")
+ANON_DB_SSLROOTCERT = os.getenv("ANON_DB_SSLROOTCERT")
+
+# Application-side lookup-volume monitoring -- sane defaults, both overridable.
+ANON_LOOKUP_WARN_THRESHOLD = int(os.getenv("ANON_LOOKUP_WARN_THRESHOLD", "500"))
+ANON_LOOKUP_WARN_WINDOW_SECONDS = int(
+    os.getenv("ANON_LOOKUP_WARN_WINDOW_SECONDS", str(60 * 60))
+)
 
 # ── Production schema, confirmed by the Christie team ────────────────────────
 # `key_value` is a multi-purpose table; key_type_id = 1 selects the
@@ -50,6 +81,13 @@ _SQL_REAL_TO_ANON = """
 
 _pool: Optional[SimpleConnectionPool] = None
 
+# Rolling lookup-volume counter state (see note_lookup_volume below). Reset
+# whenever the window elapses; deliberately in-process only, no new
+# infrastructure -- see module docstring.
+_lookup_window_start: Optional[float] = None
+_lookup_window_count: int = 0
+_lookup_window_warned: bool = False
+
 
 class AnonLookupError(Exception):
     """Raised when an anonymised ID has no mapping in the external database."""
@@ -67,15 +105,60 @@ def is_configured() -> bool:
     return bool(ANON_DB_HOST)
 
 
+def _connection_kwargs() -> dict:
+    """Build the kwargs passed to psycopg2 for the anon DB connection.
+
+    Split out from _get_pool so it's independently testable: sslmode/
+    sslrootcert must be present only when their env vars are actually set --
+    psycopg2 should never see e.g. sslmode=None, matching how ANON_DB_HOST
+    unset already means passthrough elsewhere in this module.
+    """
+    kwargs = {
+        "host": ANON_DB_HOST, "port": ANON_DB_PORT, "dbname": ANON_DB_NAME,
+        "user": ANON_DB_USER, "password": ANON_DB_PASS, "connect_timeout": 5,
+    }
+    if ANON_DB_SSLMODE:
+        kwargs["sslmode"] = ANON_DB_SSLMODE
+    if ANON_DB_SSLROOTCERT:
+        kwargs["sslrootcert"] = ANON_DB_SSLROOTCERT
+    return kwargs
+
+
 def _get_pool() -> SimpleConnectionPool:
     global _pool
     if _pool is None:
-        _pool = SimpleConnectionPool(
-            1, 5,
-            host=ANON_DB_HOST, port=ANON_DB_PORT, dbname=ANON_DB_NAME,
-            user=ANON_DB_USER, password=ANON_DB_PASS, connect_timeout=5,
-        )
+        _pool = SimpleConnectionPool(1, 5, **_connection_kwargs())
     return _pool
+
+
+def _note_lookup_volume(count: int) -> None:
+    """Track lookups over a rolling time window and warn once a configurable
+    threshold is exceeded within it. Purely observational -- never raises,
+    never blocks a lookup. A sudden spike here is a plausible signal of bulk
+    re-identification/exfiltration; right now nothing else surfaces that."""
+    global _lookup_window_start, _lookup_window_count, _lookup_window_warned
+    if count <= 0:
+        return
+
+    now = time.monotonic()
+    if (
+        _lookup_window_start is None
+        or now - _lookup_window_start >= ANON_LOOKUP_WARN_WINDOW_SECONDS
+    ):
+        _lookup_window_start = now
+        _lookup_window_count = 0
+        _lookup_window_warned = False
+
+    _lookup_window_count += count
+
+    if _lookup_window_count > ANON_LOOKUP_WARN_THRESHOLD and not _lookup_window_warned:
+        logger.warning(
+            "Anonymisation ID lookup volume (%d) exceeded threshold (%d) "
+            "within the last %ds -- possible bulk re-identification attempt",
+            _lookup_window_count, ANON_LOOKUP_WARN_THRESHOLD,
+            ANON_LOOKUP_WARN_WINDOW_SECONDS,
+        )
+        _lookup_window_warned = True
 
 
 def _to_bigints(ids: list[str]) -> dict[str, int]:
@@ -123,6 +206,7 @@ def lookup_real_ids(anon_ids: list[str]) -> dict[str, str]:
         return {}
 
     unique = list(dict.fromkeys(anon_ids))
+    _note_lookup_volume(len(unique))
     as_ints = _to_bigints(unique)
     rows = _query(_SQL_ANON_TO_REAL, list(as_ints.values()))
 
@@ -148,6 +232,7 @@ def lookup_anon_ids(real_ids: list[str]) -> dict[str, str]:
         return {}
 
     unique = list(dict.fromkeys(real_ids))
+    _note_lookup_volume(len(unique))
     as_ints = _to_bigints(unique)
     rows = _query(_SQL_REAL_TO_ANON, list(as_ints.values()))
 
