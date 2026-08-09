@@ -118,6 +118,7 @@ async def dicom_move(body: Request):
     req = body.model_dump()
     logger.info(req)
     enforcement.require_project_member(req['project_id'], req['username'])
+    enforcement.require_allowed_destination(req['username'], "dicom_modality", req['destination'])
     items = _build_export_items(req['path_to_csv'])
     return StreamingResponse(
         run_batch_job(
@@ -140,6 +141,7 @@ async def proknow_upload(body: Request):
     req = body.model_dump()
     logger.info(req)
     enforcement.require_project_member(req['project_id'], req['username'])
+    enforcement.require_allowed_destination(req['username'], "proknow_collection", req['collection'])
     items = _build_export_items(req['path_to_csv'])
     return StreamingResponse(
         run_batch_job(
@@ -162,6 +164,7 @@ async def proknow_upload_patient(body: Request):
     req = body.model_dump()
     logger.info(req)
     enforcement.require_project_member(req['project_id'], req['username'])
+    enforcement.require_allowed_destination(req['username'], "proknow_collection", req['collection'])
     job_id = req.get('job_id', 'manual')
     try:
         real_mrn = anon.resolve_real_id(req['mrn'])
@@ -220,6 +223,7 @@ async def dicom_move_file(
 ):
     """Accept a CSV file upload and stream DICOM C-MOVE progress via SSE. Used by the frontend."""
     enforcement.require_project_member(project_id, username)
+    enforcement.require_allowed_destination(username, "dicom_modality", destination)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
@@ -250,6 +254,7 @@ async def proknow_upload_file(
 ):
     """Accept a CSV file upload and stream ProKnow upload progress via SSE. Used by the frontend."""
     enforcement.require_project_member(project_id, username)
+    enforcement.require_allowed_destination(username, "proknow_collection", collection)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
@@ -368,6 +373,7 @@ async def dicom_move_uids_file(
     Deduplicates rows before moving.
     """
     enforcement.require_project_member(project_id, username)
+    enforcement.require_allowed_destination(username, "dicom_modality", destination)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"

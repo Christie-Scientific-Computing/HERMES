@@ -18,11 +18,13 @@ import logging
 
 from fastapi import Header, HTTPException
 
+from backend.src.access.db_client import AccessDB
 from backend.src.projects.db_client import ProjectsDB
 
 logger = logging.getLogger(__name__)
 
 projects_db = ProjectsDB()
+access_db = AccessDB()
 
 _INTERNAL_KEY = os.getenv("HERMES_INTERNAL_KEY")
 
@@ -70,3 +72,28 @@ def require_project_member(project_id: str, username: str) -> None:
         raise HTTPException(status_code=503, detail="Could not verify project membership")
     if not ok:
         raise HTTPException(status_code=403, detail="Not an active member of an approved project")
+
+
+def require_allowed_destination(username: str, destination_type: str, destination: str) -> None:
+    """
+    Gate for export endpoints (docs/safety-plan.md §A): caller's chosen
+    destination must be on their allow-list, if they have one configured --
+    see AccessDB.is_allowed for the opt-in (zero rows = unrestricted)
+    semantics. Independent of, and applied after, require_project_member:
+    that dependency governs *whether* someone may export at all; this one
+    governs *where*, on a per-user basis, regardless of project membership.
+
+    Fail-closed, same discipline as require_project_member/
+    require_any_active_project above: a DB error checking the allow-list
+    DENIES, never silently allows.
+    """
+    try:
+        ok = access_db.is_allowed(username, destination_type, destination)
+    except Exception:
+        logger.exception(
+            "Could not check destination allow-list for %r (%s=%r); denying",
+            username, destination_type, destination,
+        )
+        raise HTTPException(status_code=503, detail="Could not verify destination allow-list")
+    if not ok:
+        raise HTTPException(status_code=403, detail="Destination not in your allowed export destinations")
