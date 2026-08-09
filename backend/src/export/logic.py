@@ -20,6 +20,51 @@ PROKNOW_WORKSPACE = 'RBV - Christie'
 
 logger = logging.getLogger(__name__)
 
+
+def checksummed_series_manifest(client: Orthanc, series_list: list) -> dict:
+    """
+    Enumerate a list of already-found Series for the audit manifest --
+    SeriesInstanceUIDs, instance count, and a checksum per instance (Orthanc's
+    own stored MD5, confirmed present via get_instances_id_attachments_name_md5
+    on the pinned pyorthanc==1.23.0).
+
+    Shared by both DICOM-C-MOVE manifest builders (Exporter._build_manifest,
+    for the plain patient-level export; export/endpoints.py's
+    _build_uid_manifest, for the UID-based one) -- they arrive at their
+    series_list differently (PatientID vs. StudyInstanceUID/SeriesInstanceUID
+    query), but the per-series/per-instance checksum-collection loop itself
+    is identical, so it lives here once rather than twice. Does not compute
+    study_uids -- callers enumerate studies their own way (a PatientID query
+    here, vs. a StudyInstanceUID query for the UID-based path) and merge that
+    in themselves.
+    """
+    series_uids: list[str] = []
+    checksums: dict[str, str] = {}
+    instance_count = 0
+
+    for series in series_list:
+        series_uid = series.main_dicom_tags.get("SeriesInstanceUID") or series.identifier
+        series_uids.append(series_uid)
+
+        instances = client.get_series_id_instances(series.identifier)
+        for instance in instances:
+            instance_count += 1
+            instance_id = instance.get("ID")
+            sop_uid = instance.get("MainDicomTags", {}).get("SOPInstanceUID") or f"orthanc:{instance_id}"
+            try:
+                md5 = client.get_instances_id_attachments_name_md5(id_=instance_id, name="dicom")
+                checksums[sop_uid] = md5.decode() if isinstance(md5, bytes) else str(md5)
+            except Exception as exc:
+                logger.warning("Could not fetch checksum for instance %s: %s", instance_id, exc)
+
+    return {
+        "series_count": len(series_list),
+        "instance_count": instance_count,
+        "series_uids": series_uids,
+        "checksums": checksums,
+    }
+
+
 class Exporter():
     def __init__(self, destination: str):
         self.destination = destination # DICOM SCP or collection
@@ -96,12 +141,10 @@ class Exporter():
     def _build_manifest(client: Orthanc, patient_id: str, series_list: list) -> dict:
         """
         Enumerate what's about to be C-MOVE'd, for the audit record --
-        StudyInstanceUIDs/SeriesInstanceUIDs, instance counts, and a
-        checksum per instance (Orthanc's own stored MD5, confirmed present
-        via get_instances_id_attachments_name_md5 on the pinned
-        pyorthanc==1.23.0 -- no need to re-download and re-hash bytes just
-        to audit a C-MOVE that's asynchronous and never brings the bytes
-        through this process anyway).
+        StudyInstanceUIDs, plus the SeriesInstanceUIDs/instance
+        counts/checksums that checksummed_series_manifest (module-level,
+        shared with export/endpoints.py's UID-based path) already collects
+        from series_list.
 
         DICOM C-MOVE is fire-and-forget ("Synchronous": False in the caller)
         -- this manifest describes what was *asked to leave*, not
@@ -113,32 +156,9 @@ class Exporter():
         study_uids = [s.main_dicom_tags.get("StudyInstanceUID") for s in studies]
         study_uids = [uid for uid in study_uids if uid]
 
-        series_uids: list[str] = []
-        checksums: dict[str, str] = {}
-        instance_count = 0
-
-        for series in series_list:
-            series_uid = series.main_dicom_tags.get("SeriesInstanceUID") or series.identifier
-            series_uids.append(series_uid)
-
-            instances = client.get_series_id_instances(series.identifier)
-            for instance in instances:
-                instance_count += 1
-                instance_id = instance.get("ID")
-                sop_uid = instance.get("MainDicomTags", {}).get("SOPInstanceUID") or f"orthanc:{instance_id}"
-                try:
-                    md5 = client.get_instances_id_attachments_name_md5(id_=instance_id, name="dicom")
-                    checksums[sop_uid] = md5.decode() if isinstance(md5, bytes) else str(md5)
-                except Exception as exc:
-                    logger.warning("Could not fetch checksum for instance %s: %s", instance_id, exc)
-
-        return {
-            "series_count": len(series_list),
-            "instance_count": instance_count,
-            "study_uids": study_uids,
-            "series_uids": series_uids,
-            "checksums": checksums,
-        }
+        manifest = checksummed_series_manifest(client, series_list)
+        manifest["study_uids"] = study_uids
+        return manifest
 
     def upload_study_to_proknow(self, path: Path, collection: str = None):
         logger.info(f"UPLOADING: {path}")

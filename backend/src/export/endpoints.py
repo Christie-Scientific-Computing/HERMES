@@ -14,7 +14,7 @@ from proknow import ProKnow
 from dotenv import load_dotenv
 from pyorthanc import Orthanc, find_series, find_studies
 from fastapi.responses import StreamingResponse
-from backend.src.export.logic import Exporter
+from backend.src.export.logic import Exporter, checksummed_series_manifest
 from backend.src.status.db_client import StatusDB
 from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
 from backend.src.identity import anon
@@ -73,6 +73,15 @@ class Response(BaseModel):
     instance_count: int | None = None
     study_uids: list[str] | None = None
     series_uids: list[str] | None = None
+    # Hex digest per instance, keyed by SOPInstanceUID (or "orthanc:<id>" if
+    # that tag isn't indexed) -- but the ALGORITHM varies by destination_type
+    # and is not comparable across events/jobs: "dicom_modality" (both the
+    # plain and UID-based C-MOVE paths) reports Orthanc's own stored MD5,
+    # since the bytes are never downloaded to this process for an async
+    # C-MOVE; "proknow_collection" reports a locally-computed SHA-256 over
+    # bytes already pulled to disk for upload. Same instance exported via
+    # both paths will therefore never produce matching checksums by
+    # construction -- that's expected, not a bug.
     checksums: dict[str, str] | None = None
     destination: str | None = None
     destination_type: str | None = None
@@ -392,9 +401,14 @@ def _build_uid_manifest(study_uid: str, series_uid: str | None) -> dict:
     itself. Checksums come from Orthanc's own stored MD5, same as the
     non-UID DICOM C-MOVE path -- these bytes never land locally either.
     """
-    client = Orthanc(url=ORTHANC_URL, username=ORTHANC_USER,
-            password=ORTHANC_PASS, verify=False,
-            timeout=14000.0,)
+    try:
+        client = Orthanc(url=ORTHANC_URL, username=ORTHANC_USER,
+                password=ORTHANC_PASS, verify=False,
+                timeout=14000.0,)
+        logger.info("Connected to Orthanc")
+    except Exception as exc:
+        logger.error(f"Failed to connect to Orthanc: {exc}")
+        raise ValueError("Could not connect to Orthanc")
 
     studies = find_studies(client=client, query={"StudyInstanceUID": study_uid})
     found_study_uids = [s.main_dicom_tags.get("StudyInstanceUID") for s in studies]
@@ -405,31 +419,9 @@ def _build_uid_manifest(study_uid: str, series_uid: str | None) -> dict:
         series_query["SeriesInstanceUID"] = series_uid
     series_list = find_series(client=client, query=series_query)
 
-    series_uids: list[str] = []
-    checksums: dict[str, str] = {}
-    instance_count = 0
-    for series in series_list:
-        found_series_uid = series.main_dicom_tags.get("SeriesInstanceUID") or series.identifier
-        series_uids.append(found_series_uid)
-
-        instances = client.get_series_id_instances(series.identifier)
-        for instance in instances:
-            instance_count += 1
-            instance_id = instance.get("ID")
-            sop_uid = instance.get("MainDicomTags", {}).get("SOPInstanceUID") or f"orthanc:{instance_id}"
-            try:
-                md5 = client.get_instances_id_attachments_name_md5(id_=instance_id, name="dicom")
-                checksums[sop_uid] = md5.decode() if isinstance(md5, bytes) else str(md5)
-            except Exception as exc:
-                logger.warning("Could not fetch checksum for instance %s: %s", instance_id, exc)
-
-    return {
-        "series_count": len(series_list),
-        "instance_count": instance_count,
-        "study_uids": found_study_uids or [study_uid],
-        "series_uids": series_uids,
-        "checksums": checksums,
-    }
+    manifest = checksummed_series_manifest(client, series_list)
+    manifest["study_uids"] = found_study_uids or [study_uid]
+    return manifest
 
 
 def _uid_move_worker(destination: str, submitted_by: str | None = None):
