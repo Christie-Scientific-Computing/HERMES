@@ -60,6 +60,14 @@ class Request(BaseModel):
 class Response(BaseModel):
     mrn: str | int
     status: str | None = None
+    series_count: int | None = None
+    instance_count: int | None = None
+    study_uids: list[str] | None = None
+    series_uids: list[str] | None = None
+    checksums: dict[str, str] | None = None
+    destination: str | None = None
+    destination_type: str | None = None
+    submitted_by: str | None = None
 
 @router.get("/get_orthanc_modalities")
 async def get_orthanc_modalities(username: str = Query(...)):
@@ -89,14 +97,14 @@ async def get_proknow_collections(username: str = Query(...)):
 def _dicom_move_worker(destination: str):
     def worker(item: BatchItem) -> dict:
         res = Exporter(destination=destination).dicom_c_move(item.real_id)
-        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"})
+        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 
 def _proknow_worker(collection: str):
     def worker(item: BatchItem) -> dict:
         res = Exporter(destination=collection).upload_to_proknow(item.real_id)
-        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"})
+        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 

@@ -48,6 +48,12 @@ class Response(BaseModel):
     in_mosaiq: bool | None = None
     in_pinnacle: bool | None = None
     in_proknow: bool | None = None
+    mosaiq_reason: str | None = None
+    pinnacle_reason: str | None = None
+    proknow_reason: str | None = None
+    imported: bool | None = None
+    study_count: int | None = None
+    study_uids: list[str] | None = None
 
 
 def _build_import_items(path_to_csv: str) -> list[BatchItem]:
@@ -66,7 +72,7 @@ def _build_import_items(path_to_csv: str) -> list[BatchItem]:
 def _import_worker(import_level: str):
     def worker(item: BatchItem) -> dict:
         res = Importer(import_level).handle_patient(item.real_id)
-        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"})
+        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 
