@@ -10,7 +10,7 @@ services:
       - hermes_db:/var/lib/postgresql/data
 
   backend:
-    build: .
+    image: ghcr.io/christie-scientific-computing/hermes:v0.1.3
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
@@ -49,9 +49,11 @@ services:
         source: ./credentials.json
         target: /app/credentials.json
         read_only: true
+      - /home/topol/Certificates/Server/cht-topol_xchristie_nhs_uk.crt:/ssl/cert.crt:ro
+      - /home/topol/Certificates/Server/cht-topol_xchristie_nhs_uk.key:/ssl/cert.key:ro
 
   streamlit:
-    build: .
+    image: ghcr.io/christie-scientific-computing/hermes:v0.1.3
     command: streamlit run Home.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
     ports:
       - "8501:8501"

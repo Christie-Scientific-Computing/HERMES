@@ -212,3 +212,4 @@ async def cancel_import(job_id: str):
     status_db.cancel_job(job_id)
     logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}
+
