@@ -31,10 +31,6 @@ services:
       - hermes-db
     volumes:
       # Pinnacle DB (read-only host file — adjust path to match your system)
-      - type: bind
-        source: ./db/pinn_db.sqlite
-        target: /pinn/pinn_db.sqlite
-        read_only: true
       # TLS certs for Orthanc (adjust paths to match your system)
       # - type: bind
       #   source: /path/to/cert.pem
