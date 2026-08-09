@@ -2,6 +2,7 @@
 Export logic
 """
 import os
+import hashlib
 import logging
 import shutil
 from pathlib import Path
@@ -35,7 +36,7 @@ class Exporter():
             logger.error(f"Failed to connect to Orthanc: {exc}")
             raise
 
-        series_dict = self.download_data(client, patient_id, self.tmp_dir)
+        series_dict, manifest = self.download_data(client, patient_id, self.tmp_dir)
 
         #TODO Upload to ProKnow
         study_status = {}
@@ -45,10 +46,10 @@ class Exporter():
                 self.upload_study_to_proknow(input_dir, self.destination)
             except ValueError as e:
                 logger.error(f"Error occured during proknow upload: {e}")
-            
+
             shutil.rmtree(input_dir)
 
-        return {'status': 'Success'}
+        return {'status': 'Success', **manifest}
 
     def dicom_c_move(self, patient_id: str):
         try:
@@ -59,17 +60,26 @@ class Exporter():
         except Exception as exc:
             logger.error(f"Failed to connect to Orthanc: {exc}")
             raise ValueError("Could not connect to Orthanc")
-        
+
         series_list = find_series(client=client, query={"PatientID": str(patient_id)})
 
         if not series_list:
             logger.error("No series found in Orthanc for patient.")
             raise ValueError("No series found in Orthanc.")
 
+        # Manifest, built before the actual C-MOVE is triggered (see
+        # docs/safety-plan.md SS D2). dicom_c_move only enumerates at the
+        # series level today (series_list, above) -- instance counts and
+        # per-instance checksums are net-new queries for this path. Unlike
+        # the ProKnow path, the DICOM bytes never land locally here, so
+        # checksums come from Orthanc's own stored MD5 rather than being
+        # re-hashed from bytes HERMES doesn't have.
+        manifest = self._build_manifest(client, patient_id, series_list)
+
         series_to_send = [x.identifier for x in series_list]
         try:
             res = client.post_modalities_id_store(
-                id_=self.destination, 
+                id_=self.destination,
                 json={
                     "Resources": series_to_send,
                     "Synchronous": False
@@ -79,8 +89,56 @@ class Exporter():
         except Exception as e:
             logging.error("Could not send to destination: %s", self.destination)
             raise ValueError(f"Could not send to destination: {self.destination}")
-        
-        return {'status': 'Success'}
+
+        return {'status': 'Success', **manifest}
+
+    @staticmethod
+    def _build_manifest(client: Orthanc, patient_id: str, series_list: list) -> dict:
+        """
+        Enumerate what's about to be C-MOVE'd, for the audit record --
+        StudyInstanceUIDs/SeriesInstanceUIDs, instance counts, and a
+        checksum per instance (Orthanc's own stored MD5, confirmed present
+        via get_instances_id_attachments_name_md5 on the pinned
+        pyorthanc==1.23.0 -- no need to re-download and re-hash bytes just
+        to audit a C-MOVE that's asynchronous and never brings the bytes
+        through this process anyway).
+
+        DICOM C-MOVE is fire-and-forget ("Synchronous": False in the caller)
+        -- this manifest describes what was *asked to leave*, not
+        confirmation that it arrived. Polling Orthanc's Job API for
+        completion is an explicitly separate future increment, not built
+        here (see docs/safety-plan.md SS D2).
+        """
+        studies = find_studies(client=client, query={"PatientID": str(patient_id)})
+        study_uids = [s.main_dicom_tags.get("StudyInstanceUID") for s in studies]
+        study_uids = [uid for uid in study_uids if uid]
+
+        series_uids: list[str] = []
+        checksums: dict[str, str] = {}
+        instance_count = 0
+
+        for series in series_list:
+            series_uid = series.main_dicom_tags.get("SeriesInstanceUID") or series.identifier
+            series_uids.append(series_uid)
+
+            instances = client.get_series_id_instances(series.identifier)
+            for instance in instances:
+                instance_count += 1
+                instance_id = instance.get("ID")
+                sop_uid = instance.get("MainDicomTags", {}).get("SOPInstanceUID") or f"orthanc:{instance_id}"
+                try:
+                    md5 = client.get_instances_id_attachments_name_md5(id_=instance_id, name="dicom")
+                    checksums[sop_uid] = md5.decode() if isinstance(md5, bytes) else str(md5)
+                except Exception as exc:
+                    logger.warning("Could not fetch checksum for instance %s: %s", instance_id, exc)
+
+        return {
+            "series_count": len(series_list),
+            "instance_count": instance_count,
+            "study_uids": study_uids,
+            "series_uids": series_uids,
+            "checksums": checksums,
+        }
 
     def upload_study_to_proknow(self, path: Path, collection: str = None):
         logger.info(f"UPLOADING: {path}")
@@ -165,34 +223,57 @@ class Exporter():
         return all_data
 
     @staticmethod
-    def download_data(client: Orthanc, patient_id: str, local_dir: Path) -> list[Path]:
+    def download_data(client: Orthanc, patient_id: str, local_dir: Path) -> tuple[dict, dict]:
         """
-        Download data from orthanc to a local directory
+        Download data from orthanc to a local directory.
+
+        Returns (series_dict, manifest). series_dict is unchanged from
+        before -- {study_uid: [Series, ...]}, used by the caller to know
+        which per-study directories to upload/clean up. manifest is new
+        (docs/safety-plan.md SS D2): study/series UIDs, series/instance
+        counts, and a sha256 checksum per instance, computed directly over
+        the bytes already pulled to disk here -- genuinely close to free,
+        since this path (unlike DICOM C-MOVE) already has every instance's
+        bytes in hand for the ProKnow upload, no extra Orthanc round-trip
+        needed to hash them.
         """
         query = {
             "Level": "Study",
             "Query": {"PatientID": patient_id}
         }
         studies = find_studies(client=client, query=query['Query'])
-        
+
         series_dict = {}
+        manifest = {
+            "study_uids": [],
+            "series_uids": [],
+            "series_count": 0,
+            "instance_count": 0,
+            "checksums": {},
+        }
         for study in studies:
+            study_uid = study.main_dicom_tags["StudyInstanceUID"]
+            manifest["study_uids"].append(study_uid)
             series_query = {
                 'Level': 'Series',
                 'Query': {
-                    'StudyInstanceUID': study.main_dicom_tags["StudyInstanceUID"],
+                    'StudyInstanceUID': study_uid,
                     'Modality': ''
                 }
             }
-            series_dict[study.main_dicom_tags["StudyInstanceUID"]] = find_series(client, series_query['Query'])
+            series_dict[study_uid] = find_series(client, series_query['Query'])
 
-        def download_instances(client: Orthanc, instances: list, output_dir: Path):
+        def download_instances(client: Orthanc, instances: list, output_dir: Path, manifest: dict):
             # Download a single dicom instance
             for slice_index, instance in enumerate(instances, start=1):
                 dicom_bytes = client.get_instances_id_file(instance['ID'])
                 filename = output_dir / f"Slice_{instance['ID']}.dcm"
                 with open(filename, "wb") as f:
                     f.write(dicom_bytes)
+
+                sop_uid = instance.get("MainDicomTags", {}).get("SOPInstanceUID") or f"orthanc:{instance['ID']}"
+                manifest["checksums"][sop_uid] = hashlib.sha256(dicom_bytes).hexdigest()
+                manifest["instance_count"] += 1
 
 
         for i, (study_uid, series_list) in enumerate(series_dict.items()):
@@ -201,9 +282,12 @@ class Exporter():
             study_path.mkdir(parents=True, exist_ok=True)
 
             for series in series_list:
+                series_uid = series.main_dicom_tags.get("SeriesInstanceUID") or series.identifier
+                manifest["series_uids"].append(series_uid)
+                manifest["series_count"] += 1
+
                 instances = client.get_series_id_instances(series.identifier)
                 logger.debug("Downloading %s slice(s)", len(instances))
-                download_instances(client, instances, study_path)
+                download_instances(client, instances, study_path, manifest)
 
-        return series_dict
-        
+        return series_dict, manifest
