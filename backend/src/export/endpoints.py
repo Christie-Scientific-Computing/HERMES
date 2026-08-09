@@ -57,9 +57,25 @@ class Request(BaseModel):
     destination: str | None = None # DICOM AE
     collection: str | None = None # ProKnow collection
 
+# Note: _dicom_move_worker/_proknow_worker (below) dump this with
+# exclude_none=True, since their output feeds events.details/the SSE payload
+# for every batch endpoint and these new fields are still unpopulated
+# (nothing sets them until D2 lands) -- exclude_none keeps those payloads
+# from filling up with nulls in the meantime. proknow_upload_patient, which
+# doesn't route through run_batch_job, doesn't do this -- not a deliberate
+# inconsistency, just that path has no live caller today (per D0 review) so
+# it wasn't worth reconciling yet. Revisit if/when it grows one.
 class Response(BaseModel):
     mrn: str | int
     status: str | None = None
+    series_count: int | None = None
+    instance_count: int | None = None
+    study_uids: list[str] | None = None
+    series_uids: list[str] | None = None
+    checksums: dict[str, str] | None = None
+    destination: str | None = None
+    destination_type: str | None = None
+    submitted_by: str | None = None
 
 @router.get("/get_orthanc_modalities")
 async def get_orthanc_modalities(username: str = Query(...)):
@@ -89,14 +105,14 @@ async def get_proknow_collections(username: str = Query(...)):
 def _dicom_move_worker(destination: str):
     def worker(item: BatchItem) -> dict:
         res = Exporter(destination=destination).dicom_c_move(item.real_id)
-        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"})
+        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 
 def _proknow_worker(collection: str):
     def worker(item: BatchItem) -> dict:
         res = Exporter(destination=collection).upload_to_proknow(item.real_id)
-        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"})
+        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 
