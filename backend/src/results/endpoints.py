@@ -149,6 +149,9 @@ async def job_summary(job_id: str):
 _OBSERVER_POLL_INTERVAL = float(os.getenv("HERMES_OBSERVER_POLL_INTERVAL", "1"))
 
 
+_PENDING_TASK_STATES = ("queued", "claimed", "running")
+
+
 async def _observe_job(job_id: str) -> AsyncIterator[str]:
     """
     Poll the tasks table (backend/src/status/tasks_db.py) and translate
@@ -162,11 +165,15 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
     this connection (or never opening it) has no effect on whether the job
     actually runs -- the whole point of the queue.
 
-    Always emits display_id (the anon id, or the same value when
-    anonymisation isn't configured), never status_mrn/the real id -- this
-    endpoint therefore never touches the anon-mapping DB at all, unlike
-    job_patients_summary/patient_timeline elsewhere in this file, which
-    have to explicitly resolve/scrub because they work with real ids.
+    Every emitted event's `mrn`/`current` field is display_id (the anon id,
+    or the same value when anonymisation isn't configured), never
+    status_mrn/the real id. `error`/`details` are worker-generated free
+    text, though, and routinely quote the real id the same way
+    job_patients_summary's mosaiq_reason/pinnacle_reason/proknow_reason do
+    (CLAUDE.md's anonymisation-boundary section calls this out explicitly:
+    "free text carries real MRNs too") -- both go through the same
+    `_scrub`/`_scrub_json` this file already uses elsewhere, keyed off each
+    row's own (real_id, display_id) pair.
     """
     total = tasks_db.count_tasks(job_id)
     yield format_sse({"type": "start", "total": total})
@@ -175,32 +182,54 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
     # TasksDB.job_progress's docstring for why this can't be filtered at
     # the SQL layer) only ever produces one event per actual transition.
     last_state: dict[int, str] = {}
+    cancelled_reported = False
 
     while True:
-        if status_db.is_cancelled(job_id):
+        if not cancelled_reported and status_db.is_cancelled(job_id):
             yield format_sse({"type": "cancelled"})
-            break
+            cancelled_reported = True
+            # Deliberately not a `break`: TasksDB.cancel_queued (called by
+            # cancel_import) only flips still-QUEUED tasks -- a task already
+            # claimed/running when cancellation happened is not interrupted
+            # and will still reach a real success/failure ("items already in
+            # progress finish" is the same promise run_batch_job's own
+            # cancellation already makes). Keep polling until nothing is
+            # actually pending so that outcome still gets reported, instead
+            # of the stream silently going quiet on it.
 
-        for row in tasks_db.job_progress(job_id):
+        rows = tasks_db.job_progress(job_id)
+        has_pending = False
+        for row in rows:
             task_id, state = row["task_id"], row["state"]
+            if state in _PENDING_TASK_STATES:
+                has_pending = True
             if last_state.get(task_id) == state:
                 continue
             last_state[task_id] = state
+            real_id, display_id = row["real_id"], row["display_id"]
 
             if state == "running":
-                yield format_sse({"type": "progress", "current": row["display_id"]})
+                yield format_sse({"type": "progress", "current": display_id})
             elif state == "succeeded":
-                yield format_sse({"type": "success", "mrn": row["display_id"], **(row["details"] or {})})
-            elif state in ("failed", "cancelled"):
-                yield format_sse({
-                    "type": "error", "mrn": row["display_id"],
-                    "error": row["error_message"] or "Task did not complete",
-                })
+                details = _scrub_json(row["details"], real_id, display_id) or {}
+                yield format_sse({"type": "success", "mrn": display_id, **details})
+            elif state == "failed" or (state == "cancelled" and row["error_message"]):
+                # 'cancelled' is two different things, distinguished by
+                # error_message: TasksDB.cancel_task (backend/worker.py's
+                # claim-time ethics-denial path) always sets a reason, so an
+                # attempted-then-denied task is reported as an error here.
+                # TasksDB.cancel_queued (job-level bulk cancellation) never
+                # sets one -- a task cancelled in bulk while still 'queued'
+                # never ran at all, and is silently skipped, the same way
+                # run_batch_job silently stops on the remaining items of a
+                # cancelled job without emitting anything for them.
+                error = _scrub(row["error_message"], real_id, display_id) or "Task did not complete"
+                yield format_sse({"type": "error", "mrn": display_id, "error": error})
             # "queued"/"claimed" -> no distinct SSE event; "progress" fires
             # once a task actually starts running, matching the vocabulary
             # table in docs/worker-queue-design.md.
 
-        if not tasks_db.job_has_pending(job_id):
+        if not has_pending:
             break
         await asyncio.sleep(_OBSERVER_POLL_INTERVAL)
 

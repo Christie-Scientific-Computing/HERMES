@@ -265,7 +265,8 @@ class TasksDB:
         """
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT task_id, state, display_id, details, error_message FROM tasks WHERE job_id = %s ORDER BY task_id",
+                "SELECT task_id, state, real_id, display_id, details, error_message "
+                "FROM tasks WHERE job_id = %s ORDER BY task_id",
                 (job_id,),
             )
             return [dict(r) for r in cur.fetchall()]
