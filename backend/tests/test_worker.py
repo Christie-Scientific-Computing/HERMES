@@ -181,15 +181,16 @@ def test_handle_one_denial_with_unknown_project_also_cancels(tasks_db, status_db
     assert row["state"] == "cancelled"
 
 
-# --- Export handlers: _run_dicom_move/_run_proknow/_run_uid_move ---
+# --- Export handlers: _run_export, dispatched via _EXPORT_FACTORIES ---
 #
-# These reuse export/endpoints.py's own worker factories directly (see
-# worker.py's _HANDLERS comment for why, unlike _run_import) -- so what's
-# worth testing here is worker.py's own wiring (BatchItem reconstruction,
-# which params go where, submitted_by threading), not Exporter/Orthanc/
-# ProKnow behaviour itself, which already has its own coverage
-# (test_export_manifest.py, test_export_anon_boundary.py). Monkeypatching
-# the factories to fakes keeps these tests fast and connection-free.
+# All three export kinds share one _run_export dispatcher that reuses
+# export/endpoints.py's own worker factories directly (see worker.py's
+# _HANDLERS comment for why, unlike _run_import) -- so what's worth testing
+# here is worker.py's own wiring (BatchItem reconstruction, which params go
+# where, submitted_by threading), not Exporter/Orthanc/ProKnow behaviour
+# itself, which already has its own coverage (test_export_manifest.py,
+# test_export_anon_boundary.py). Monkeypatching the factories to fakes
+# keeps these tests fast and connection-free.
 
 def test_reconstruct_batch_item_round_trips_extra():
     """The UID-move flow's "identifier" lives in extra, not real_id -- this
@@ -206,7 +207,7 @@ def test_reconstruct_batch_item_round_trips_extra():
     assert item.extra == {"study_uid": "1.2.3", "series_uid": "1.2.3.4"}
 
 
-def test_run_dicom_move_calls_export_factory_with_params(monkeypatch):
+def test_run_export_dicom_move_calls_factory_with_params(monkeypatch):
     calls = []
 
     def _fake_factory(destination, submitted_by=None):
@@ -215,15 +216,16 @@ def test_run_dicom_move_calls_export_factory_with_params(monkeypatch):
 
     monkeypatch.setattr(worker.export_endpoints, "_dicom_move_worker", _fake_factory)
 
-    task = {"real_id": "R1", "display_id": "A1", "status_mrn": "R1", "input_path": None, "extra": {},
+    task = {"kind": "dicom_move", "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
+            "input_path": None, "extra": {},
             "params": {"destination": "SOME_AE", "project_id": "p", "username": "alice"}}
-    result = worker._run_dicom_move(task)
+    result = worker._run_export(task)
 
     assert calls == [{"destination": "SOME_AE", "submitted_by": "alice"}]
     assert result == {"mrn_seen": "R1"}
 
 
-def test_run_proknow_calls_export_factory_with_params(monkeypatch):
+def test_run_export_proknow_upload_calls_factory_with_params(monkeypatch):
     calls = []
 
     def _fake_factory(collection, submitted_by=None):
@@ -232,15 +234,16 @@ def test_run_proknow_calls_export_factory_with_params(monkeypatch):
 
     monkeypatch.setattr(worker.export_endpoints, "_proknow_worker", _fake_factory)
 
-    task = {"real_id": "R1", "display_id": "A1", "status_mrn": "R1", "input_path": None, "extra": {},
+    task = {"kind": "proknow_upload", "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
+            "input_path": None, "extra": {},
             "params": {"collection": "SomeCollection", "project_id": "p", "username": "bob"}}
-    result = worker._run_proknow(task)
+    result = worker._run_export(task)
 
     assert calls == [{"collection": "SomeCollection", "submitted_by": "bob"}]
     assert result == {"mrn_seen": "R1"}
 
 
-def test_run_uid_move_calls_export_factory_and_preserves_extra(monkeypatch):
+def test_run_export_uid_move_calls_factory_and_preserves_extra(monkeypatch):
     calls = []
     seen_items = []
 
@@ -255,11 +258,11 @@ def test_run_uid_move_calls_export_factory_and_preserves_extra(monkeypatch):
     monkeypatch.setattr(worker.export_endpoints, "_uid_move_worker", _fake_factory)
 
     task = {
-        "real_id": "1.2.3", "display_id": "1.2.3", "status_mrn": "R1", "input_path": None,
+        "kind": "uid_move", "real_id": "1.2.3", "display_id": "1.2.3", "status_mrn": "R1", "input_path": None,
         "extra": {"study_uid": "1.2.3", "series_uid": None},
         "params": {"destination": "SOME_AE", "project_id": "p", "username": "carol"},
     }
-    result = worker._run_uid_move(task)
+    result = worker._run_export(task)
 
     assert calls == [{"destination": "SOME_AE", "submitted_by": "carol"}]
     assert result == {"status": "Success"}
@@ -268,6 +271,9 @@ def test_run_uid_move_calls_export_factory_and_preserves_extra(monkeypatch):
 
 def test_export_kinds_registered_in_handlers():
     assert set(worker._HANDLERS) == {"import", "dicom_move", "proknow_upload", "uid_move"}
+    assert worker._HANDLERS["dicom_move"] is worker._run_export
+    assert worker._HANDLERS["proknow_upload"] is worker._run_export
+    assert worker._HANDLERS["uid_move"] is worker._run_export
 
 
 def test_handle_one_dicom_move_end_to_end(tasks_db, status_db, job_id, active_project, monkeypatch, _restore_handlers):

@@ -35,6 +35,34 @@ historical record rather than current-state docs:
   at each endpoint; only the four `_file` (frontend-facing) endpoints and
   `batch_import_file` converted.
 
+**Known limitations, stated rather than solved** (matching this codebase's
+existing habit -- see `docs/known-issues.md` -- of naming a limitation
+explicitly rather than silently living with it):
+- **No enqueue idempotency.** `TasksDB.enqueue` is a plain `INSERT`, no
+  `ON CONFLICT`. `job_id` is minted client-side (`frontend/jobs/views.py`'s
+  `_enqueue_batch_job`) fresh per request, so an ordinary double-click just
+  produces two distinct jobs (not a problem) -- but a transport-level retry
+  that resends the *identical* already-serialized request (a proxy retrying
+  a timed-out POST, for instance) would enqueue every row in the CSV twice
+  under the same `job_id`, and a worker would execute each one twice. No
+  unique constraint was added deliberately: there's no natural key on
+  `tasks` that holds for every kind (the UID-move flow legitimately repeats
+  `status_mrn`, per the schema section above). Considered low-likelihood for
+  this deployment (internal NHS Trust tool, `httpx.post` has no built-in
+  retry) and not fixed here; a real fix would need either an explicit
+  idempotency key or a job-level "already enqueued" guard.
+- **Uploaded CSV tmp files are never cleaned up.** `batch_import_file`/
+  `dicom_move_file`/`proknow_upload_file`/`dicom_move_uids_file` all write
+  to `./tmp/{job_id}_{filename}` and never `unlink()` it -- pre-existing
+  (confirmed present before this queue work, on the old synchronous path
+  too), but worth naming here since the queue's higher submission
+  throughput is likely to make `./tmp` accumulate faster than before. A
+  future increment could delete the tmp file once `_build_import_items`/
+  `_build_export_items`/`_build_uid_items` has read it (the worker never
+  needs it again -- confirmed `backend/worker.py`'s `_reconstruct_batch_item`
+  only reads `real_id`/`display_id`/`status_mrn`/`extra` off the task row,
+  never `input_path`), or a periodic sweep.
+
 ## Context
 
 A batch job today **is** an HTTP request: `run_batch_job` (`backend/src/common/sse.py`)

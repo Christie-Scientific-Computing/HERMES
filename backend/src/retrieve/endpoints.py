@@ -229,18 +229,30 @@ async def batch_import_file(
         job_id, description=f"Batch import from {tmp_path}",
         created_by=username, project_id=project_id,
     )
-    # Registered here, at enqueue time, rather than by the worker as it
-    # picks each task up: every submitted patient is already fully known
-    # from `items`, and StatusDB.count_imported_patients' "M" (submitted
-    # count) denominator should reflect what was actually submitted
-    # regardless of whether/when a worker gets around to running it -- not
-    # silently read as 0 for a job whose tasks haven't been claimed yet.
-    for item in items:
-        status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
-    tasks_db.enqueue(
-        job_id, items, kind="import", stage="retrieve",
-        params={"import_level": import_level, "project_id": project_id, "username": username},
-    )
+    # add_patient/enqueue are registered here, at enqueue time, rather than
+    # by the worker as it picks each task up: every submitted patient is
+    # already fully known from `items`, and StatusDB.count_imported_patients'
+    # "M" (submitted count) denominator should reflect what was actually
+    # submitted regardless of whether/when a worker gets around to running
+    # it -- not silently read as 0 for a job whose tasks haven't been
+    # claimed yet.
+    #
+    # create_job/add_patient/enqueue are three separate, non-transactional
+    # writes -- if enqueue fails after the job/patients were already
+    # created (a transient DB blip mid-request), the job would otherwise be
+    # left dangling: visible, with patients registered, but no tasks and no
+    # way to cancel/complete it. Marking it cancelled on any failure here
+    # puts it into a well-defined terminal state instead of limbo.
+    try:
+        for item in items:
+            status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
+        tasks_db.enqueue(
+            job_id, items, kind="import", stage="retrieve",
+            params={"import_level": import_level, "project_id": project_id, "username": username},
+        )
+    except Exception:
+        status_db.cancel_job(job_id)
+        raise
     return {"job_id": job_id, "total": len(items)}
 
 
@@ -249,10 +261,10 @@ async def cancel_import(job_id: str):
     status_db.cancel_job(job_id)
     # Also flip any still-queued tasks straight to 'cancelled' -- TasksDB.claim
     # already excludes tasks whose job is cancelled, so this doesn't change
-    # what gets run, only how quickly the observer stream's job_has_pending()
-    # can report 'done' rather than waiting on a claim that will never come.
-    # A no-op (0 rows) for a job with no queued tasks, e.g. one that never
-    # went through the queue at all -- harmless either way.
+    # what gets run, only how quickly the observer stream (results/endpoints.py's
+    # _observe_job) can report 'done' rather than waiting on a claim that will
+    # never come. A no-op (0 rows) for a job with no queued tasks, e.g. one
+    # that never went through the queue at all -- harmless either way.
     tasks_db.cancel_queued(job_id)
     logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}

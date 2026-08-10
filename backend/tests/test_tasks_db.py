@@ -405,18 +405,6 @@ def test_job_progress_returns_every_task_with_current_state(tasks_db, job_id):
     assert rows_after[task["task_id"]]["details"] == {"imported": True}
 
 
-def test_job_has_pending_true_until_all_terminal(tasks_db, job_id):
-    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
-    assert tasks_db.job_has_pending(job_id) is True
-
-    task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(task["task_id"], "worker-1")
-    assert tasks_db.job_has_pending(job_id) is True
-
-    tasks_db.mark_succeeded(task["task_id"], "worker-1", details={})
-    assert tasks_db.job_has_pending(job_id) is False
-
-
 def _event_row(job_id: str) -> dict:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(

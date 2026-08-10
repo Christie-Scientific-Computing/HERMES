@@ -163,12 +163,26 @@ def _enqueue_export_job(job_id: str, items: list[BatchItem], kind: str, descript
     why), and enqueue onto the tasks table for backend/worker.py.
     `project_id`/`username` are merged into `params` so a claim needs no
     join back to `jobs` for the worker's claim-time ethics re-check.
+
+    create_job/add_patient/enqueue are three separate, non-transactional
+    writes (StatusDB and TasksDB each borrow their own connection from the
+    pool per call) -- if enqueue fails after the job/patients were already
+    created (a transient DB blip mid-request), the job would otherwise be
+    left dangling: visible in job_summary, with patients registered, but no
+    tasks and no way to cancel/complete it. Marking it cancelled on any
+    failure here puts it into a well-defined terminal state instead of
+    limbo -- not a rollback (patients already registered stay registered),
+    but the job stops looking like it's still going to run.
     """
     status_db.create_job(job_id, description=description, created_by=username, project_id=project_id)
-    for item in items:
-        status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
-    tasks_db.enqueue(job_id, items, kind=kind, stage="export",
-                      params={**params, "project_id": project_id, "username": username})
+    try:
+        for item in items:
+            status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
+        tasks_db.enqueue(job_id, items, kind=kind, stage="export",
+                          params={**params, "project_id": project_id, "username": username})
+    except Exception:
+        status_db.cancel_job(job_id)
+        raise
     return {"job_id": job_id, "total": len(items)}
 
 

@@ -184,6 +184,14 @@ class TasksDB:
         the same worker that owns the claim, before any handler(task) work
         has started, so there's no other owner it could be racing.
         Returns True if applied, False otherwise.
+
+        `reason` is more than a log message: results/endpoints.py's
+        _observe_job uses whether error_message is set to tell this
+        (attempted-then-denied) cancellation apart from cancel_queued's
+        bulk cancellation of never-run queued tasks, reporting the former
+        as an "error" event and silently skipping the latter. Always pass
+        a `reason` here, or a genuinely-denied task will be silently
+        dropped from the observer stream instead of reported.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -271,11 +279,3 @@ class TasksDB:
             )
             return [dict(r) for r in cur.fetchall()]
 
-    def job_has_pending(self, job_id: str) -> bool:
-        """Backs the observer's 'done' event: true while any task for this job hasn't reached a terminal state."""
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM tasks WHERE job_id=%s AND state IN ('queued','claimed','running') LIMIT 1",
-                (job_id,),
-            )
-            return cur.fetchone() is not None
