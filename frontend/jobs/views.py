@@ -362,6 +362,8 @@ def job_detail(request, job_id):
 
     return render(request, "jobs/job_detail.html", {
         "job_id": job_id, "summary": job_info["summary"],
+        "imported_count": job_info.get("imported_count"),
+        "submitted_count": job_info.get("submitted_count"),
         "rows": visible, "pills": pills, "total": len(rows),
     })
 

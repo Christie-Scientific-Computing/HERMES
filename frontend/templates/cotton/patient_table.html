@@ -33,7 +33,8 @@
           {% endif %}
         </td>
         <td class="py-2 pr-4">
-          <c-source-badges :mosaiq="row.in_mosaiq" :pinnacle="row.in_pinnacle" :proknow="row.in_proknow" />
+          <c-source-badges :mosaiq="row.in_mosaiq" :pinnacle="row.in_pinnacle" :proknow="row.in_proknow"
+            :mosaiq_reason="row.mosaiq_reason" :pinnacle_reason="row.pinnacle_reason" :proknow_reason="row.proknow_reason" />
         </td>
         <td class="py-2">
           {% if row.outcome == "success" %}
