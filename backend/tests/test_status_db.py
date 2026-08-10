@@ -165,3 +165,62 @@ def test_get_latest_event_per_patient_picks_the_newest_across_stages(db, job_id)
     assert latest["MRN1"]["event_type"] == "failure"
     assert latest["MRN2"]["event_type"] == "success"
     assert set(latest) == {"MRN1", "MRN2"}
+
+
+def test_count_imported_patients_zero_imported(db, job_id):
+    db.create_job(job_id)
+    db.add_patient(job_id, mrn="MRN1")
+    db.add_patient(job_id, mrn="MRN2")
+    # both ran without raising, but found nothing -- event_type='success'
+    # alone must not be mistaken for "imported"
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": False})
+    db.add_event(job_id, mrn="MRN2", stage="retrieve", event_type="failure", error_message="boom")
+
+    assert db.count_imported_patients(job_id) == (0, 2)
+
+
+def test_count_imported_patients_all_imported(db, job_id):
+    db.create_job(job_id)
+    db.add_patient(job_id, mrn="MRN1")
+    db.add_patient(job_id, mrn="MRN2")
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+    db.add_event(job_id, mrn="MRN2", stage="retrieve", event_type="success", details={"imported": True})
+
+    assert db.count_imported_patients(job_id) == (2, 2)
+
+
+def test_count_imported_patients_some_imported(db, job_id):
+    db.create_job(job_id)
+    db.add_patient(job_id, mrn="MRN1")
+    db.add_patient(job_id, mrn="MRN2")
+    db.add_patient(job_id, mrn="MRN3")
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+    db.add_event(job_id, mrn="MRN2", stage="retrieve", event_type="success", details={"imported": False})
+    db.add_event(job_id, mrn="MRN3", stage="retrieve", event_type="failure", error_message="boom")
+
+    assert db.count_imported_patients(job_id) == (1, 3)
+
+
+def test_count_imported_patients_ignores_export_stage_success(db, job_id):
+    """An export-stage success must not count toward "imported" -- only a
+    retrieve-stage success with details.imported == true counts."""
+    db.create_job(job_id)
+    db.add_patient(job_id, mrn="MRN1")
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success", details={"imported": True})
+
+    assert db.count_imported_patients(job_id) == (0, 1)
+
+
+def test_count_imported_patients_counts_distinct_mrn_once(db, job_id):
+    """A patient re-imported (e.g. retried) more than once in the same job
+    must only count once toward imported_count, not once per success event."""
+    db.create_job(job_id)
+    db.add_patient(job_id, mrn="MRN1")
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+
+    assert db.count_imported_patients(job_id) == (1, 1)
+
+
+def test_count_imported_patients_unknown_job_returns_zeroes(db):
+    assert db.count_imported_patients(f"nonexistent-{uuid.uuid4()}") == (0, 0)
