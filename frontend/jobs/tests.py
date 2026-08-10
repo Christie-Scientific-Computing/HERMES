@@ -21,7 +21,9 @@ SUMMARY = [
      "status": "imported", "outcome": "success", "error_message": None},
     # found nowhere, failed
     {"mrn": "1002", "in_mosaiq": False, "in_pinnacle": False, "in_proknow": False,
-     "status": None, "outcome": "failure", "error_message": "nothing found"},
+     "status": None, "outcome": "failure", "error_message": "nothing found",
+     "mosaiq_reason": "Not found in Mosaiq", "pinnacle_reason": "Not found in Pinnacle export index",
+     "proknow_reason": "Patient not found on ProKnow"},
     # missing from pinnacle only
     {"mrn": "1003", "in_mosaiq": True, "in_pinnacle": False, "in_proknow": True,
      "status": "imported", "outcome": "success", "error_message": None},
@@ -115,6 +117,24 @@ class PatientTableTests(_StubbedBackend):
         resp = self._get()
         self.assertRedirects(resp, reverse("jobs:dashboard"), fetch_redirect_response=False)
 
+    def test_headline_imported_stat_rendered(self):
+        """job_summary's new imported_count/submitted_count (§E) surface as
+        the "N / M ... imported" headline stat above the summary table."""
+        self.backend.job_summary.return_value = {
+            "summary": [], "project_id": PROJECT_ID,
+            "imported_count": 3, "submitted_count": 4,
+        }
+        resp = self._get()
+        self.assertContains(resp, "3 / 4")
+
+    def test_headline_imported_stat_omitted_when_backend_does_not_supply_it(self):
+        """Older/stubbed responses without imported_count/submitted_count
+        (e.g. this test module's default job_summary stub) must not blow up
+        the template -- the stat block simply doesn't render."""
+        resp = self._get()
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, "imported</span>")
+
 
 class PatientDetailTests(_StubbedBackend):
     username = "tester2"
@@ -143,6 +163,16 @@ class PatientDetailTests(_StubbedBackend):
         self.assertContains(resp, "Prostate")
         self.assertContains(resp, "no RTSTRUCT")
         self.assertContains(resp, "boom")
+
+    def test_reason_text_rendered_for_missing_source(self):
+        """§E: per-source reason strings (from job_patients_summary) render
+        as visible text on the patient detail page, not just a tooltip --
+        1002's SUMMARY row carries reasons for all three sources being
+        False."""
+        resp = self.client.get(reverse("jobs:patient_detail", args=[JOB_ID, "1002"]))
+        self.assertContains(resp, "Not found in Mosaiq")
+        self.assertContains(resp, "Not found in Pinnacle export index")
+        self.assertContains(resp, "Patient not found on ProKnow")
 
     def test_status_filter(self):
         resp = self._get(status="failed")

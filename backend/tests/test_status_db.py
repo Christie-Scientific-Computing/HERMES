@@ -222,5 +222,19 @@ def test_count_imported_patients_counts_distinct_mrn_once(db, job_id):
     assert db.count_imported_patients(job_id) == (1, 1)
 
 
+def test_count_imported_patients_mixed_true_and_false_events_for_same_patient(db, job_id):
+    """One patient with both an imported=False success event (e.g. a first
+    attempt that ran but found nothing) and a later imported=True success
+    event (e.g. a retry that actually landed data) must still count as
+    imported once -- "ever imported=true" is the semantic, not "the latest
+    event says imported=true" or "every event says imported=true"."""
+    db.create_job(job_id)
+    db.add_patient(job_id, mrn="MRN1")
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": False})
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+
+    assert db.count_imported_patients(job_id) == (1, 1)
+
+
 def test_count_imported_patients_unknown_job_returns_zeroes(db):
     assert db.count_imported_patients(f"nonexistent-{uuid.uuid4()}") == (0, 0)

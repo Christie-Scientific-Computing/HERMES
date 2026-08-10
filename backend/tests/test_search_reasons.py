@@ -202,9 +202,18 @@ class FakePlansDB:
 
 def _patch_pinn_db(monkeypatch, indexed_mrns):
     """Fakes sqlite3.connect(PINN_DB) with a real in-memory sqlite DB seeded
-    with `entries` rows for the given mrns, mirroring the real schema."""
+    with `entries` rows for the given mrns, mirroring the real schema.
+
+    `retrieve_logic.sqlite3` is the exact same module object as this file's
+    own `sqlite3` import (module caching in sys.modules) -- so the original
+    `connect` must be captured BEFORE patching. Calling `sqlite3.connect`
+    from inside `_connect` after patching would resolve to the patched
+    attribute on that same shared module and recurse on itself forever.
+    """
+    real_connect = sqlite3.connect
+
     def _connect(_path):
-        conn = sqlite3.connect(":memory:")
+        conn = real_connect(":memory:")
         conn.execute("CREATE TABLE entries (MedicalRecordNumber TEXT, PinnacleID TEXT, Path TEXT)")
         for mrn in indexed_mrns:
             conn.execute("INSERT INTO entries VALUES (?, ?, ?)", (str(mrn), "PID1", "/pinnacle/path"))

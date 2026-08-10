@@ -357,7 +357,7 @@ class Importer():
             "Query": {"PatientID": str(mrn)}
         }
 
-        any_studies_found = False
+        any_studies_checked = False
         query_error: str | None = None
 
         # Get studies with associated RTDOSE i.e.(Hopefully) complete planning data
@@ -370,8 +370,6 @@ class Importer():
                 query_error = f"Could not query {src}: {exc}"
                 continue
             study_uids = [s['StudyInstanceUID'] for s in studies['answers'] if 'StudyInstanceUID' in s]
-            if study_uids:
-                any_studies_found = True
 
             for study_uid in study_uids:
                 series_query = {
@@ -386,10 +384,19 @@ class Importer():
                 except Exception as exc:
                     # A series-query failure on one study shouldn't abort the
                     # whole search -- remember it and keep trying other
-                    # studies/sources, same as the outer query above.
+                    # studies/sources, same as the outer query above. Crucially,
+                    # this study was NOT actually checked for RTDOSE, so it must
+                    # not count toward any_studies_checked below -- otherwise a
+                    # study whose series query failed would be silently
+                    # reinterpreted as "checked and incomplete" instead of
+                    # surfacing the real query error.
                     logger.debug('Could not query series for study %s in %s: %s', study_uid, src, exc)
                     query_error = f"Could not query {src}: {exc}"
                     continue
+                # The series query for this study succeeded -- it has now
+                # genuinely been checked for RTDOSE/accepted modalities, so it's
+                # eligible to justify an "Incomplete planning data" verdict.
+                any_studies_checked = True
                 for s in series['answers']:
                     if self.import_level in ('Planning', 'Everything') and s['Modality'] == 'RTDOSE':
                         #If at least one RTDOSE (i.e. complete planning data)
@@ -398,10 +405,10 @@ class Importer():
                     if self.import_level in ('Images', 'Everything') and s['Modality'] in self.accepted_modalities:
                         return True, None
 
-        # Nothing matched. Prefer the most specific/actionable reason: found
-        # some studies but incomplete data beats a query error, which beats a
-        # plain "never found".
-        if any_studies_found:
+        # Nothing matched. Prefer the most specific/actionable reason: studies
+        # that were actually checked and found incomplete beats a query error,
+        # which beats a plain "never found".
+        if any_studies_checked:
             return False, "Incomplete planning data"
         if query_error:
             return False, query_error
