@@ -17,7 +17,7 @@ import backend.src.db as db_module
 from backend.src.db import get_conn
 from backend.src.status.db_client import StatusDB
 from backend.src.status.hash_chain import GENESIS_HASH, compute_row_hash
-from backend.scripts.verify_audit_chain import fetch_events_in_order, verify_chain
+from backend.scripts.verify_audit_chain import fetch_chain_state, fetch_events_in_order, verify_chain
 
 
 def _ensure_pool_sized_for_concurrency(maxconn: int) -> None:
@@ -37,33 +37,6 @@ def _ensure_pool_sized_for_concurrency(maxconn: int) -> None:
         db_module._pool.closeall()
     db_module._pool = None
     db_module.init_pool(os.environ["DATABASE_URL"], minconn=1, maxconn=maxconn)
-
-
-def _chain_state_matches_last_row() -> tuple[bool, str]:
-    """
-    Cross-check event_chain_state.last_hash (the "next writer, read this"
-    pointer add_event's FOR UPDATE guards) against the row_hash of the
-    actual highest-id row in events (the true last write). verify_chain
-    alone can't catch a divergence here -- it only checks relative linking
-    *within* the rows that exist, so if event_chain_state.last_hash ends up
-    pointing at a hash that belongs to no row at all (which is exactly what
-    a lost/interleaved update under an unsafe pool can produce -- see this
-    file's module docstring), every row already in the table can still look
-    perfectly self-consistent while the chain's live continuation point has
-    silently gone stale. This is the sharper of the two checks for a
-    concurrency bug: it catches corruption immediately, in the state that
-    exists right after the race, rather than waiting for a future insert to
-    surface it as a prev_hash mismatch.
-    """
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT last_hash FROM event_chain_state WHERE id = 1")
-        (last_hash,) = cur.fetchone()
-        cur.execute("SELECT row_hash FROM events ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-        last_row_hash = row[0] if row else None
-    if last_hash != last_row_hash:
-        return False, f"event_chain_state.last_hash={last_hash!r} does not match the last row's row_hash={last_row_hash!r}"
-    return True, ""
 
 
 @pytest.fixture
@@ -132,6 +105,13 @@ def test_verify_chain_reports_intact_chain_ok(db, job_id):
     assert bad_row is None
     assert reason is None
 
+    # Also exercise the chain_state_last_hash cross-check on the happy
+    # path -- it must not false-positive when nothing's actually wrong.
+    ok, bad_row, reason = verify_chain(all_rows, chain_state_last_hash=fetch_chain_state())
+    assert ok is True
+    assert bad_row is None
+    assert reason is None
+
 
 def test_verify_chain_detects_tampering(db, job_id):
     db.create_job(job_id)
@@ -177,6 +157,120 @@ def test_first_chained_event_anchors_to_genesis_hash(db, job_id):
     assert first_chained["prev_hash"] == GENESIS_HASH
 
 
+def test_verify_chain_detects_truncated_tail_without_reseeded_state(db, job_id):
+    """
+    Reproduces a real gap found in review: verify_chain's per-row walk alone
+    cannot see a truncated tail. Delete the most recent event(s) from
+    `events` *without* touching event_chain_state, and every row that's
+    still present remains perfectly internally consistent (each one's
+    prev_hash still matches the previous row's row_hash) -- a bare
+    fetch_events_in_order() + verify_chain(rows) walk would report "intact"
+    even though event_chain_state.last_hash now points at a hash that
+    belongs to no row at all. Passing chain_state_last_hash is what makes
+    verify_chain (and therefore `python backend/scripts/verify_audit_chain.py`
+    itself) catch this.
+    """
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="start")
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"x": 1})
+
+    rows = _events_for_job(job_id)
+    last_id = rows[-1]["id"]
+
+    # Confirm this job's last row really is the current global tail --
+    # otherwise deleting it wouldn't disturb event_chain_state's pointer at
+    # all, and the test below would be vacuous. Safe to assume under
+    # pytest's default single-threaded, sequential test execution: nothing
+    # else writes to `events` between the two add_event calls above and
+    # this check.
+    global_rows = fetch_events_in_order()
+    assert global_rows[-1]["id"] == last_id
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM events WHERE id = %s", (last_id,))
+
+    try:
+        remaining_rows = fetch_events_in_order()
+        chain_state_last_hash = fetch_chain_state()
+
+        # The per-row walk alone: still reports "intact" -- this is the gap.
+        ok_rows_only, _, _ = verify_chain(remaining_rows)
+        assert ok_rows_only is True
+
+        # With the live state cross-checked: now correctly reports broken.
+        ok, bad_row, reason = verify_chain(remaining_rows, chain_state_last_hash=chain_state_last_hash)
+        assert ok is False
+        assert bad_row is None  # no single row is at fault -- the state pointer is stale
+        assert "event_chain_state" in reason
+        assert "truncated" in reason
+    finally:
+        # Repair: point event_chain_state back at whatever is now genuinely
+        # the last row (or GENESIS_HASH if none remain), so later tests --
+        # and later full-suite runs against this persistent DB -- see a
+        # consistent chain again rather than inheriting this test's mess.
+        fresh_rows = fetch_events_in_order()
+        correct_hash = fresh_rows[-1]["row_hash"] if fresh_rows else GENESIS_HASH
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE event_chain_state SET last_hash = %s WHERE id = 1", (correct_hash,))
+
+
+def test_row_hash_recomputation_is_timezone_independent(db, job_id):
+    """
+    Reproduces the reviewer-demonstrated timezone bug directly. Before the
+    fix, hash_chain.py's canonical_event_json relied on bare
+    json.dumps(..., default=str) for `ts`; psycopg2 renders a TIMESTAMPTZ
+    using the *reading connection's* session TimeZone GUC, not necessarily
+    UTC, so str(ts) for the exact same instant differed depending on what
+    timezone the connection that read it back happened to be set to --
+    e.g. '...+00:00' under a UTC session vs. '...+01:00' under
+    Europe/London in summer -- even with zero tampering. That would make
+    verify_audit_chain.py report every row as corrupted the moment it ran
+    against a connection/server with a non-UTC session timezone.
+    """
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"in_mosaiq": True})
+
+    row = _events_for_job(job_id)[0]
+
+    # Baseline: recomputing from the row as read back over this test suite's
+    # normal (UTC) session reproduces the stored hash.
+    recomputed_utc = compute_row_hash(
+        row["prev_hash"], row["job_id"], row["mrn"], row["stage"],
+        row["event_type"], row["ts"], row["attempt"], row["error_message"], row["details"],
+    )
+    assert recomputed_utc == row["row_hash"]
+
+    # Now read the *same* row back over a connection whose session timezone
+    # is deliberately not UTC -- SET LOCAL scopes it to this transaction
+    # only, so it can't leak into the shared pool for some other borrower.
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL TIME ZONE 'Europe/London'")
+        cur.execute(
+            """
+            SELECT id, job_id, mrn, stage, event_type, ts, attempt,
+                   error_message, details, prev_hash, row_hash
+            FROM events WHERE id = %s
+            """,
+            (row["id"],),
+        )
+        cols = [d[0] for d in cur.description]
+        london_row = dict(zip(cols, cur.fetchone()))
+
+    # Sanity check the reproduction is actually exercising the bug: the raw
+    # datetime read back under Europe/London must carry a different UTC
+    # offset than the one read back under UTC (August = BST = UTC+1) --
+    # otherwise this test would be vacuously passing.
+    assert london_row["ts"].utcoffset() != row["ts"].utcoffset()
+    assert str(london_row["ts"]) != str(row["ts"])
+
+    recomputed_london = compute_row_hash(
+        london_row["prev_hash"], london_row["job_id"], london_row["mrn"], london_row["stage"],
+        london_row["event_type"], london_row["ts"], london_row["attempt"],
+        london_row["error_message"], london_row["details"],
+    )
+    assert recomputed_london == row["row_hash"]
+
+
 def test_concurrent_add_event_calls_produce_no_errors_and_a_valid_chain(db, job_id):
     """
     The test that exercises the bug this section fixes: db.py's pool used to
@@ -189,6 +283,23 @@ def test_concurrent_add_event_calls_produce_no_errors_and_a_valid_chain(db, job_
     SimpleConnectionPool's internal connection bookkeeping under load
     (double-checkout / connection leak / crash) if the ThreadedConnectionPool
     swap in backend/src/db.py hadn't also shipped.
+
+    Best-effort note: this is a data race, not a deterministic failure --
+    whether it manifests depends on GIL/thread scheduling and how much real
+    OS-level parallelism the machine running this test actually has. When
+    manually reverted to SimpleConnectionPool and stress-tested by hand
+    with heavier, tightly-synchronized concurrent load (a threading.Barrier
+    forcing many threads to hit the pool at the same instant), this did
+    reproduce genuine corruption -- event_chain_state.last_hash left
+    pointing at a hash matching no row in the table at all. It did *not*
+    reliably reproduce as a plain `pytest -k concurrent` run at this scale
+    on a 2-core sandbox, where GIL scheduling and asyncio's default
+    thread-pool-executor cap on real parallelism narrow the race window.
+    So: treat "this test passes" as confirming the fix doesn't break
+    anything, not as proof the race is impossible to hit -- the
+    correctness argument for the fix stands on its own (see
+    backend/src/db.py's docstring), independent of whether this specific
+    test can force the bug on any given machine.
     """
     db.create_job(job_id)
     N = 60
@@ -212,23 +323,30 @@ def test_concurrent_add_event_calls_produce_no_errors_and_a_valid_chain(db, job_
 
     # End-to-end chain validity across the whole table (not just this job's
     # rows), exactly what an operator running verify_audit_chain.py would
-    # check after a burst of concurrent batch-job activity.
+    # check after a burst of concurrent batch-job activity. Passing
+    # chain_state_last_hash too so this also catches the state-pointer
+    # divergence a bare per-row walk can miss (see
+    # test_verify_chain_detects_truncated_tail_without_reseeded_state).
     all_rows = fetch_events_in_order()
-    ok, bad_row, reason = verify_chain(all_rows)
+    ok, bad_row, reason = verify_chain(all_rows, chain_state_last_hash=fetch_chain_state())
     assert ok is True, f"chain broken at {bad_row}: {reason}"
-
-    # Sharper still: the live event_chain_state pointer must match the
-    # actual last-written row, not just "the rows that exist are internally
-    # consistent" -- see _chain_state_matches_last_row's docstring for why
-    # this catches corruption a bare verify_chain pass can miss.
-    state_ok, state_reason = _chain_state_matches_last_row()
-    assert state_ok, state_reason
 
 
 def test_concurrent_add_event_via_thread_pool_executor(db, job_id):
-    """Same stress scenario, but via a raw ThreadPoolExecutor rather than
+    """
+    Same stress scenario, but via a raw ThreadPoolExecutor rather than
     asyncio.to_thread, to confirm the pool itself (not just the asyncio
-    scheduling wrapper) is safe under genuinely concurrent OS threads."""
+    scheduling wrapper) is safe under genuinely concurrent OS threads.
+
+    Best-effort note (see the longer explanation on
+    test_concurrent_add_event_calls_produce_no_errors_and_a_valid_chain):
+    this is a data race, so whether reverting the ThreadedConnectionPool
+    swap makes *this specific test* fail depends on the host's core count
+    and scheduling -- it reliably reproduced under a manual, more
+    tightly-synchronized stress script, but isn't guaranteed to on every
+    machine at this test's scale. A pass here doesn't by itself prove the
+    race can't happen; the fix's correctness argument is independent of it.
+    """
     db.create_job(job_id)
     N = 50
     _ensure_pool_sized_for_concurrency(N + 10)
@@ -245,8 +363,5 @@ def test_concurrent_add_event_via_thread_pool_executor(db, job_id):
     assert len(rows) == N
 
     all_rows = fetch_events_in_order()
-    ok, bad_row, reason = verify_chain(all_rows)
+    ok, bad_row, reason = verify_chain(all_rows, chain_state_last_hash=fetch_chain_state())
     assert ok is True, f"chain broken at {bad_row}: {reason}"
-
-    state_ok, state_reason = _chain_state_matches_last_row()
-    assert state_ok, state_reason

@@ -14,13 +14,31 @@ Run standalone against DATABASE_URL, from the repo root:
 
 Exit code 0 means the chain is fully intact (or there's nothing to verify
 yet); exit code 1 means a mismatch was found, printed with the offending
-event's id and the reason.
+event's id (or, for a stale event_chain_state, without one -- see below)
+and the reason.
 
-Known limitation (stated in the safety plan, not solved here): this proves
-a row wasn't silently altered *after* being written. It does not stop
-someone with direct DB access from truncating `events` and re-seeding
-`event_chain_state`, or from disabling the application logic that maintains
-the chain in the first place -- see docs/known-issues.md.
+Checks performed:
+1. Every row's row_hash is recomputed from scratch and compared to what's
+   stored, and every row's prev_hash is compared to the previous chained
+   row's row_hash (or GENESIS_HASH for the first chained row). This catches
+   any row being altered after it was written, or the chain linkage
+   between two rows being broken.
+2. The live `event_chain_state.last_hash` pointer -- the value the *next*
+   add_event call will read under `FOR UPDATE` and chain from -- is
+   compared against the row_hash of the actual last row in `events` (or
+   GENESIS_HASH if there are no chained rows at all). This is a distinct
+   check from (1): deleting the most recent N rows *without* touching
+   event_chain_state leaves every remaining row perfectly self-consistent
+   under check (1) alone, while the state table silently points at a hash
+   that belongs to no row at all. Check (2) is what catches that.
+
+Known limitation (stated in the safety plan, not solved here): even with
+both checks, this proves a row wasn't silently altered *after* being
+written, and that the chain's tail hasn't been truncated without
+re-seeding event_chain_state. It does not stop someone with direct DB
+access from truncating `events` *and* correctly re-seeding
+`event_chain_state` to match, or from disabling the application logic that
+maintains the chain in the first place -- see docs/known-issues.md.
 """
 import sys
 from pathlib import Path
@@ -54,7 +72,19 @@ def fetch_events_in_order() -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
-def verify_chain(rows: Iterable[dict]) -> tuple[bool, Optional[dict], Optional[str]]:
+def fetch_chain_state() -> Optional[str]:
+    """The live event_chain_state.last_hash -- what the *next* add_event
+    call will read under FOR UPDATE and chain from. None if the singleton
+    row is somehow missing entirely (shouldn't happen post-migration)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT last_hash FROM event_chain_state WHERE id = 1")
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def verify_chain(
+    rows: Iterable[dict], chain_state_last_hash: Optional[str] = None
+) -> tuple[bool, Optional[dict], Optional[str]]:
     """
     Walk `rows` (must already be in ascending id order) and recompute each
     row_hash from scratch. Returns (ok, first_bad_row, reason).
@@ -64,9 +94,19 @@ def verify_chain(rows: Iterable[dict]) -> tuple[bool, Optional[dict], Optional[s
     are skipped -- there's nothing to verify about them, the chain simply
     starts fresh at the first post-migration row. That first chained row is
     expected to chain from GENESIS_HASH (sha256('').hexdigest()), matching
-    how the migration seeded event_chain_state.last_hash -- so this also
-    catches someone re-seeding event_chain_state to hide a truncation, as
-    long as at least one legitimately-chained row still exists afterward.
+    how the migration seeded event_chain_state.last_hash.
+
+    If `chain_state_last_hash` is given (the live event_chain_state value,
+    from fetch_chain_state()), it's also checked against the row_hash of
+    the last chained row seen (or GENESIS_HASH if none were chained). This
+    is a genuinely separate check from the per-row walk above: deleting the
+    most recent N rows from `events` *without* touching event_chain_state
+    leaves every remaining row perfectly self-consistent -- the per-row
+    walk alone would report "intact" -- while the state table silently
+    points at a hash that belongs to no row at all. Passing
+    chain_state_last_hash is what catches that. A mismatch here has no
+    single offending row (the problem is the *absence* of one), so
+    first_bad_row is None in that case; reason still explains what's wrong.
     """
     expected_prev = None
     for row in rows:
@@ -97,12 +137,23 @@ def verify_chain(rows: Iterable[dict]) -> tuple[bool, Optional[dict], Optional[s
 
         expected_prev = row["row_hash"]
 
+    if chain_state_last_hash is not None:
+        expected_state = expected_prev if expected_prev is not None else GENESIS_HASH
+        if chain_state_last_hash != expected_state:
+            return False, None, (
+                f"event_chain_state.last_hash={chain_state_last_hash!r} does not match "
+                f"the last chained row's row_hash={expected_state!r} -- the chain's tail "
+                f"was likely truncated (rows deleted from events) without re-seeding "
+                f"event_chain_state to match"
+            )
+
     return True, None, None
 
 
 def main() -> int:
     rows = fetch_events_in_order()
-    ok, bad_row, reason = verify_chain(rows)
+    chain_state_last_hash = fetch_chain_state()
+    ok, bad_row, reason = verify_chain(rows, chain_state_last_hash=chain_state_last_hash)
     if ok:
         print(f"OK: hash chain intact across {len(rows)} event(s).")
         return 0
