@@ -9,6 +9,7 @@ from typing import Optional
 from psycopg2.extras import RealDictCursor, Json
 
 from backend.src.db import get_conn
+from backend.src.status.hash_chain import compute_row_hash
 
 
 class StatusDB:
@@ -41,15 +42,42 @@ class StatusDB:
             )
 
     def add_event(self, job_id: str, mrn: str, stage: str, event_type: str, error_message: Optional[str] = None, details: Optional[dict] = None, attempt: int = 1):
+        """
+        Insert one event and extend the hash chain (docs/safety-plan.md §D1)
+        in the same transaction:
+
+        1. `SELECT ... FOR UPDATE` the singleton `event_chain_state` row --
+           the row lock serializes concurrent writers (multiple uvicorn
+           workers, or multiple batch jobs running at once) so the chain
+           always has one, and only one, valid next link.
+        2. Compute row_hash = sha256(prev_hash || canonical_json(...)) via
+           backend/src/status/hash_chain.py, shared with
+           backend/scripts/verify_audit_chain.py so the two can never
+           compute the hash two different ways.
+        3. Insert the event with both prev_hash and row_hash set.
+        4. Advance event_chain_state.last_hash to this row's row_hash.
+
+        `get_conn()` wraps all of this in one commit/rollback unit, so the
+        lock is held for the whole read-compute-insert-update sequence and
+        released atomically.
+        """
+        ts = datetime.now(timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT last_hash FROM event_chain_state WHERE id = 1 FOR UPDATE")
+            row = cur.fetchone()
+            prev_hash = row[0]
+
+            row_hash = compute_row_hash(prev_hash, job_id, mrn, stage, event_type, ts, attempt, error_message, details)
+
             cur.execute(
                 """
-                INSERT INTO events(job_id, mrn, stage, event_type, ts, attempt, error_message, details)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO events(job_id, mrn, stage, event_type, ts, attempt, error_message, details, prev_hash, row_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (job_id, mrn, stage, event_type, datetime.now(timezone.utc), attempt, error_message,
-                 Json(details) if details is not None else None),
+                (job_id, mrn, stage, event_type, ts, attempt, error_message,
+                 Json(details) if details is not None else None, prev_hash, row_hash),
             )
+            cur.execute("UPDATE event_chain_state SET last_hash = %s WHERE id = 1", (row_hash,))
 
     def get_patient_history(self, job_id: str, mrn: str) -> list[dict]:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -137,3 +165,39 @@ class StatusDB:
                 (job_id,),
             )
             return {row["mrn"]: dict(row) for row in cur.fetchall()}
+
+    def count_imported_patients(self, job_id: str) -> tuple[int, int]:
+        """
+        The "N/M imported" headline figure for a job: (imported_count,
+        submitted_count).
+
+        `imported_count` is the count of distinct patients with a
+        retrieve-stage success event whose `details->>'imported'` is the
+        string 'true' -- Importer.verify_on_orthanc's own ground-truth check
+        (backend/src/retrieve/logic.py, §D3), not a guess from `event_type`
+        alone: a patient found nowhere still gets `event_type = 'success'`
+        (the operation ran without raising), so counting those would
+        overstate how many patients actually got data.
+
+        `submitted_count` is simply every distinct patient submitted as part
+        of this job (COUNT(DISTINCT mrn) from `patients`), regardless of
+        outcome -- the "M" half of "N/M imported".
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT mrn) FROM events
+                WHERE job_id = %s AND stage = 'retrieve' AND event_type = 'success'
+                  AND details ->> 'imported' = 'true'
+                """,
+                (job_id,),
+            )
+            imported_count = cur.fetchone()[0]
+
+            cur.execute(
+                "SELECT COUNT(DISTINCT mrn) FROM patients WHERE job_id = %s",
+                (job_id,),
+            )
+            submitted_count = cur.fetchone()[0]
+
+            return imported_count, submitted_count

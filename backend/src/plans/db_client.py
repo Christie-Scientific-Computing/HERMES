@@ -21,11 +21,19 @@ anon boundary themselves before calling in, and scrub the free-text columns
 on the way back out (see results/endpoints.py). There is no job_id here: plans
 belong to a patient, not to a HERMES job.
 
-Sibling tables `status` and `errors` exist in the same schema and aren't read
-yet -- `errors` (joined via status_id) is the natural next increment.
+Sibling tables `status` and `errors` also live in this schema:
+
+    status(id PK, mrn TEXT, path TEXT, process_datetime TIMESTAMP, status TEXT)
+    errors(id PK, status_id INT, mrn TEXT, path TEXT, error_message TEXT)
+
+`latest_status_for_patient` (below) is the "next increment" flagged above --
+it's what search_pinnacle_db (backend/src/retrieve/logic.py) uses to report
+whether PinnacleExport's own DICOM reconstruction succeeded, since the
+`plans` table alone says nothing about that.
 """
 import logging
 import os
+from datetime import datetime
 
 from psycopg2 import errors as pg_errors, sql
 from psycopg2.extras import RealDictCursor
@@ -77,5 +85,52 @@ class PlansDB:
         except (pg_errors.UndefinedTable, pg_errors.InvalidSchemaName):
             logger.info(
                 "%s.plans not present; reporting plans as unavailable", PINNACLE_SCHEMA
+            )
+            return None
+
+    def latest_status_for_patient(self, mrn: str, since: datetime) -> dict | None:
+        """
+        Most recent pinnacle_export.status row for one patient (REAL mrn)
+        with `process_datetime` after `since`, joined to its linked
+        pinnacle_export.errors row (via status_id) for the error message, if
+        any exists.
+
+        Returns None -- both when there's genuinely no such row, and when the
+        schema/table isn't present at all. Unlike list_plans_for_patient,
+        callers here don't need to distinguish those two cases: this backs
+        search_pinnacle_db's "Pinnacle reconstruction pending" reason, and
+        "we don't know yet" and "nothing to know" collapse to the same
+        message either way.
+
+        `since` exists to keep a status row from a much older, unrelated run
+        out of the picture -- PinnacleExport processes out-of-band, so by the
+        time a caller checks, any row that exists necessarily predates the
+        reconstruction *this* call might itself be about to trigger.
+        """
+        query = sql.SQL(
+            """
+            SELECT s.status, s.process_datetime, e.error_message
+            FROM {schema}.status s
+            LEFT JOIN LATERAL (
+                SELECT error_message
+                FROM {schema}.errors
+                WHERE status_id = s.id
+                ORDER BY id DESC
+                LIMIT 1
+            ) e ON TRUE
+            WHERE s.mrn = %s AND s.process_datetime > %s
+            ORDER BY s.process_datetime DESC
+            LIMIT 1
+            """
+        ).format(schema=sql.Identifier(PINNACLE_SCHEMA))
+        try:
+            with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, (str(mrn), since))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        except (pg_errors.UndefinedTable, pg_errors.InvalidSchemaName):
+            logger.info(
+                "%s.status not present; reporting Pinnacle reconstruction status as unavailable",
+                PINNACLE_SCHEMA,
             )
             return None

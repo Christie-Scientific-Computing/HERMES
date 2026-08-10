@@ -9,8 +9,16 @@
       <h1 class="text-xl font-semibold text-gray-900">Patient <span class="font-mono">{{ mrn }}</span></h1>
       <p class="text-sm text-gray-500 font-mono mt-1">job {{ job_id }}</p>
     </div>
-    <c-source-badges :mosaiq="summary.in_mosaiq" :pinnacle="summary.in_pinnacle" :proknow="summary.in_proknow" />
+    <c-source-badges :mosaiq="summary.in_mosaiq" :pinnacle="summary.in_pinnacle" :proknow="summary.in_proknow"
+      :mosaiq_reason="summary.mosaiq_reason" :pinnacle_reason="summary.pinnacle_reason" :proknow_reason="summary.proknow_reason" />
   </div>
+  {% if summary.mosaiq_reason or summary.pinnacle_reason or summary.proknow_reason %}
+  <div class="mt-2 space-y-1">
+    {% if summary.mosaiq_reason %}<p class="text-xs text-red-600">Mosaiq: {{ summary.mosaiq_reason }}</p>{% endif %}
+    {% if summary.pinnacle_reason %}<p class="text-xs text-red-600">Pinnacle: {{ summary.pinnacle_reason }}</p>{% endif %}
+    {% if summary.proknow_reason %}<p class="text-xs text-red-600">ProKnow: {{ summary.proknow_reason }}</p>{% endif %}
+  </div>
+  {% endif %}
 </div>
 
 <div class="bg-white border border-gray-200 rounded-lg p-6 mb-6">

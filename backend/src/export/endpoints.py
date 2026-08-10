@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPExcep
 from pydantic import BaseModel
 from proknow import ProKnow
 from dotenv import load_dotenv
-from pyorthanc import Orthanc
+from pyorthanc import Orthanc, find_series, find_studies
 from fastapi.responses import StreamingResponse
-from backend.src.export.logic import Exporter
+from backend.src.export.logic import Exporter, checksummed_series_manifest
 from backend.src.status.db_client import StatusDB
 from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
 from backend.src.identity import anon
@@ -57,14 +57,15 @@ class Request(BaseModel):
     destination: str | None = None # DICOM AE
     collection: str | None = None # ProKnow collection
 
-# Note: _dicom_move_worker/_proknow_worker (below) dump this with
-# exclude_none=True, since their output feeds events.details/the SSE payload
-# for every batch endpoint and these new fields are still unpopulated
-# (nothing sets them until D2 lands) -- exclude_none keeps those payloads
-# from filling up with nulls in the meantime. proknow_upload_patient, which
-# doesn't route through run_batch_job, doesn't do this -- not a deliberate
-# inconsistency, just that path has no live caller today (per D0 review) so
-# it wasn't worth reconciling yet. Revisit if/when it grows one.
+# Note: _dicom_move_worker/_proknow_worker/_uid_move_worker (below) dump this
+# with exclude_none=True, since their output feeds events.details/the SSE
+# payload for every batch endpoint -- exclude_none keeps those payloads from
+# filling up with nulls on any field a given worker doesn't populate (e.g.
+# checksums is always set by all three workers as of SS D2, but a future
+# field might not be). proknow_upload_patient, which doesn't route through
+# run_batch_job, doesn't do this -- not a deliberate inconsistency, just that
+# path has no live caller today (per D0 review) so it wasn't worth
+# reconciling yet. Revisit if/when it grows one.
 class Response(BaseModel):
     mrn: str | int
     status: str | None = None
@@ -72,6 +73,15 @@ class Response(BaseModel):
     instance_count: int | None = None
     study_uids: list[str] | None = None
     series_uids: list[str] | None = None
+    # Hex digest per instance, keyed by SOPInstanceUID (or "orthanc:<id>" if
+    # that tag isn't indexed) -- but the ALGORITHM varies by destination_type
+    # and is not comparable across events/jobs: "dicom_modality" (both the
+    # plain and UID-based C-MOVE paths) reports Orthanc's own stored MD5,
+    # since the bytes are never downloaded to this process for an async
+    # C-MOVE; "proknow_collection" reports a locally-computed SHA-256 over
+    # bytes already pulled to disk for upload. Same instance exported via
+    # both paths will therefore never produce matching checksums by
+    # construction -- that's expected, not a bug.
     checksums: dict[str, str] | None = None
     destination: str | None = None
     destination_type: str | None = None
@@ -102,17 +112,29 @@ async def get_proknow_collections(username: str = Query(...)):
         raise HTTPException(status_code=502, detail=f"ProKnow query failed: {exc}")
 
 
-def _dicom_move_worker(destination: str):
+def _dicom_move_worker(destination: str, submitted_by: str | None = None):
     def worker(item: BatchItem) -> dict:
         res = Exporter(destination=destination).dicom_c_move(item.real_id)
-        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
+        return Response(
+            mrn=item.real_id,
+            destination=destination,
+            destination_type="dicom_modality",
+            submitted_by=submitted_by,
+            **res,
+        ).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 
-def _proknow_worker(collection: str):
+def _proknow_worker(collection: str, submitted_by: str | None = None):
     def worker(item: BatchItem) -> dict:
         res = Exporter(destination=collection).upload_to_proknow(item.real_id)
-        return Response(mrn=item.real_id, **res).model_dump(exclude={"mrn"}, exclude_none=True)
+        return Response(
+            mrn=item.real_id,
+            destination=collection,
+            destination_type="proknow_collection",
+            submitted_by=submitted_by,
+            **res,
+        ).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 
@@ -138,7 +160,7 @@ async def dicom_move(body: Request):
     return StreamingResponse(
         run_batch_job(
             req['job_id'], items, stage='export',
-            worker=_dicom_move_worker(req['destination']),
+            worker=_dicom_move_worker(req['destination'], submitted_by=req['username']),
             status_db=status_db,
             description=f"Batch export to {req['destination']}",
             created_by=req['username'],
@@ -160,7 +182,7 @@ async def proknow_upload(body: Request):
     return StreamingResponse(
         run_batch_job(
             req['job_id'], items, stage='export',
-            worker=_proknow_worker(req['collection']),
+            worker=_proknow_worker(req['collection'], submitted_by=req['username']),
             status_db=status_db,
             description=f"Batch ProKnow upload to {req['collection']}",
             created_by=req['username'],
@@ -203,7 +225,13 @@ async def proknow_upload_patient(body: Request):
     start = time.time()
     try:
         res = exp.upload_to_proknow(real_mrn)
-        response = Response(mrn=display_mrn, **res)
+        response = Response(
+            mrn=display_mrn,
+            destination=req['collection'],
+            destination_type="proknow_collection",
+            submitted_by=req['username'],
+            **res,
+        )
 
         # Record success
         if status_db:
@@ -245,7 +273,7 @@ async def dicom_move_file(
     return StreamingResponse(
         run_batch_job(
             job_id, items, stage='export',
-            worker=_dicom_move_worker(destination),
+            worker=_dicom_move_worker(destination, submitted_by=username),
             status_db=status_db,
             description=f"Batch export to {destination}",
             created_by=username,
@@ -275,7 +303,7 @@ async def proknow_upload_file(
     return StreamingResponse(
         run_batch_job(
             job_id, items, stage='export',
-            worker=_proknow_worker(collection),
+            worker=_proknow_worker(collection, submitted_by=username),
             status_db=status_db,
             description=f"Batch ProKnow upload to {collection}",
             created_by=username,
@@ -362,10 +390,56 @@ def _build_uid_items(path_to_csv: str, level: str) -> list[BatchItem]:
     return items
 
 
-def _uid_move_worker(destination: str):
+def _build_uid_manifest(study_uid: str, series_uid: str | None) -> dict:
+    """
+    This path posts CSV-supplied study/series UIDs straight to Orthanc's
+    C-MOVE endpoint and, unlike Exporter.dicom_c_move, never otherwise calls
+    find_studies/find_series -- so unlike the other two export workers,
+    there's no already-enumerated data to extend here. This is net-new
+    lookup work, done purely to build the audit manifest before the move is
+    triggered (docs/safety-plan.md SS D2); it plays no role in the move
+    itself. Checksums come from Orthanc's own stored MD5, same as the
+    non-UID DICOM C-MOVE path -- these bytes never land locally either.
+    """
+    try:
+        client = Orthanc(url=ORTHANC_URL, username=ORTHANC_USER,
+                password=ORTHANC_PASS, verify=False,
+                timeout=14000.0,)
+        logger.info("Connected to Orthanc")
+    except Exception as exc:
+        logger.error(f"Failed to connect to Orthanc: {exc}")
+        raise ValueError("Could not connect to Orthanc")
+
+    studies = find_studies(client=client, query={"StudyInstanceUID": study_uid})
+    found_study_uids = [s.main_dicom_tags.get("StudyInstanceUID") for s in studies]
+    found_study_uids = [uid for uid in found_study_uids if uid]
+
+    series_query = {"StudyInstanceUID": study_uid}
+    if series_uid:
+        series_query["SeriesInstanceUID"] = series_uid
+    series_list = find_series(client=client, query=series_query)
+
+    manifest = checksummed_series_manifest(client, series_list)
+    manifest["study_uids"] = found_study_uids or [study_uid]
+    return manifest
+
+
+def _uid_move_worker(destination: str, submitted_by: str | None = None):
     def worker(item: BatchItem) -> dict:
-        _c_move_by_uid(destination, item.extra["study_uid"], item.extra["series_uid"])
-        return {}
+        study_uid = item.extra["study_uid"]
+        series_uid = item.extra["series_uid"]
+
+        manifest = _build_uid_manifest(study_uid, series_uid)
+        _c_move_by_uid(destination, study_uid, series_uid)
+
+        return Response(
+            mrn=item.real_id,
+            status="Success",
+            destination=destination,
+            destination_type="dicom_modality",
+            submitted_by=submitted_by,
+            **manifest,
+        ).model_dump(exclude={"mrn"}, exclude_none=True)
     return worker
 
 
@@ -394,7 +468,7 @@ async def dicom_move_uids_file(
     return StreamingResponse(
         run_batch_job(
             job_id, items, stage='export',
-            worker=_uid_move_worker(destination),
+            worker=_uid_move_worker(destination, submitted_by=username),
             status_db=status_db,
             description=f"UID C-MOVE ({level}) to {destination}",
             created_by=username,
