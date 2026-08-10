@@ -14,23 +14,12 @@ from backend.src.status.hash_chain import compute_row_hash
 from backend.src.status.tasks_db import TasksDB
 from backend.src.db import get_conn
 
-
-@pytest.fixture(autouse=True)
-def _clean_tasks_table():
-    """
-    TasksDB.claim() is deliberately global -- a real worker claims the next
-    queued task across every job, not just one. Against this suite's shared,
-    persistent test Postgres (tests don't run in a transaction that rolls
-    back), leftover 'queued' rows from an earlier run or another test in
-    this file would otherwise be claimable by an unrelated test, making
-    claim-ordering assertions flaky. Truncate before every test in this file
-    so each one starts from an empty tasks table; events.task_id is
-    ON DELETE SET NULL (see the tasks migration), so this never fails on FK
-    references from events written by other tests.
-    """
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM tasks")
-    yield
+# The `_clean_tasks_table` autouse fixture that used to live here has moved
+# to conftest.py (session-wide, not just this file) -- test_worker.py and
+# test_import_queue_endpoint.py hit the exact same TasksDB.claim() global-
+# claim hazard this fixture exists to prevent, so one shared fixture covers
+# every file that touches the tasks table rather than each needing its own
+# copy.
 
 
 @pytest.fixture
