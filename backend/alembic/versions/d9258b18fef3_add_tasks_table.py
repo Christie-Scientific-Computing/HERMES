@@ -57,9 +57,15 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_tasks_job_id", "tasks", ["job_id"])
-    # Backs the SKIP LOCKED claim query's WHERE state='queued' ORDER BY
-    # priority DESC, created_at.
-    op.create_index("ix_tasks_claim", "tasks", ["state", "priority", "created_at"])
+    # Backs the SKIP LOCKED claim query's WHERE state='queued'
+    # ORDER BY priority DESC, created_at -- column sort directions
+    # deliberately match the query's ORDER BY exactly (state/created_at
+    # ascending, priority descending). A plain all-ascending index can only
+    # satisfy a scan yielding either (ASC,ASC,ASC) or, read backwards,
+    # (DESC,DESC,DESC) -- neither matches this query's mixed
+    # DESC-then-ASC ordering, so Postgres would fall back to an explicit
+    # sort after the index scan on every claim.
+    op.create_index("ix_tasks_claim", "tasks", ["state", sa.text("priority DESC"), "created_at"])
 
     # The claim query's `job_id NOT IN (SELECT job_id FROM jobs WHERE cancelled)`
     # runs on every single claim (the hottest path once workers poll
