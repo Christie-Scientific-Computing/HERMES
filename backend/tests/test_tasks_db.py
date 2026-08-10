@@ -217,11 +217,90 @@ def test_mark_failed_requeues_while_attempts_remain(tasks_db, job_id):
 def test_cancel_task_is_terminal(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
     task = tasks_db.claim("worker-1")
-    tasks_db.cancel_task(task["task_id"], reason="project membership revoked")
+    applied = tasks_db.cancel_task(task["task_id"], reason="project membership revoked")
+    assert applied is True
 
     row = tasks_db.get_task(task["task_id"])
     assert row["state"] == "cancelled"
     assert row["error_message"] == "project membership revoked"
+
+
+def test_mark_running_guards_against_non_claimed_state(tasks_db, job_id):
+    """A task can only move claimed -> running once; a second call (e.g. a
+    duplicate/late worker invocation) must be a no-op, not silently reset
+    started_at/claimed_at on an already-running task."""
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+
+    assert tasks_db.mark_running(task["task_id"]) is True
+    first_started_at = tasks_db.get_task(task["task_id"])["started_at"]
+
+    assert tasks_db.mark_running(task["task_id"]) is False
+    assert tasks_db.get_task(task["task_id"])["started_at"] == first_started_at
+
+
+def test_mark_running_refreshes_claimed_at_so_reap_does_not_double_claim(tasks_db, job_id):
+    """
+    Regression test for the bug where reap_stale_claims judged a *running*
+    task's staleness against its original claim time. Backdate claimed_at
+    to simulate a task that was claimed a long time ago, then transition it
+    to running -- mark_running must refresh claimed_at, so a reap sweep
+    with a threshold that would have caught the old claim time leaves this
+    legitimately-running task alone.
+    """
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    with get_conn() as conn, conn.cursor() as cur:
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=7200)
+        cur.execute("UPDATE tasks SET claimed_at = %s WHERE task_id = %s", (old_ts, task["task_id"]))
+
+    tasks_db.mark_running(task["task_id"])
+
+    reaped = tasks_db.reap_stale_claims(stale_seconds=1800)
+    assert reaped == 0
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "running"
+    assert row["claimed_by"] == "worker-1"  # not reset by a reap
+
+
+def test_mark_succeeded_guards_against_terminal_state(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"])
+    assert tasks_db.mark_succeeded(task["task_id"], details={"imported": True}) is True
+
+    # a duplicate/late call after the task already succeeded must not
+    # silently overwrite it (e.g. re-run with different details)
+    applied_again = tasks_db.mark_succeeded(task["task_id"], details={"imported": False})
+    assert applied_again is False
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "succeeded"
+    assert row["details"] == {"imported": True}  # unchanged
+
+
+def test_mark_failed_guards_against_terminal_state(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"])
+    tasks_db.mark_succeeded(task["task_id"], details={})
+
+    outcome = tasks_db.mark_failed(task["task_id"], "late failure report")
+    assert outcome == "unchanged"
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "succeeded"  # not resurrected into failed/queued
+    assert row["attempts"] == 0  # not incremented either
+
+
+def test_cancel_task_guards_against_terminal_state(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"])
+    tasks_db.mark_succeeded(task["task_id"], details={"imported": True})
+
+    applied = tasks_db.cancel_task(task["task_id"], reason="revoked after completion")
+    assert applied is False
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "succeeded"  # not overwritten to cancelled
 
 
 def test_cancel_queued_leaves_running_rows_alone(tasks_db, job_id):

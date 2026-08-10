@@ -81,19 +81,43 @@ class TasksDB:
             row = cur.fetchone()
             return dict(row) if row else None
 
-    def mark_running(self, task_id: int) -> None:
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE tasks SET state='running', started_at=%s WHERE task_id=%s",
-                (datetime.now(timezone.utc), task_id),
-            )
+    def mark_running(self, task_id: int) -> bool:
+        """
+        Guarded by `WHERE state='claimed'`: a task can only move claimed ->
+        running once. Also refreshes `claimed_at` to "now" -- without this,
+        reap_stale_claims (below) would judge a long-*running* task's
+        staleness against the original claim timestamp rather than when it
+        actually started running, and wrongly reap (and double-claim) a
+        task that's simply taking a while, not one whose worker died.
 
-    def mark_succeeded(self, task_id: int, details: Optional[dict] = None) -> None:
+        Returns True if the transition was applied, False if the task
+        wasn't in 'claimed' state (already running, terminal, or reaped out
+        from under this call) -- callers should treat False as "don't log a
+        start event for this," since nothing changed.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE tasks SET state='succeeded', finished_at=%s, details=%s WHERE task_id=%s",
+                "UPDATE tasks SET state='running', started_at=%s, claimed_at=%s WHERE task_id=%s AND state='claimed'",
+                (datetime.now(timezone.utc), datetime.now(timezone.utc), task_id),
+            )
+            return cur.rowcount > 0
+
+    def mark_succeeded(self, task_id: int, details: Optional[dict] = None) -> bool:
+        """
+        Guarded by `WHERE state IN ('claimed','running')`: only an
+        in-flight task can be marked succeeded, so a late/duplicate call
+        (e.g. racing a reaper that already requeued this task, or a second
+        worker that claimed it after a reap) can't silently overwrite an
+        already-terminal ('succeeded'/'failed'/'cancelled') row. Returns
+        True if applied, False otherwise.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE tasks SET state='succeeded', finished_at=%s, details=%s "
+                "WHERE task_id=%s AND state IN ('claimed', 'running')",
                 (datetime.now(timezone.utc), Json(details) if details is not None else None, task_id),
             )
+            return cur.rowcount > 0
 
     def mark_failed(self, task_id: int, error_message: str) -> str:
         """
@@ -105,8 +129,13 @@ class TasksDB:
         behaviour unchanged from today's un-retried run_batch_job until
         retries are deliberately enabled per job/task kind.
 
-        Returns "requeued" or "failed" so callers (backend/worker.py) know
-        which outcome occurred without a second read.
+        Guarded by `WHERE state IN ('claimed','running')` -- the same
+        terminal-state protection as mark_succeeded, so a duplicate/late
+        call can't resurrect an already-succeeded or already-cancelled task.
+
+        Returns "requeued" or "failed" if the transition was applied, or
+        "unchanged" if the guard blocked it (task was already terminal) --
+        callers (backend/worker.py) should not log an event in that case.
         """
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -118,25 +147,33 @@ class TasksDB:
                     claimed_by = CASE WHEN attempts + 1 < max_attempts THEN NULL ELSE claimed_by END,
                     claimed_at = CASE WHEN attempts + 1 < max_attempts THEN NULL ELSE claimed_at END,
                     finished_at = CASE WHEN attempts + 1 < max_attempts THEN NULL ELSE %(now)s END
-                WHERE task_id = %(task_id)s
+                WHERE task_id = %(task_id)s AND state IN ('claimed', 'running')
                 RETURNING state
                 """,
                 {"error_message": error_message, "now": datetime.now(timezone.utc), "task_id": task_id},
             )
             row = cur.fetchone()
+            if row is None:
+                return "unchanged"
             return "requeued" if row["state"] == "queued" else "failed"
 
-    def cancel_task(self, task_id: int, reason: Optional[str] = None) -> None:
+    def cancel_task(self, task_id: int, reason: Optional[str] = None) -> bool:
         """
         Single-task cancellation -- e.g. the claim-time ethics-revocation
         path (a project is revoked/expires between enqueue and execution).
-        Distinct from cancel_queued below, which is job-level.
+        Distinct from cancel_queued below, which is job-level. Guarded by
+        `WHERE state IN ('queued','claimed','running')` so a task that
+        already finished (succeeded/failed) can't be silently overwritten
+        to 'cancelled', discarding the record that it actually completed.
+        Returns True if applied, False otherwise.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE tasks SET state='cancelled', finished_at=%s, error_message=%s WHERE task_id=%s",
+                "UPDATE tasks SET state='cancelled', finished_at=%s, error_message=%s "
+                "WHERE task_id=%s AND state IN ('queued', 'claimed', 'running')",
                 (datetime.now(timezone.utc), reason, task_id),
             )
+            return cur.rowcount > 0
 
     def cancel_queued(self, job_id: str) -> int:
         """
@@ -158,6 +195,12 @@ class TasksDB:
         claimed/running task whose claimed_at predates the threshold goes
         back to 'queued' for another worker to pick up. Returns the number
         of rows reaped.
+
+        claimed_at is refreshed by mark_running (see above) when a task
+        moves from 'claimed' to 'running', so this judges staleness from
+        "last confirmed alive" rather than the original claim time -- a
+        task that's simply taking a while to run isn't wrongly reaped and
+        double-claimed just because it started running long ago.
         """
         threshold = datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)
         with get_conn() as conn, conn.cursor() as cur:

@@ -61,6 +61,13 @@ def upgrade() -> None:
     # priority DESC, created_at.
     op.create_index("ix_tasks_claim", "tasks", ["state", "priority", "created_at"])
 
+    # The claim query's `job_id NOT IN (SELECT job_id FROM jobs WHERE cancelled)`
+    # runs on every single claim (the hottest path once workers poll
+    # continuously). Cancelled jobs are rare, so a partial index keyed on
+    # exactly that predicate keeps the subquery an index-only scan over a
+    # tiny slice of `jobs`, regardless of how large `jobs` grows overall.
+    op.create_index("ix_jobs_cancelled", "jobs", ["job_id"], postgresql_where=sa.text("cancelled"))
+
     # Nullable, populated only once a worker actually runs a task -- see
     # backend/src/status/hash_chain.py's canonical_event_json, which hashes
     # exactly (job_id, mrn, stage, event_type, ts, attempt, error_message,
@@ -79,6 +86,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column("events", "task_id")
 
+    op.drop_index("ix_jobs_cancelled", table_name="jobs")
     op.drop_index("ix_tasks_claim", table_name="tasks")
     op.drop_index("ix_tasks_job_id", table_name="tasks")
     op.drop_table("tasks")
