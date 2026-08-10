@@ -208,28 +208,34 @@ def find_patient(mrn: str, username: str, import_level: Optional[str] = None) ->
     return _get("/import/find_patient", params=params)
 
 
-def batch_import_file(job_id: str, filename: str, content: bytes, project_id: str,
-                       username: str, import_level: str) -> dict:
+def _post_batch_file(path: str, job_id: str, filename: str, content: bytes,
+                      project_id: str, username: str, **extra_fields) -> dict:
     """
-    Enqueue a batch import job (settings.HERMES_USE_QUEUE path -- see its
-    own docstring; requires the backend's matching HERMES_USE_QUEUE=1).
-    Returns {"job_id", "total"} once the backend has enqueued every row.
+    Shared by batch_import_file/dicom_move_file/proknow_upload_file below:
+    a plain synchronous multipart POST to one of the backend's queue-enqueue
+    endpoints (docs/worker-queue-design.md), returning the {"job_id",
+    "total"} receipt once the backend has enqueued every row.
 
-    A plain synchronous POST, unlike stream_sse: with the backend's queue
-    flag set, /import/batch_import_file returns a JSON receipt, not an SSE
-    stream, so there's nothing to relay -- the caller (jobs/views.py's
-    collect_data) already has the job_id up front and can redirect straight
-    to job_watch. Takes raw bytes rather than a file path since this path
-    never stages the upload to local disk the way _stage_batch_job does.
+    Unlike stream_sse, this is a single request/response, not a stream:
+    these endpoints enqueue and return immediately -- the caller (jobs/
+    views.py's collect_data/retrieve_data) already has the job_id up front
+    and can redirect straight to job_watch. Takes raw bytes rather than a
+    file path since nothing here stages the upload to local disk.
     """
     resp = httpx.post(
-        f"{settings.BACKEND_URL}/import/batch_import_file",
-        data={"job_id": job_id, "project_id": project_id, "username": username, "import_level": import_level},
+        f"{settings.BACKEND_URL}{path}",
+        data={"job_id": job_id, "project_id": project_id, "username": username, **extra_fields},
         files={"file": (filename, content, "text/csv")},
         headers=_headers(), timeout=30,
     )
     _raise_for_status(resp)
     return resp.json()
+
+
+def batch_import_file(job_id: str, filename: str, content: bytes, project_id: str,
+                       username: str, import_level: str) -> dict:
+    return _post_batch_file("/import/batch_import_file", job_id, filename, content,
+                             project_id, username, import_level=import_level)
 
 
 # ---- Export reference data (jobs/ app) ----
@@ -247,6 +253,18 @@ def proknow_upload_patient(job_id: str, mrn: str, collection: str, project_id: s
         "job_id": job_id, "mrn": mrn, "collection": collection,
         "project_id": project_id, "username": username,
     })
+
+
+def dicom_move_file(job_id: str, filename: str, content: bytes, project_id: str,
+                     username: str, destination: str) -> dict:
+    return _post_batch_file("/export/dicom_move_file", job_id, filename, content,
+                             project_id, username, destination=destination)
+
+
+def proknow_upload_file(job_id: str, filename: str, content: bytes, project_id: str,
+                         username: str, collection: str) -> dict:
+    return _post_batch_file("/export/proknow_upload_file", job_id, filename, content,
+                             project_id, username, collection=collection)
 
 
 # ---- Results (jobs/ app) ----
@@ -290,29 +308,24 @@ def cancel_export(job_id: str) -> dict:
     return _post(f"/export/cancel/{job_id}")
 
 
-# ---- SSE batch jobs (jobs/ app) ----
+# ---- SSE (jobs/ app) ----
 
-async def stream_sse(path: str, *, data: Optional[dict] = None, files: Optional[dict] = None,
-                      method: str = "POST") -> AsyncIterator[bytes]:
+async def stream_sse(path: str) -> AsyncIterator[bytes]:
     """
-    Open a request to a backend SSE endpoint and yield raw response bytes
-    as they arrive. `data`/`files` become a multipart request when `files`
-    is given (the batch_*_file/dicom_move_file/etc. endpoints), otherwise a
-    plain form/JSON POST is used to match what each backend route expects.
+    Open a GET request to a backend SSE endpoint -- the queue's observer
+    stream, GET /results/job/{job_id}/stream (docs/worker-queue-design.md)
+    -- and yield raw response bytes as they arrive. jobs/views.py's
+    job_stream is the sole caller, re-framing each `data: {...}` line with
+    a matching `event: <type>` line before relaying it to the browser.
 
-    `method="GET"` (with no data/files) is what jobs/views.py's job_stream
-    uses to relay the queue's observer stream (GET
-    /results/job/{job_id}/stream, docs/worker-queue-design.md) -- a pure
-    read with nothing to submit, unlike every other caller of this
-    function, which POSTs a batch job into existence.
-
-    No read timeout: large batch imports run for a long time and must not
-    be killed mid-stream by a default httpx timeout (see
-    webui/core/backend_client.py, which already had to special-case this).
+    No read timeout: a batch job can run for a long time, and the
+    connection must not be killed mid-stream by a default httpx timeout
+    (see webui/core/backend_client.py, which already had to special-case
+    this).
     """
     timeout = httpx.Timeout(10.0, read=None)
     async with httpx.AsyncClient(base_url=settings.BACKEND_URL, timeout=timeout) as client:
-        async with client.stream(method, path, data=data, files=files, headers=_headers()) as resp:
+        async with client.stream("GET", path, headers=_headers()) as resp:
             if resp.status_code >= 400:
                 body = await resp.aread()
                 try:

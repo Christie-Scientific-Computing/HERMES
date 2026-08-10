@@ -1,7 +1,39 @@
 # Worker queue for batch jobs — design
 
-**Status:** deferred design, nothing implemented. Written against HEAD `2144bd9`.
-Corresponds to `TODO.md` item 3 ("Workers?").
+**Status:** implemented, across four PRs (#23-#26) on top of `main` @ `950dba3`+.
+Originally written against HEAD `2144bd9`, deferred; corresponds to
+`TODO.md` item 3 ("Workers?"). The design below held up largely as
+written — Postgres `SKIP LOCKED`, the `tasks` schema, the SSE vocabulary,
+and the four-step sequencing all shipped close to this document's original
+shape. Real deltas from implementation, for anyone reading this as a
+historical record rather than current-state docs:
+- `TasksDB.job_progress` initially used a `task_id` watermark (as sketched
+  below); corrected before it had a real caller, since task rows are
+  mutated in place, not appended per transition -- a watermark can only
+  ever report a task once, at whatever state it was in on first
+  appearance. It now re-reads every task per poll tick; the observer
+  diffs against its own in-memory last-seen-state map instead.
+- `mark_running`/`mark_succeeded`/`mark_failed`/`cancel_task` gained
+  `state` **and** `claimed_by` ownership guards, not just `state` guards --
+  found in review: `reap_stale_claims` can legitimately requeue (and let a
+  second worker claim) a task whose original worker is merely slower than
+  `stale_seconds`, not dead, and the first worker's eventual terminal
+  write must not then clobber the second worker's result.
+- Export handlers in `backend/worker.py` reuse `export/endpoints.py`'s own
+  `_dicom_move_worker`/`_proknow_worker`/`_uid_move_worker` factories
+  directly, rather than reimplementing their `Response`-building logic --
+  `Exporter` needs no per-process caching (unlike `Importer`), so there
+  was nothing to gain from not reusing them as-is.
+- `run_batch_job` was **not** fully retired. The JSON-bodied
+  `batch_import`/`dicom_move`/`proknow_upload` endpoints (server-side CSV
+  path, no file upload) have no frontend caller but do have real dedicated
+  test coverage (`test_retrieve_endpoints_errors.py`,
+  `test_export_anon_boundary.py`, `test_export_manifest.py`'s integration
+  test) exercising the synchronous path specifically -- converting them
+  would mean rewriting that coverage against the queue for endpoints
+  nothing currently calls. They stay on `run_batch_job`, documented inline
+  at each endpoint; only the four `_file` (frontend-facing) endpoints and
+  `batch_import_file` converted.
 
 ## Context
 

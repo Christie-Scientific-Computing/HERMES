@@ -90,7 +90,14 @@ def _import_worker(import_level: str):
 @router.post("/batch_import")
 async def batch_import(body: Request):
     """
-    Main method
+    JSON-bodied variant of batch_import_file (a path to a server-side CSV
+    instead of a file upload) -- stays on the synchronous run_batch_job SSE
+    path. Deliberately NOT converted to the queue in this pass: the
+    frontend only ever calls batch_import_file, and this endpoint has real
+    dedicated test coverage (test_retrieve_endpoints_errors.py) exercising
+    the synchronous path specifically. Converting it would mean either
+    duplicating that coverage for no functional gain or rewriting it against
+    the queue for an endpoint nothing currently calls -- not worth it here.
     """
     req = body.model_dump()
     logger.info(f"Received: {req}")
@@ -201,13 +208,14 @@ async def batch_import_file(
     import_level: str = Form("Planning data"),
 ):
     """
-    Accept a CSV file upload and either stream import progress via SSE
-    (today's default) or enqueue it onto the tasks table for
-    backend/worker.py to execute (when HERMES_USE_QUEUE=1 -- see
-    docs/worker-queue-design.md). CSV parsing and anon resolution
-    (_build_import_items) happen synchronously either way, so a bad CSV or
-    an unmapped id still fails the request with a clean 400/422/503 rather
-    than turning into a silently-failed queued job.
+    Accept a CSV file upload and enqueue it onto the tasks table for
+    backend/worker.py to execute (docs/worker-queue-design.md). CSV
+    parsing and anon resolution (_build_import_items) still happen
+    synchronously here, so a bad CSV or an unmapped id still fails the
+    request with a clean 400/422/503 rather than turning into a
+    silently-failed queued job. Used by the frontend; the JSON-bodied
+    /import/batch_import (no file upload) is a separate, unconverted
+    endpoint -- see its own docstring.
     """
     enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
@@ -217,38 +225,23 @@ async def batch_import_file(
 
     items = _build_import_items(str(tmp_path))
 
-    if os.getenv("HERMES_USE_QUEUE") == "1":
-        status_db.create_job(
-            job_id, description=f"Batch import from {tmp_path}",
-            created_by=username, project_id=project_id,
-        )
-        # Registered here, at enqueue time, rather than by the worker as it
-        # picks each task up: every submitted patient is already fully known
-        # from `items`, and StatusDB.count_imported_patients' "M" (submitted
-        # count) denominator should reflect what was actually submitted
-        # regardless of whether/when a worker gets around to running it --
-        # not silently read as 0 for a job whose tasks haven't been claimed
-        # yet.
-        for item in items:
-            status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
-        tasks_db.enqueue(
-            job_id, items, kind="import", stage="retrieve",
-            params={"import_level": import_level, "project_id": project_id, "username": username},
-        )
-        return {"job_id": job_id, "total": len(items)}
-
-    return StreamingResponse(
-        run_batch_job(
-            job_id, items, stage='retrieve',
-            worker=_import_worker(import_level),
-            status_db=status_db,
-            description=f"Batch import from {tmp_path}",
-            created_by=username,
-            project_id=project_id,
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+    status_db.create_job(
+        job_id, description=f"Batch import from {tmp_path}",
+        created_by=username, project_id=project_id,
     )
+    # Registered here, at enqueue time, rather than by the worker as it
+    # picks each task up: every submitted patient is already fully known
+    # from `items`, and StatusDB.count_imported_patients' "M" (submitted
+    # count) denominator should reflect what was actually submitted
+    # regardless of whether/when a worker gets around to running it -- not
+    # silently read as 0 for a job whose tasks haven't been claimed yet.
+    for item in items:
+        status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
+    tasks_db.enqueue(
+        job_id, items, kind="import", stage="retrieve",
+        params={"import_level": import_level, "project_id": project_id, "username": username},
+    )
+    return {"job_id": job_id, "total": len(items)}
 
 
 @router.post("/cancel/{job_id}")

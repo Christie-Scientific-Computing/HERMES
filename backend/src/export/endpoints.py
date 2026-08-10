@@ -16,6 +16,7 @@ from pyorthanc import Orthanc, find_series, find_studies
 from fastapi.responses import StreamingResponse
 from backend.src.export.logic import Exporter, checksummed_series_manifest
 from backend.src.status.db_client import StatusDB
+from backend.src.status.tasks_db import TasksDB
 from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
 from backend.src.identity import anon
 from backend.src.projects import enforcement
@@ -31,6 +32,7 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
     try:
         status_db = StatusDB()
+        tasks_db = TasksDB()
         logger.debug("StatusDB initialized")
     except Exception as e:
         logger.error("Failed to init StatusDB: %s", e)
@@ -151,8 +153,34 @@ def _build_export_items(path_to_csv: str) -> list[BatchItem]:
         raise HTTPException(status_code=503, detail=str(e))
 
 
+def _enqueue_export_job(job_id: str, items: list[BatchItem], kind: str, description: str,
+                         project_id: str, username: str, params: dict) -> dict:
+    """
+    Shared by all three file-upload export endpoints below (dicom_move_file,
+    proknow_upload_file, dicom_move_uids_file): create the job, register
+    every submitted patient at enqueue time (not deferred to the worker --
+    see batch_import_file's identical comment in retrieve/endpoints.py for
+    why), and enqueue onto the tasks table for backend/worker.py.
+    `project_id`/`username` are merged into `params` so a claim needs no
+    join back to `jobs` for the worker's claim-time ethics re-check.
+    """
+    status_db.create_job(job_id, description=description, created_by=username, project_id=project_id)
+    for item in items:
+        status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
+    tasks_db.enqueue(job_id, items, kind=kind, stage="export",
+                      params={**params, "project_id": project_id, "username": username})
+    return {"job_id": job_id, "total": len(items)}
+
+
 @router.post("/dicom_move")
 async def dicom_move(body: Request):
+    """
+    JSON-bodied variant of dicom_move_file -- stays on the synchronous
+    run_batch_job SSE path. See retrieve/endpoints.py's batch_import
+    docstring for why: no live caller, and real dedicated test coverage
+    (test_export_anon_boundary.py, test_export_manifest.py's integration
+    test) exercising this exact synchronous path.
+    """
     req = body.model_dump()
     logger.info(req)
     enforcement.require_project_member(req['project_id'], req['username'])
@@ -175,6 +203,8 @@ async def dicom_move(body: Request):
 
 @router.post("/proknow_upload")
 async def proknow_upload(body: Request):
+    """JSON-bodied variant of proknow_upload_file -- stays on the
+    synchronous run_batch_job SSE path, same reasoning as dicom_move above."""
     req = body.model_dump()
     logger.info(req)
     enforcement.require_project_member(req['project_id'], req['username'])
@@ -262,7 +292,8 @@ async def dicom_move_file(
     username: str = Form(...),
     destination: str = Form(..., description="Orthanc modality AE title"),
 ):
-    """Accept a CSV file upload and stream DICOM C-MOVE progress via SSE. Used by the frontend."""
+    """Accept a CSV file upload and enqueue a DICOM C-MOVE batch job for
+    backend/worker.py to execute (docs/worker-queue-design.md). Used by the frontend."""
     enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
@@ -270,17 +301,9 @@ async def dicom_move_file(
     tmp_path.write_bytes(await file.read())
 
     items = _build_export_items(str(tmp_path))
-    return StreamingResponse(
-        run_batch_job(
-            job_id, items, stage='export',
-            worker=_dicom_move_worker(destination, submitted_by=username),
-            status_db=status_db,
-            description=f"Batch export to {destination}",
-            created_by=username,
-            project_id=project_id,
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+    return _enqueue_export_job(
+        job_id, items, kind="dicom_move", description=f"Batch export to {destination}",
+        project_id=project_id, username=username, params={"destination": destination},
     )
 
 
@@ -292,7 +315,8 @@ async def proknow_upload_file(
     username: str = Form(...),
     collection: str = Form(..., description="ProKnow collection name"),
 ):
-    """Accept a CSV file upload and stream ProKnow upload progress via SSE. Used by the frontend."""
+    """Accept a CSV file upload and enqueue a ProKnow upload batch job for
+    backend/worker.py to execute (docs/worker-queue-design.md). Used by the frontend."""
     enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
@@ -300,17 +324,9 @@ async def proknow_upload_file(
     tmp_path.write_bytes(await file.read())
 
     items = _build_export_items(str(tmp_path))
-    return StreamingResponse(
-        run_batch_job(
-            job_id, items, stage='export',
-            worker=_proknow_worker(collection, submitted_by=username),
-            status_db=status_db,
-            description=f"Batch ProKnow upload to {collection}",
-            created_by=username,
-            project_id=project_id,
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+    return _enqueue_export_job(
+        job_id, items, kind="proknow_upload", description=f"Batch ProKnow upload to {collection}",
+        project_id=project_id, username=username, params={"collection": collection},
     )
 
 
@@ -455,7 +471,10 @@ async def dicom_move_uids_file(
     """
     C-MOVE specific studies or series identified by DICOM UIDs.
     Accepts the CSV produced by the Studies page (already PACS-filtered if requested).
-    Deduplicates rows before moving.
+    Deduplicates rows before moving. Enqueues for backend/worker.py to
+    execute (docs/worker-queue-design.md) -- has no frontend caller today
+    (see CLAUDE.md's known-gaps notes), but is real, tested backend
+    functionality, converted the same way as the other two export flows.
     """
     enforcement.require_project_member(project_id, username)
     tmp_dir = Path("./tmp")
@@ -464,23 +483,19 @@ async def dicom_move_uids_file(
     tmp_path.write_bytes(await file.read())
 
     items = _build_uid_items(str(tmp_path), level)
-
-    return StreamingResponse(
-        run_batch_job(
-            job_id, items, stage='export',
-            worker=_uid_move_worker(destination, submitted_by=username),
-            status_db=status_db,
-            description=f"UID C-MOVE ({level}) to {destination}",
-            created_by=username,
-            project_id=project_id,
-        ),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"},
+    return _enqueue_export_job(
+        job_id, items, kind="uid_move", description=f"UID C-MOVE ({level}) to {destination}",
+        project_id=project_id, username=username, params={"destination": destination},
     )
 
 
 @router.post("/cancel/{job_id}")
 async def cancel_export(job_id: str):
     status_db.cancel_job(job_id)
+    # Also flip any still-queued tasks straight to 'cancelled' -- see the
+    # identical comment on retrieve/endpoints.py's cancel_import. A no-op
+    # for a job that never went through the queue (e.g. the JSON-bodied
+    # dicom_move/proknow_upload, still on the synchronous path).
+    tasks_db.cancel_queued(job_id)
     logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}

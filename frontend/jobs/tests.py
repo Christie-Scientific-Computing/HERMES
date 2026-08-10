@@ -9,7 +9,7 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 
 JOB_ID = "job-abc"
@@ -215,9 +215,10 @@ class PatientDetailTests(_StubbedBackend):
 
 class CollectDataQueueTests(_StubbedBackend):
     """
-    settings.HERMES_USE_QUEUE (docs/worker-queue-design.md): collect_data
-    posts straight to backend_client.batch_import_file instead of staging
-    via session, for both the single-patient and batch (CSV upload) modes.
+    collect_data posts straight to backend_client.batch_import_file
+    (docs/worker-queue-design.md) -- for both the single-patient and batch
+    (CSV upload) modes. No more session staging: every submission is fully
+    handed off to the backend before this view returns.
     """
 
     def setUp(self):
@@ -225,7 +226,6 @@ class CollectDataQueueTests(_StubbedBackend):
         self.backend.list_user_active_projects.return_value = [{"project_id": PROJECT_ID, "title": "P"}]
         self.backend.batch_import_file.return_value = {"job_id": "enqueued-job-id", "total": 1}
 
-    @override_settings(HERMES_USE_QUEUE=True)
     def test_single_mode_enqueues_and_stays_on_page(self):
         resp = self.client.post(reverse("jobs:collect_data"), {
             "mode": "single", "mrn": "1001", "import_level": "Planning data", "project_id": PROJECT_ID,
@@ -240,10 +240,9 @@ class CollectDataQueueTests(_StubbedBackend):
         self.assertEqual(kwargs["username"], self.username)
         self.assertEqual(kwargs["import_level"], "Planning data")
 
-        # nothing staged -- the queue path never uses the pending_job session dance
+        # nothing staged -- there's no session dance to check anymore
         self.assertEqual([k for k in self.client.session.keys() if k.startswith("pending_job:")], [])
 
-    @override_settings(HERMES_USE_QUEUE=True)
     def test_batch_mode_enqueues_and_redirects_to_watch(self):
         csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n1002\n", content_type="text/csv")
         resp = self.client.post(reverse("jobs:collect_data"), {
@@ -253,16 +252,13 @@ class CollectDataQueueTests(_StubbedBackend):
         kwargs = self.backend.batch_import_file.call_args.kwargs
         self.assertEqual(kwargs["filename"], "patients.csv")
         self.assertEqual(kwargs["content"], b"patient_id\n1001\n1002\n")
-        # _enqueue_import mints job_id client-side and hands it to the
-        # backend (same pattern _stage_batch_job already uses) -- the
-        # backend's queue path just echoes it back, so the redirect must
-        # target whatever job_id was actually sent, not a value read back
-        # out of the (mocked) response.
+        # _enqueue_batch_job mints job_id client-side and hands it to the
+        # backend; the backend's queue path just echoes it back, so the
+        # redirect must target whatever job_id was actually sent, not a
+        # value read back out of the (mocked) response.
         self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
                               fetch_redirect_response=False)
-        self.assertEqual([k for k in self.client.session.keys() if k.startswith("pending_job:")], [])
 
-    @override_settings(HERMES_USE_QUEUE=True)
     def test_batch_mode_backend_error_shows_message_not_redirect(self):
         self.backend.batch_import_file.side_effect = _FakeBackendError("Could not read CSV")
         csv_file = SimpleUploadedFile("patients.csv", b"garbage", content_type="text/csv")
@@ -272,29 +268,59 @@ class CollectDataQueueTests(_StubbedBackend):
         self.assertEqual(resp.status_code, 200)  # re-renders the form, no redirect
         self.assertContains(resp, "Could not read CSV")
 
-    def test_flag_unset_still_uses_the_staged_session_path(self):
-        """Default (HERMES_USE_QUEUE unset/False): unchanged behaviour --
-        batch_import_file is never called directly; the job is staged for
-        job_stream to POST later instead."""
+
+class RetrieveDataQueueTests(_StubbedBackend):
+    """retrieve_data's DICOM/ProKnow export tabs, converted the same way
+    collect_data's import tab was -- see CollectDataQueueTests."""
+
+    def setUp(self):
+        super().setUp()
+        self.backend.list_user_active_projects.return_value = [{"project_id": PROJECT_ID, "title": "P"}]
+        self.backend.get_orthanc_modalities.return_value = ["AE1"]
+        self.backend.get_proknow_collections.return_value = ["Collection1"]
+        self.backend.dicom_move_file.return_value = {"job_id": "enqueued-dicom-job", "total": 1}
+        self.backend.proknow_upload_file.return_value = {"job_id": "enqueued-proknow-job", "total": 1}
+
+    def test_dicom_mode_enqueues_and_redirects_to_watch(self):
         csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:collect_data"), {
-            "mode": "batch", "file": csv_file, "import_level": "Planning data", "project_id": PROJECT_ID,
+        resp = self.client.post(reverse("jobs:retrieve_data"), {
+            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
         })
-        self.assertEqual(resp.status_code, 302)
-        self.backend.batch_import_file.assert_not_called()
-        pending_keys = [k for k in self.client.session.keys() if k.startswith("pending_job:")]
-        self.assertEqual(len(pending_keys), 1)
+        kwargs = self.backend.dicom_move_file.call_args.kwargs
+        self.assertEqual(kwargs["filename"], "patients.csv")
+        self.assertEqual(kwargs["content"], b"patient_id\n1001\n")
+        self.assertEqual(kwargs["destination"], "AE1")
+        self.assertEqual(kwargs["username"], self.username)
+        self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
+                              fetch_redirect_response=False)
+
+    def test_proknow_mode_enqueues_and_redirects_to_watch(self):
+        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:retrieve_data"), {
+            "mode": "proknow", "file": csv_file, "collection": "Collection1", "project_id": PROJECT_ID,
+        })
+        kwargs = self.backend.proknow_upload_file.call_args.kwargs
+        self.assertEqual(kwargs["filename"], "patients.csv")
+        self.assertEqual(kwargs["collection"], "Collection1")
+        self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
+                              fetch_redirect_response=False)
+
+    def test_dicom_mode_backend_error_shows_message_not_redirect(self):
+        self.backend.dicom_move_file.side_effect = _FakeBackendError("Could not read CSV")
+        csv_file = SimpleUploadedFile("patients.csv", b"garbage", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:retrieve_data"), {
+            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Could not read CSV")
 
 
-class JobWatchFallbackTests(_StubbedBackend):
-    """
-    job_watch's fallback for a job_id with no `pending_job` session entry --
-    a job enqueued directly onto the backend's queue (HERMES_USE_QUEUE)
-    never stages one. Falls back to the same live visibility check
-    job_detail uses (_job_is_visible_to via backend_client.job_summary).
-    """
+class JobWatchTests(_StubbedBackend):
+    """job_watch's live visibility check (_user_can_watch_job, mirroring
+    job_detail's _job_is_visible_to) -- re-checked on every request rather
+    than trusting anything from submission time."""
 
-    def test_visible_queued_job_renders(self):
+    def test_visible_job_renders(self):
         self.backend.job_summary.return_value = {"summary": [], "project_id": PROJECT_ID}
         resp = self.client.get(reverse("jobs:job_watch", args=["queued-job-id"]))
         self.assertEqual(resp.status_code, 200)
@@ -312,35 +338,23 @@ class JobWatchFallbackTests(_StubbedBackend):
         resp = self.client.get(reverse("jobs:job_watch", args=["someone-elses-job-id"]))
         self.assertEqual(resp.status_code, 404)
 
-    def test_pending_session_entry_still_takes_priority(self):
-        """A staged (non-queue) job must keep rendering via its session
-        entry, never falling through to the backend visibility check."""
-        session = self.client.session
-        session["pending_job:staged-job-id"] = {"kind": "export_dicom", "path": "/tmp/x.csv",
-                                                  "project_id": PROJECT_ID, "username": self.username}
-        session.save()
-        self.backend.job_summary.side_effect = _FakeBackendError("should never be called")
-        resp = self.client.get(reverse("jobs:job_watch", args=["staged-job-id"]))
-        self.assertEqual(resp.status_code, 200)
-
 
 class JobStreamObserverTests(_StubbedBackend):
-    """job_stream's fallback to relaying the backend's observer stream
-    (GET /results/job/{job_id}/stream) for a job with no pending_job
-    session entry."""
+    """job_stream relays the backend's observer stream (GET
+    /results/job/{job_id}/stream)."""
 
     def setUp(self):
         super().setUp()
 
-        async def _fake_stream_sse(path, *, data=None, files=None, method="POST"):
-            self.stream_sse_call = {"path": path, "data": data, "files": files, "method": method}
+        async def _fake_stream_sse(path):
+            self.stream_sse_call = {"path": path}
             yield b'data: {"type": "start", "total": 1}\n\n'
             yield b'data: {"type": "done"}\n\n'
 
         self.backend.stream_sse = _fake_stream_sse
         self.stream_sse_call = None
 
-    def test_relays_observer_stream_for_unstaged_job(self):
+    def test_relays_observer_stream(self):
         from asgiref.sync import async_to_sync
 
         self.backend.job_summary.return_value = {"summary": [], "project_id": PROJECT_ID}
@@ -353,7 +367,6 @@ class JobStreamObserverTests(_StubbedBackend):
 
         body = async_to_sync(_collect)(resp.streaming_content).decode()
 
-        self.assertEqual(self.stream_sse_call["method"], "GET")
         self.assertEqual(self.stream_sse_call["path"], "/results/job/queued-job-id/stream")
         self.assertIn("event: start", body)
         self.assertIn("event: done", body)

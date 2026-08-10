@@ -9,17 +9,27 @@ IS the live re-check that a submitted project_id is one the user currently
 has active access to -- there's nothing cached/trusted from earlier in the
 request or from session.
 
-The two-phase pattern for batch (file-upload) jobs deliberately separates
-the mutating action from the live-progress view: `import_batch`/
-`export_dicom`/`export_proknow` (and, now, `import_single`, staging a
-one-row CSV the same way) are normal CSRF-protected POSTs that stage the
-uploaded file server-side (under MEDIA_ROOT/tmp_uploads) and mint a fresh,
-unguessable job_id, stored only in *this browser's own session*
-(`pending_job:<job_id>`). `job_stream` is the GET-only relay a browser's
-EventSource connects to -- it can only ever act on a job_id that this same
-session already staged via its own POST, so a third party can't trigger a
-real import/export by getting a victim to load a crafted GET URL (there's
-nothing in the session to act on).
+Every batch job (single/batch import, DICOM export, ProKnow export) is
+enqueued directly onto the backend's task queue (docs/worker-queue-design.md):
+the submitting POST view (collect_data/retrieve_data) calls straight through
+to the matching backend_client.*_file function, which returns a job_id the
+moment the backend has finished enqueueing every row -- nothing is staged to
+local disk or session first. job_watch/job_stream both re-check live
+visibility on every request (_user_can_watch_job, mirroring job_detail's
+_job_is_visible_to) rather than trusting anything cached from submission
+time, and job_stream relays the backend's observer stream (GET
+/results/job/{job_id}/stream). Closing the tab, or never opening job_stream
+at all, has no effect on whether the job actually runs -- a worker process
+executes it independently either way.
+
+(This project used to stage batch uploads under MEDIA_ROOT/tmp_uploads and a
+`pending_job:<job_id>` session entry, POSTing the file only once job_stream's
+EventSource connected -- a two-phase design that made a GET request safe by
+construction, since there was nothing to act on until this same browser's own
+earlier POST had staged it. The queue makes that unnecessary: the job is
+already fully submitted and running independently by the time job_watch/
+job_stream are ever reached, so there's nothing left for a GET to trigger --
+the live visibility re-check on every request is what does that job now.)
 
 `job_stream` is the one async view in this app: it opens the backend's SSE
 endpoint via hermes_frontend.backend_client.stream_sse and re-frames every
@@ -27,28 +37,13 @@ endpoint via hermes_frontend.backend_client.stream_sse and re-frames every
 JSON body's own "type" field) before relaying it to the browser, so plain
 EventSource.addEventListener('progress', ...) etc. works without any
 hand-rolled per-message dispatch.
-
-When settings.HERMES_USE_QUEUE is set (docs/worker-queue-design.md), the
-import flow bypasses the two-phase staging dance above entirely:
-collect_data posts straight to the backend (_enqueue_import), which
-enqueues the job and hands back a job_id immediately -- nothing is staged
-under MEDIA_ROOT or in the session. job_watch/job_stream both fall back to
-a live backend visibility check (_user_can_watch_job) for any job_id with
-no `pending_job` session entry, and job_stream relays the backend's
-observer stream (GET /results/job/{job_id}/stream) instead of lazily
-POSTing a staged file. Export stays on the staged/relay path above until a
-later step converts it too.
 """
 import json
 import uuid
-from pathlib import Path
-from typing import AsyncIterator
 
 from asgiref.sync import sync_to_async
-from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.core.files.base import ContentFile
 from django.http import Http404, StreamingHttpResponse
 from django.shortcuts import redirect, render
 
@@ -94,44 +89,27 @@ def dashboard(request):
     return render(request, "jobs/dashboard.html", {"projects": projects, "recent_jobs": jobs[:10]})
 
 
-def _enqueue_import(content: bytes, filename: str, project_id: str, import_level: str, username: str) -> str:
+def _enqueue_batch_job(post_fn, content: bytes, filename: str, project_id: str, username: str, **extra_fields) -> str:
     """
-    Queue path (settings.HERMES_USE_QUEUE): POST directly to the backend's
-    batch_import_file, which -- with the backend's matching flag set --
-    enqueues onto the tasks table and returns a job_id immediately. Unlike
-    _stage_batch_job below, nothing is written to local disk or session:
-    the backend already has everything it needs to run this job once this
-    call returns, so job_watch/job_stream just need to know the job_id to
-    watch, not how to submit it.
+    Mint a job_id and hand it, along with the upload's raw bytes, straight
+    to one of backend_client's *_file functions (batch_import_file/
+    dicom_move_file/proknow_upload_file) -- shared by collect_data and
+    retrieve_data below, since all three enqueue calls have the same shape
+    and differ only in which backend endpoint and which kind-specific field
+    (import_level/destination/collection) they carry. Nothing is written to
+    local disk or session: the backend already has everything it needs to
+    run this job once this call returns, so job_watch/job_stream only need
+    the job_id to watch, not how to submit it.
     """
     job_id = str(uuid.uuid4())
-    backend_client.batch_import_file(
-        job_id=job_id, filename=filename, content=content,
-        project_id=project_id, username=username, import_level=import_level,
-    )
-    return job_id
-
-
-def _stage_batch_job(request, kind: str, uploaded_file, extra: dict, project_id: str) -> str:
-    job_id = str(uuid.uuid4())
-    tmp_dir = Path(settings.MEDIA_ROOT) / "tmp_uploads"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = tmp_dir / f"{job_id}_{uploaded_file.name}"
-    with open(tmp_path, "wb") as f:
-        for chunk in uploaded_file.chunks():
-            f.write(chunk)
-    request.session[f"pending_job:{job_id}"] = {
-        "kind": kind, "path": str(tmp_path), "project_id": project_id,
-        "username": request.user.username, **extra,
-    }
-    request.session.modified = True
+    post_fn(job_id=job_id, filename=filename, content=content, project_id=project_id, username=username, **extra_fields)
     return job_id
 
 
 @login_required
 def collect_data(request):
     """Single-patient and batch (CSV) import, combined on one page as two
-    tabs -- purely a presentation merge, each mode's staging logic is
+    tabs -- purely a presentation merge, each mode's submission logic is
     unchanged from when they were separate pages."""
     projects = _project_choices_for(request.user)
     single_form = SingleImportForm()
@@ -148,19 +126,12 @@ def collect_data(request):
             single_form.set_project_choices(projects)
             if single_form.is_valid():
                 csv_bytes = f"patient_id\n{single_form.cleaned_data['mrn']}\n".encode()
-                project_id = single_form.cleaned_data["project_id"]
-                import_level = single_form.cleaned_data["import_level"]
                 try:
-                    if settings.HERMES_USE_QUEUE:
-                        job_id = _enqueue_import(
-                            csv_bytes, "single_patient.csv", project_id, import_level, request.user.username,
-                        )
-                    else:
-                        job_id = _stage_batch_job(
-                            request, kind="import_batch",
-                            uploaded_file=ContentFile(csv_bytes, name="single_patient.csv"),
-                            extra={"import_level": import_level}, project_id=project_id,
-                        )
+                    job_id = _enqueue_batch_job(
+                        backend_client.batch_import_file, csv_bytes, "single_patient.csv",
+                        single_form.cleaned_data["project_id"], request.user.username,
+                        import_level=single_form.cleaned_data["import_level"],
+                    )
                     single_form = SingleImportForm()  # fresh form, ready for another entry
                     single_form.set_project_choices(projects)
                 except backend_client.BackendError as e:
@@ -169,19 +140,13 @@ def collect_data(request):
             batch_form = BatchImportForm(request.POST, request.FILES)
             batch_form.set_project_choices(projects)
             if batch_form.is_valid():
-                project_id = batch_form.cleaned_data["project_id"]
-                import_level = batch_form.cleaned_data["import_level"]
+                uploaded = batch_form.cleaned_data["file"]
                 try:
-                    if settings.HERMES_USE_QUEUE:
-                        uploaded = batch_form.cleaned_data["file"]
-                        job_id = _enqueue_import(
-                            uploaded.read(), uploaded.name, project_id, import_level, request.user.username,
-                        )
-                    else:
-                        job_id = _stage_batch_job(
-                            request, kind="import_batch", uploaded_file=batch_form.cleaned_data["file"],
-                            extra={"import_level": import_level}, project_id=project_id,
-                        )
+                    job_id = _enqueue_batch_job(
+                        backend_client.batch_import_file, uploaded.read(), uploaded.name,
+                        batch_form.cleaned_data["project_id"], request.user.username,
+                        import_level=batch_form.cleaned_data["import_level"],
+                    )
                     return redirect("jobs:job_watch", job_id=job_id)
                 except backend_client.BackendError as e:
                     messages.error(request, f"Could not start import: {e.detail}")
@@ -228,23 +193,31 @@ def retrieve_data(request):
             dicom_form.set_project_choices(projects)
             dicom_form.set_destination_choices(modalities)
             if dicom_form.is_valid():
-                job_id = _stage_batch_job(
-                    request, kind="export_dicom", uploaded_file=dicom_form.cleaned_data["file"],
-                    extra={"destination": dicom_form.cleaned_data["destination"]},
-                    project_id=dicom_form.cleaned_data["project_id"],
-                )
-                return redirect("jobs:job_watch", job_id=job_id)
+                uploaded = dicom_form.cleaned_data["file"]
+                try:
+                    job_id = _enqueue_batch_job(
+                        backend_client.dicom_move_file, uploaded.read(), uploaded.name,
+                        dicom_form.cleaned_data["project_id"], request.user.username,
+                        destination=dicom_form.cleaned_data["destination"],
+                    )
+                    return redirect("jobs:job_watch", job_id=job_id)
+                except backend_client.BackendError as e:
+                    messages.error(request, f"Could not start export: {e.detail}")
         elif mode == "proknow":
             proknow_form = ProKnowExportForm(request.POST, request.FILES)
             proknow_form.set_project_choices(projects)
             proknow_form.set_collection_choices(collections)
             if proknow_form.is_valid():
-                job_id = _stage_batch_job(
-                    request, kind="export_proknow", uploaded_file=proknow_form.cleaned_data["file"],
-                    extra={"collection": proknow_form.cleaned_data["collection"]},
-                    project_id=proknow_form.cleaned_data["project_id"],
-                )
-                return redirect("jobs:job_watch", job_id=job_id)
+                uploaded = proknow_form.cleaned_data["file"]
+                try:
+                    job_id = _enqueue_batch_job(
+                        backend_client.proknow_upload_file, uploaded.read(), uploaded.name,
+                        proknow_form.cleaned_data["project_id"], request.user.username,
+                        collection=proknow_form.cleaned_data["collection"],
+                    )
+                    return redirect("jobs:job_watch", job_id=job_id)
+                except backend_client.BackendError as e:
+                    messages.error(request, f"Could not start export: {e.detail}")
 
     return render(request, "jobs/retrieve_data.html", {
         "dicom_form": dicom_form, "proknow_form": proknow_form,
@@ -255,18 +228,16 @@ def retrieve_data(request):
 
 def _user_can_watch_job(request, job_id: str) -> bool:
     """
-    Live visibility check for a job with no `pending_job` session entry --
-    i.e. one enqueued directly onto the backend's queue
-    (settings.HERMES_USE_QUEUE, see collect_data/_enqueue_import), which
-    never goes through the staging dance at all, so there's nothing in the
-    session to check. Mirrors job_detail's own _job_is_visible_to, checked
-    live rather than trusting anything cached from earlier in the request.
+    Live visibility check backing both job_watch and job_stream: mirrors
+    job_detail's own _job_is_visible_to, re-checked on every request rather
+    than trusting anything cached from submission time -- the job may have
+    been enqueued minutes ago by this browser, or be someone else's job_id
+    typed/guessed into the URL.
 
     Plain sync function, deliberately -- job_stream (async) calls this via
-    sync_to_async for the same reason _load_pending_job does:
-    request.user/request.session both trigger a synchronous DB read on
-    first touch, which is disallowed directly inside an async def view.
-    job_watch (a normal sync view) calls it directly.
+    sync_to_async: request.user/request.session both trigger a synchronous
+    DB read on first touch, which is disallowed directly inside an async
+    def view. job_watch (a normal sync view) calls it directly.
     """
     if not request.user.is_authenticated:
         return False
@@ -280,113 +251,40 @@ def _user_can_watch_job(request, job_id: str) -> bool:
 
 @login_required
 def job_watch(request, job_id):
-    pending = request.session.get(f"pending_job:{job_id}")
-    if pending:
-        return render(request, "jobs/job_watch.html", {"job_id": job_id, "kind": pending["kind"]})
-
     if not _user_can_watch_job(request, job_id):
-        raise Http404("Unknown job, or its progress stream has already completed")
-    return render(request, "jobs/job_watch.html", {"job_id": job_id, "kind": "import_batch"})
-
-
-def _build_stream_request(pending: dict, job_id: str) -> tuple[str, dict, dict]:
-    path_obj = Path(pending["path"])
-    file_bytes = path_obj.read_bytes()
-    files = {"file": (path_obj.name, file_bytes, "text/csv")}
-    common = {"job_id": job_id, "project_id": pending["project_id"], "username": pending["username"]}
-
-    if pending["kind"] == "import_batch":
-        return "/import/batch_import_file", {**common, "import_level": pending["import_level"]}, files
-    if pending["kind"] == "export_dicom":
-        return "/export/dicom_move_file", {**common, "destination": pending["destination"]}, files
-    if pending["kind"] == "export_proknow":
-        return "/export/proknow_upload_file", {**common, "collection": pending["collection"]}, files
-    raise ValueError(f"unknown pending job kind {pending['kind']!r}")
-
-
-def _cleanup_pending_job(request, job_id: str) -> None:
-    pending = request.session.pop(f"pending_job:{job_id}", None)
-    request.session.modified = True
-    if pending:
-        Path(pending["path"]).unlink(missing_ok=True)
-
-
-def _load_pending_job(request, job_id: str):
-    """
-    Django's lazy `request.user`/`request.session` both trigger a
-    synchronous DB read on first access -- disallowed directly inside an
-    async view (SynchronousOnlyOperation). Do that first access here, in
-    one sync_to_async-wrapped call, so job_stream itself never touches
-    either before they're already resolved.
-    """
-    if not request.user.is_authenticated:
-        return None
-    return request.session.get(f"pending_job:{job_id}")
-
-
-async def _relay_sse(source: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-    """
-    Re-frame a raw `data: {...}` SSE byte stream with a matching
-    `event: <type>` line per message, derived from each payload's own
-    "type" field, so the browser's plain
-    `EventSource.addEventListener('progress', ...)` etc. works without any
-    hand-rolled per-message dispatch. Shared by job_stream's two relay
-    modes below (staged-upload POST relay, and the queue's observer GET
-    relay) -- the re-framing logic itself doesn't care which backend
-    endpoint `source` came from.
-    """
-    buffer = b""
-    async for chunk in source:
-        buffer += chunk
-        while b"\n\n" in buffer:
-            raw_event, buffer = buffer.split(b"\n\n", 1)
-            line = raw_event.decode(errors="replace").strip()
-            if not line.startswith("data: "):
-                continue
-            payload = line[len("data: "):]
-            try:
-                event_type = json.loads(payload).get("type", "message")
-            except Exception:
-                event_type = "message"
-            yield f"event: {event_type}\ndata: {payload}\n\n".encode()
+        raise Http404("Unknown job, or you don't have access to it")
+    return render(request, "jobs/job_watch.html", {"job_id": job_id})
 
 
 async def job_stream(request, job_id):
-    pending = await sync_to_async(_load_pending_job)(request, job_id)
-
-    if pending is not None:
-        # request.user is already resolved (cached on the lazy object) by
-        # the call above, so reading .username here doesn't hit the DB again.
-        active = await sync_to_async(backend_client.list_user_active_projects)(request.user.username)
-        if not any(p["project_id"] == pending["project_id"] for p in active):
-            raise Http404("No longer an active member of this project")
-
-        async def relay():
-            try:
-                path, data, files = await sync_to_async(_build_stream_request)(pending, job_id)
-                async for framed in _relay_sse(backend_client.stream_sse(path, data=data, files=files)):
-                    yield framed
-            except backend_client.BackendError as e:
-                error_payload = json.dumps({"type": "error", "error": e.detail})
-                yield f"event: error\ndata: {error_payload}\n\n".encode()
-                yield f"event: done\ndata: {{\"type\": \"done\"}}\n\n".encode()
-            finally:
-                await sync_to_async(_cleanup_pending_job)(request, job_id)
-
-        return StreamingHttpResponse(relay(), content_type="text/event-stream", headers={"Cache-Control": "no-cache"})
-
-    # No staged session entry: a job enqueued directly onto the backend's
-    # queue (settings.HERMES_USE_QUEUE, see collect_data/_enqueue_import)
-    # never goes through the pending_job staging dance -- relay the
-    # backend's observer stream instead of lazily POSTing a staged file.
+    """
+    Relays the backend's observer stream (GET /results/job/{job_id}/stream,
+    docs/worker-queue-design.md) to the browser, re-framing every raw
+    `data: {...}` line with a matching `event: <type>` line (derived from
+    the payload's own "type" field) so the browser's plain
+    EventSource.addEventListener('progress', ...) etc. works without any
+    hand-rolled per-message dispatch.
+    """
     if not await sync_to_async(_user_can_watch_job)(request, job_id):
-        raise Http404("Unknown or already-completed job")
+        raise Http404("Unknown job, or you don't have access to it")
 
-    async def observe_relay():
-        async for framed in _relay_sse(backend_client.stream_sse(f"/results/job/{job_id}/stream", method="GET")):
-            yield framed
+    async def relay():
+        buffer = b""
+        async for chunk in backend_client.stream_sse(f"/results/job/{job_id}/stream"):
+            buffer += chunk
+            while b"\n\n" in buffer:
+                raw_event, buffer = buffer.split(b"\n\n", 1)
+                line = raw_event.decode(errors="replace").strip()
+                if not line.startswith("data: "):
+                    continue
+                payload = line[len("data: "):]
+                try:
+                    event_type = json.loads(payload).get("type", "message")
+                except Exception:
+                    event_type = "message"
+                yield f"event: {event_type}\ndata: {payload}\n\n".encode()
 
-    return StreamingHttpResponse(observe_relay(), content_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    return StreamingHttpResponse(relay(), content_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @login_required

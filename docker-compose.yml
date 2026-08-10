@@ -48,6 +48,31 @@ services:
       - /home/topol/Certificates/Server/cht-topol_xchristie_nhs_uk.crt:/ssl/cert.crt:ro
       - /home/topol/Certificates/Server/cht-topol_xchristie_nhs_uk.key:/ssl/cert.key:ro
 
+  worker:
+    # Claims tasks from the `tasks` table and executes them
+    # (docs/worker-queue-design.md) -- the same image as `backend`, just a
+    # different command/entrypoint. Needs the same env/volumes as `backend`
+    # since it builds Importer/Exporter/Orthanc/ProKnow clients directly,
+    # the same way the API process does.
+    image: ghcr.io/christie-scientific-computing/hermes:v0.1.3
+    command: python -m backend.worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://hermes:hermes@hermes-db:5432/hermes
+      # ANON_DB_HOST/PORT/NAME/USER/PASS: see `backend`'s own comment above.
+    depends_on:
+      - hermes-db
+    volumes:
+      - type: bind
+        source: ./credentials.json
+        target: /app/credentials.json
+        read_only: true
+      - /home/topol/Certificates/Server/cht-topol_xchristie_nhs_uk.crt:/ssl/cert.crt:ro
+      - /home/topol/Certificates/Server/cht-topol_xchristie_nhs_uk.key:/ssl/cert.key:ro
+    # Scale with `docker compose up --scale worker=3`. Start at 1: N workers
+    # means N concurrent ProKnow/Orthanc/Mosaiq sessions, with no ceiling
+    # enforced anywhere yet (docs/worker-queue-design.md).
+
   streamlit:
     image: ghcr.io/christie-scientific-computing/hermes:v0.1.3
     command: streamlit run Home.py --server.address 0.0.0.0 --server.port 8501 --server.headless true

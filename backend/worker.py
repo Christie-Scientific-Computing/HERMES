@@ -26,8 +26,10 @@ from backend.src.db import init_pool
 from backend.src.status.tasks_db import TasksDB
 from backend.src.status.db_client import StatusDB
 from backend.src.projects import enforcement
+from backend.src.common.sse import BatchItem
 from backend.src.retrieve.logic import Importer
 from backend.src.retrieve.endpoints import Response as ImportResponse
+from backend.src.export import endpoints as export_endpoints
 
 load_dotenv()
 
@@ -73,14 +75,50 @@ def _run_import(task: dict) -> dict:
     return ImportResponse(mrn=task["real_id"], **res).model_dump(exclude={"mrn"}, exclude_none=True)
 
 
-# kind -> factory dispatch. Only "import" is wired today (step 2 of
-# docs/worker-queue-design.md's sequencing); the three export flows join
-# this dict in a later step, once their endpoints are converted to enqueue
-# rather than run inline. Extending with a new flow -- or, later, a
-# per-user destination-allow-list check (docs/safety-plan.md §A) -- means
-# adding one entry/one call here, not touching the claim/execute loop below.
+def _reconstruct_batch_item(task: dict) -> BatchItem:
+    """Faithfully rebuild the BatchItem the export worker factories below
+    expect, from a claimed task row -- `extra` matters here specifically
+    for the UID-move flow, whose "identifier" isn't a patient id at all
+    (it reads item.extra["study_uid"]/["series_uid"])."""
+    return BatchItem(
+        real_id=task["real_id"], display_id=task["display_id"], status_mrn=task["status_mrn"],
+        input_path=task["input_path"], extra=task["extra"],
+    )
+
+
+def _run_dicom_move(task: dict) -> dict:
+    item = _reconstruct_batch_item(task)
+    worker_fn = export_endpoints._dicom_move_worker(task["params"]["destination"], submitted_by=task["params"]["username"])
+    return worker_fn(item)
+
+
+def _run_proknow(task: dict) -> dict:
+    item = _reconstruct_batch_item(task)
+    worker_fn = export_endpoints._proknow_worker(task["params"]["collection"], submitted_by=task["params"]["username"])
+    return worker_fn(item)
+
+
+def _run_uid_move(task: dict) -> dict:
+    item = _reconstruct_batch_item(task)
+    worker_fn = export_endpoints._uid_move_worker(task["params"]["destination"], submitted_by=task["params"]["username"])
+    return worker_fn(item)
+
+
+# kind -> factory dispatch. Export handlers reuse export/endpoints.py's own
+# worker factories directly (unlike _run_import, which reimplements
+# _import_worker's body to add per-process Importer caching) -- Exporter
+# needs no such cache (export/logic.py's Exporter.__init__ does no I/O,
+# unlike Importer's), so there's nothing to gain from not reusing them
+# as-is, and every future change to the export Response shape (manifest
+# fields, etc.) is automatically picked up here too. Extending with a new
+# flow -- or, later, a per-user destination-allow-list check
+# (docs/safety-plan.md §A) -- means adding one entry/one call here, not
+# touching the claim/execute loop below.
 _HANDLERS = {
     "import": _run_import,
+    "dicom_move": _run_dicom_move,
+    "proknow_upload": _run_proknow,
+    "uid_move": _run_uid_move,
 }
 
 
