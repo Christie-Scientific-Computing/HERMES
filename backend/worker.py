@@ -87,6 +87,10 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
     job_id, task_id, stage = task["job_id"], task["task_id"], task["stage"]
     status_mrn, display_id = task["status_mrn"], task["display_id"]
     params = task["params"]
+    # claim() set claimed_by to this worker's own id -- reused for the
+    # ownership guards on mark_running/mark_succeeded/mark_failed below,
+    # rather than threading a separate worker_id parameter through.
+    worker_id = task["claimed_by"]
     # This run's attempt number: task["attempts"] is the count of PRIOR
     # failed attempts as of claim time (0 for a first try), so this run is
     # attempt task["attempts"] + 1 -- matches add_event's 1-indexed default.
@@ -109,7 +113,7 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
         )
         return
 
-    if not tasks_db.mark_running(task_id):
+    if not tasks_db.mark_running(task_id, worker_id):
         # Lost a race with a reaper or another worker in the tiny window
         # between claim() and here -- the task is no longer ours to run.
         logger.warning("Task %s (job %s) could not transition to running; skipping", task_id, job_id)
@@ -122,7 +126,7 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
         details = handler(task)
     except Exception as e:
         logger.exception("Task %s (job %s, display_id=%s) failed", task_id, job_id, display_id)
-        outcome = tasks_db.mark_failed(task_id, str(e))
+        outcome = tasks_db.mark_failed(task_id, worker_id, str(e))
         if outcome != "unchanged":
             status_db.add_event(
                 job_id, status_mrn, stage=stage, event_type="failure",
@@ -130,7 +134,7 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
             )
         return
 
-    if tasks_db.mark_succeeded(task_id, details):
+    if tasks_db.mark_succeeded(task_id, worker_id, details):
         status_db.add_event(
             job_id, status_mrn, stage=stage, event_type="success",
             details=details, attempt=attempt, task_id=task_id,

@@ -222,6 +222,15 @@ async def batch_import_file(
             job_id, description=f"Batch import from {tmp_path}",
             created_by=username, project_id=project_id,
         )
+        # Registered here, at enqueue time, rather than by the worker as it
+        # picks each task up: every submitted patient is already fully known
+        # from `items`, and StatusDB.count_imported_patients' "M" (submitted
+        # count) denominator should reflect what was actually submitted
+        # regardless of whether/when a worker gets around to running it --
+        # not silently read as 0 for a job whose tasks haven't been claimed
+        # yet.
+        for item in items:
+            status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
         tasks_db.enqueue(
             job_id, items, kind="import", stage="retrieve",
             params={"import_level": import_level, "project_id": project_id, "username": username},

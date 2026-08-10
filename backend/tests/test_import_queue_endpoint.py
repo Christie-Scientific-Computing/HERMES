@@ -29,6 +29,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.src.retrieve import endpoints as retrieve_endpoints
+from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 
 ANON_MRN = "1001"
@@ -67,6 +68,12 @@ def test_batch_import_file_enqueues_when_queue_flag_set(client, monkeypatch, act
     assert task["stage"] == "retrieve"
     assert task["real_id"] == REAL_MRN          # real id, never the submitted anon id
     assert task["display_id"] == ANON_MRN
+
+    # add_patient is called at enqueue time (not deferred to the worker), so
+    # the "M" (submitted) half of the "N/M imported" stat is correct
+    # immediately, regardless of whether/when a worker claims the task.
+    _, submitted_count = StatusDB().count_imported_patients(job_id)
+    assert submitted_count == 1
     assert task["status_mrn"] == REAL_MRN
     assert task["params"] == {"import_level": "Planning data", "project_id": project_id, "username": username}
 
