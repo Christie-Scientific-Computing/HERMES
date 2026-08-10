@@ -138,6 +138,20 @@ BACKEND_URL = f"http://{BACKEND_URI}:{BACKEND_PORT}"
 # HERMES_INTERNAL_KEY. Unset in both places -> no-op (dev/internal-only).
 HERMES_INTERNAL_KEY = os.getenv("HERMES_INTERNAL_KEY")
 
+# Must match the backend's own HERMES_USE_QUEUE (docs/worker-queue-design.md).
+# Only the import flow (jobs/views.py's collect_data) reads this today --
+# export stays on the synchronous path until a later step. When True,
+# collect_data posts directly to /import/batch_import_file (which, with the
+# backend's own flag also set, enqueues onto the tasks table and returns
+# {"job_id", "total"} immediately) instead of staging the upload via the
+# pending_job session dance; job_watch/job_stream fall back to relaying the
+# backend's observer stream (GET /results/job/{job_id}/stream) for any job_id
+# that was never staged that way. Mismatched flags (one side set, the other
+# not) will misbehave -- e.g. this True but the backend's False means
+# collect_data expects a JSON receipt but gets an SSE stream instead -- so
+# set both together, the same discipline HERMES_INTERNAL_KEY above requires.
+HERMES_USE_QUEUE = os.getenv("HERMES_USE_QUEUE", "false").lower() == "true"
+
 
 # --- Email ------------------------------------------------------------------
 # No SMTP server exists for this deployment today. Left unconfigured, Django

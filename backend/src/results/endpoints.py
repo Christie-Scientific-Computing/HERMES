@@ -7,16 +7,20 @@ backend must never see a real MRN. Inbound `mrn` path params are the anon
 id the caller submitted and are resolved anon -> real before querying
 StatusDB, which stores the real id internally.
 """
+import asyncio
 import json
 import os
 import logging
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from backend.src.status.db_client import StatusDB
+from backend.src.status.tasks_db import TasksDB
 from backend.src.plans.db_client import PlansDB
 from backend.src.identity import anon
+from backend.src.common.sse import format_sse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/results', tags=['results'])
@@ -25,6 +29,7 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
     try:
         status_db = StatusDB()
+        tasks_db = TasksDB()
         plans_db = PlansDB()
         logger.debug("StatusDB initialized")
     except Exception as e:
@@ -135,6 +140,85 @@ async def job_summary(job_id: str):
     except Exception as e:
         logger.exception("Failed to get job summary: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Poll interval for the observer stream below -- independent of
+# HERMES_WORKER_POLL_INTERVAL (backend/worker.py's own claim-loop idle
+# sleep), since this is how often a browser sees an update, not how often a
+# worker looks for new work.
+_OBSERVER_POLL_INTERVAL = float(os.getenv("HERMES_OBSERVER_POLL_INTERVAL", "1"))
+
+
+async def _observe_job(job_id: str) -> AsyncIterator[str]:
+    """
+    Poll the tasks table (backend/src/status/tasks_db.py) and translate
+    task state transitions into the exact SSE vocabulary
+    templates/cotton/job_progress.html already listens for -- start,
+    progress, success, error, cancelled, done, every event carrying "type".
+    This is the queue-driven counterpart to run_batch_job
+    (backend/src/common/sse.py): that generator emits events as a side
+    effect of doing the work itself; this one only ever *observes* work a
+    worker process (backend/worker.py) is doing independently, so closing
+    this connection (or never opening it) has no effect on whether the job
+    actually runs -- the whole point of the queue.
+
+    Always emits display_id (the anon id, or the same value when
+    anonymisation isn't configured), never status_mrn/the real id -- this
+    endpoint therefore never touches the anon-mapping DB at all, unlike
+    job_patients_summary/patient_timeline elsewhere in this file, which
+    have to explicitly resolve/scrub because they work with real ids.
+    """
+    total = tasks_db.count_tasks(job_id)
+    yield format_sse({"type": "start", "total": total})
+
+    # Tracks each task's last-reported state so a re-read (see
+    # TasksDB.job_progress's docstring for why this can't be filtered at
+    # the SQL layer) only ever produces one event per actual transition.
+    last_state: dict[int, str] = {}
+
+    while True:
+        if status_db.is_cancelled(job_id):
+            yield format_sse({"type": "cancelled"})
+            break
+
+        for row in tasks_db.job_progress(job_id):
+            task_id, state = row["task_id"], row["state"]
+            if last_state.get(task_id) == state:
+                continue
+            last_state[task_id] = state
+
+            if state == "running":
+                yield format_sse({"type": "progress", "current": row["display_id"]})
+            elif state == "succeeded":
+                yield format_sse({"type": "success", "mrn": row["display_id"], **(row["details"] or {})})
+            elif state in ("failed", "cancelled"):
+                yield format_sse({
+                    "type": "error", "mrn": row["display_id"],
+                    "error": row["error_message"] or "Task did not complete",
+                })
+            # "queued"/"claimed" -> no distinct SSE event; "progress" fires
+            # once a task actually starts running, matching the vocabulary
+            # table in docs/worker-queue-design.md.
+
+        if not tasks_db.job_has_pending(job_id):
+            break
+        await asyncio.sleep(_OBSERVER_POLL_INTERVAL)
+
+    yield format_sse({"type": "done"})
+
+
+@router.get('/job/{job_id}/stream')
+async def job_stream(job_id: str):
+    """Live progress for a queue-driven job (docs/worker-queue-design.md) --
+    the observer counterpart to the synchronous SSE stream run_batch_job
+    still serves directly from import/export endpoints. What the frontend's
+    EventSource connects to is unchanged either way; only whether the
+    backend is watching existing work or doing the work itself differs."""
+    if not status_db or not tasks_db:
+        raise HTTPException(status_code=503, detail="Status DB not configured")
+    return StreamingResponse(
+        _observe_job(job_id), media_type="text/event-stream", headers={"Cache-Control": "no-cache"},
+    )
 
 
 @router.get('/job/{job_id}/patients')

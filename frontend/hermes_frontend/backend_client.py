@@ -208,6 +208,30 @@ def find_patient(mrn: str, username: str, import_level: Optional[str] = None) ->
     return _get("/import/find_patient", params=params)
 
 
+def batch_import_file(job_id: str, filename: str, content: bytes, project_id: str,
+                       username: str, import_level: str) -> dict:
+    """
+    Enqueue a batch import job (settings.HERMES_USE_QUEUE path -- see its
+    own docstring; requires the backend's matching HERMES_USE_QUEUE=1).
+    Returns {"job_id", "total"} once the backend has enqueued every row.
+
+    A plain synchronous POST, unlike stream_sse: with the backend's queue
+    flag set, /import/batch_import_file returns a JSON receipt, not an SSE
+    stream, so there's nothing to relay -- the caller (jobs/views.py's
+    collect_data) already has the job_id up front and can redirect straight
+    to job_watch. Takes raw bytes rather than a file path since this path
+    never stages the upload to local disk the way _stage_batch_job does.
+    """
+    resp = httpx.post(
+        f"{settings.BACKEND_URL}/import/batch_import_file",
+        data={"job_id": job_id, "project_id": project_id, "username": username, "import_level": import_level},
+        files={"file": (filename, content, "text/csv")},
+        headers=_headers(), timeout=30,
+    )
+    _raise_for_status(resp)
+    return resp.json()
+
+
 # ---- Export reference data (jobs/ app) ----
 
 def get_orthanc_modalities(username: str) -> list[str]:
@@ -268,12 +292,19 @@ def cancel_export(job_id: str) -> dict:
 
 # ---- SSE batch jobs (jobs/ app) ----
 
-async def stream_sse(path: str, *, data: Optional[dict] = None, files: Optional[dict] = None) -> AsyncIterator[bytes]:
+async def stream_sse(path: str, *, data: Optional[dict] = None, files: Optional[dict] = None,
+                      method: str = "POST") -> AsyncIterator[bytes]:
     """
-    Open a POST to a backend SSE endpoint and yield raw response bytes as
-    they arrive. `data`/`files` become a multipart request when `files` is
-    given (the batch_*_file/dicom_move_file/etc. endpoints), otherwise a
+    Open a request to a backend SSE endpoint and yield raw response bytes
+    as they arrive. `data`/`files` become a multipart request when `files`
+    is given (the batch_*_file/dicom_move_file/etc. endpoints), otherwise a
     plain form/JSON POST is used to match what each backend route expects.
+
+    `method="GET"` (with no data/files) is what jobs/views.py's job_stream
+    uses to relay the queue's observer stream (GET
+    /results/job/{job_id}/stream, docs/worker-queue-design.md) -- a pure
+    read with nothing to submit, unlike every other caller of this
+    function, which POSTs a batch job into existence.
 
     No read timeout: large batch imports run for a long time and must not
     be killed mid-stream by a default httpx timeout (see
@@ -281,7 +312,7 @@ async def stream_sse(path: str, *, data: Optional[dict] = None, files: Optional[
     """
     timeout = httpx.Timeout(10.0, read=None)
     async with httpx.AsyncClient(base_url=settings.BACKEND_URL, timeout=timeout) as client:
-        async with client.stream("POST", path, data=data, files=files, headers=_headers()) as resp:
+        async with client.stream(method, path, data=data, files=files, headers=_headers()) as resp:
             if resp.status_code >= 400:
                 body = await resp.aread()
                 try:
