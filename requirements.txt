@@ -1,9 +1,14 @@
 # HERMES — Python dependencies
-# Covers both the backend (FastAPI) and gateway (FastAPI + Streamlit) packages.
+# Covers the backend (FastAPI), the new frontend_fastapi/ frontend, and the
+# Streamlit-era pages still present pending their own cleanup.
 
 # Web framework / servers
 fastapi
 uvicorn[standard]
+python-multipart  # UploadFile support (backend/ import-CSV uploads, frontend_fastapi/ forms)
+
+# Templating (frontend_fastapi/)
+Jinja2
 
 # HTTP clients
 httpx
@@ -28,6 +33,17 @@ proknow
 
 # PostgreSQL (anonymisation DB)
 psycopg2-binary
+
+# Database migrations (backend/'s HermesDB, and frontend_fastapi/'s own local DB)
+alembic
+SQLAlchemy
+
+# frontend_fastapi/ — auth, sessions, CSRF
+argon2-cffi       # password hashing
+itsdangerous      # signed invite/activate tokens
+# CSRF is hand-rolled (frontend_fastapi/deps.py: csrf_protect), tied to the
+# session-stored token rather than a separate stateless cookie -- no
+# extra dependency needed for it.
 
 # Utilities
 python-dotenv

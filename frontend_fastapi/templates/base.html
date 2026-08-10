@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}HERMES{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">HERMES</a>
+    <nav class="site-nav">
+      {% if user %}
+        <span class="nav-user">{{ user.username }}</span>
+        <form method="post" action="/accounts/logout" class="nav-logout-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="link-button">Log out</button>
+        </form>
+      {% else %}
+        <a href="{{ '/accounts/login' }}">Log in</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  {% if flashes %}
+    <div class="flash-list">
+      {% for message in flashes %}
+        <div class="flash flash-{{ message.tag }}">{{ message.text }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if user and nav_active_projects is defined and not nav_active_projects %}
+    <div class="banner banner-warning">
+      You have no active research projects. Import and export are unavailable until a data custodian approves one.
+    </div>
+  {% endif %}
+
+  <main class="site-main">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
