@@ -104,12 +104,24 @@ async def job_summary(job_id: str):
     job's own metadata (project_id/created_by/description/created_at/
     cancelled) -- additive fields only; `summary` itself is unchanged so
     existing callers (e.g. webui/) aren't affected.
+
+    Also carries `imported_count`/`submitted_count`: the "N/M imported"
+    headline figure. Built on §D3's Orthanc ground truth (`details->>'imported'`
+    on a retrieve-stage success event), not on `event_type == 'success'` alone
+    -- a patient found nowhere still gets a success event (the operation ran
+    without raising), so counting those would overstate how many patients
+    actually got data. No real ids involved here (just counts), so no
+    scrubbing needed.
     """
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
     try:
         summary = status_db.summarize_job(job_id)
-        response = {"job_id": job_id, "summary": summary}
+        imported_count, submitted_count = status_db.count_imported_patients(job_id)
+        response = {
+            "job_id": job_id, "summary": summary,
+            "imported_count": imported_count, "submitted_count": submitted_count,
+        }
         job = status_db.get_job(job_id)
         if job:
             response.update({
@@ -153,6 +165,11 @@ async def job_patients_summary(job_id: str):
     presence comes only from successful retrieves, so a patient that only ever
     failed has null presence but a 'failure' outcome -- which is the whole
     point: that patient is invisible otherwise.
+
+    `mosaiq_reason`/`pinnacle_reason`/`proknow_reason` are the per-source
+    diagnostic strings from Importer.find_patient (backend/src/retrieve/logic.py)
+    -- explicitly scrubbed the same way `error_message` is, since they
+    routinely quote the real MRN.
     """
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
@@ -173,6 +190,28 @@ async def job_patients_summary(job_id: str):
                 ),
                 "error_message": _scrub(
                     latest_by_mrn.get(real_mrn, {}).get("error_message"),
+                    real_mrn,
+                    display_map[real_mrn],
+                ),
+                # These routinely quote the real MRN (Mosaiq/ProKnow exception
+                # text; Pinnacle's error_message, built from/quoting the mrn)
+                # -- unlike the fields above them, they come straight out of a
+                # worker's own return value, not a structured column, so they
+                # need the same explicit _scrub() error_message already gets.
+                # Reading them unscrubbed would leak a real id across the
+                # anonymisation boundary -- see test_results_anon_boundary.py.
+                "mosaiq_reason": _scrub(
+                    details_by_mrn.get(real_mrn, {}).get("mosaiq_reason"),
+                    real_mrn,
+                    display_map[real_mrn],
+                ),
+                "pinnacle_reason": _scrub(
+                    details_by_mrn.get(real_mrn, {}).get("pinnacle_reason"),
+                    real_mrn,
+                    display_map[real_mrn],
+                ),
+                "proknow_reason": _scrub(
+                    details_by_mrn.get(real_mrn, {}).get("proknow_reason"),
                     real_mrn,
                     display_map[real_mrn],
                 ),
