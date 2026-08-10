@@ -39,6 +39,35 @@ def _create_schema():
         )
 
 
+def _create_status_schema():
+    """Mirrors PinnacleExport's own status/errors tables (see CLAUDE.md's
+    HermesDB Schema section for the documented shape)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {PINNACLE_SCHEMA}")
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {PINNACLE_SCHEMA}.status (
+                id SERIAL PRIMARY KEY,
+                mrn TEXT NOT NULL,
+                path TEXT,
+                process_datetime TIMESTAMP NOT NULL,
+                status TEXT
+            )
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {PINNACLE_SCHEMA}.errors (
+                id SERIAL PRIMARY KEY,
+                status_id INTEGER NOT NULL,
+                mrn TEXT,
+                path TEXT,
+                error_message TEXT
+            )
+            """
+        )
+
+
 def _drop_schema():
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {PINNACLE_SCHEMA} CASCADE")
@@ -49,6 +78,37 @@ def plans_schema():
     _create_schema()
     yield
     _drop_schema()
+
+
+@pytest.fixture
+def status_schema():
+    _create_status_schema()
+    yield
+    _drop_schema()
+
+
+def _insert_status(mrn, process_datetime, status="processing", path=None):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {PINNACLE_SCHEMA}.status (mrn, path, process_datetime, status)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (mrn, path or f"/pinnacle/{mrn}", process_datetime, status),
+        )
+        return cur.fetchone()[0]
+
+
+def _insert_error(status_id, mrn, error_message, path=None):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {PINNACLE_SCHEMA}.errors (status_id, mrn, path, error_message)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (status_id, mrn, path or f"/pinnacle/{mrn}", error_message),
+        )
 
 
 @pytest.fixture
@@ -153,3 +213,64 @@ def test_missing_schema_returns_none_not_an_exception(db, mrn):
     """
     _drop_schema()
     assert db.list_plans_for_patient(mrn) is None
+
+
+# ---- latest_status_for_patient (backs search_pinnacle_db's reason string) ----
+
+def test_latest_status_no_linked_error_reports_success(status_schema, db, mrn):
+    since = datetime.datetime(2026, 1, 1)
+    _insert_status(mrn, datetime.datetime(2026, 1, 2), status="exported")
+
+    row = db.latest_status_for_patient(mrn, since)
+
+    assert row["status"] == "exported"
+    assert row["error_message"] is None
+
+
+def test_latest_status_with_linked_error_returns_error_message(status_schema, db, mrn):
+    since = datetime.datetime(2026, 1, 1)
+    status_id = _insert_status(mrn, datetime.datetime(2026, 1, 2), status="failed")
+    _insert_error(status_id, mrn, "no RTSTRUCT found")
+
+    row = db.latest_status_for_patient(mrn, since)
+
+    assert row["status"] == "failed"
+    assert row["error_message"] == "no RTSTRUCT found"
+
+
+def test_latest_status_ignores_rows_before_since(status_schema, db, mrn):
+    """A status row that predates `since` is exactly the stale-history case
+    latest_status_for_patient exists to filter out -- the caller
+    (search_pinnacle_db) must fall back to "pending" rather than report on
+    an old, unrelated run."""
+    _insert_status(mrn, datetime.datetime(2020, 1, 1), status="exported")
+
+    since = datetime.datetime(2026, 1, 1)
+    assert db.latest_status_for_patient(mrn, since) is None
+
+
+def test_latest_status_picks_the_most_recent_row_after_since(status_schema, db, mrn):
+    since = datetime.datetime(2026, 1, 1)
+    _insert_status(mrn, datetime.datetime(2026, 1, 2), status="processing")
+    later_id = _insert_status(mrn, datetime.datetime(2026, 1, 3), status="failed")
+    _insert_error(later_id, mrn, "second attempt failed")
+
+    row = db.latest_status_for_patient(mrn, since)
+
+    assert row["status"] == "failed"
+    assert row["error_message"] == "second attempt failed"
+
+
+def test_latest_status_other_patients_not_returned(status_schema, db, mrn):
+    since = datetime.datetime(2026, 1, 1)
+    _insert_status(f"{mrn}-other", datetime.datetime(2026, 1, 2), status="exported")
+
+    assert db.latest_status_for_patient(mrn, since) is None
+
+
+def test_latest_status_missing_schema_returns_none(db, mrn):
+    """Same schema-presence-tolerant posture as list_plans_for_patient --
+    HERMES must run fine against a database PinnacleExport never touched."""
+    _drop_schema()
+    since = datetime.datetime(2026, 1, 1)
+    assert db.latest_status_for_patient(mrn, since) is None

@@ -137,3 +137,39 @@ class StatusDB:
                 (job_id,),
             )
             return {row["mrn"]: dict(row) for row in cur.fetchall()}
+
+    def count_imported_patients(self, job_id: str) -> tuple[int, int]:
+        """
+        The "N/M imported" headline figure for a job: (imported_count,
+        submitted_count).
+
+        `imported_count` is the count of distinct patients with a
+        retrieve-stage success event whose `details->>'imported'` is the
+        string 'true' -- Importer.verify_on_orthanc's own ground-truth check
+        (backend/src/retrieve/logic.py, §D3), not a guess from `event_type`
+        alone: a patient found nowhere still gets `event_type = 'success'`
+        (the operation ran without raising), so counting those would
+        overstate how many patients actually got data.
+
+        `submitted_count` is simply every distinct patient submitted as part
+        of this job (COUNT(DISTINCT mrn) from `patients`), regardless of
+        outcome -- the "M" half of "N/M imported".
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT mrn) FROM events
+                WHERE job_id = %s AND stage = 'retrieve' AND event_type = 'success'
+                  AND details ->> 'imported' = 'true'
+                """,
+                (job_id,),
+            )
+            imported_count = cur.fetchone()[0]
+
+            cur.execute(
+                "SELECT COUNT(DISTINCT mrn) FROM patients WHERE job_id = %s",
+                (job_id,),
+            )
+            submitted_count = cur.fetchone()[0]
+
+            return imported_count, submitted_count

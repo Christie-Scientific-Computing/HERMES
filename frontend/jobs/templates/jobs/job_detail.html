@@ -4,6 +4,12 @@
 <h1 class="text-xl font-semibold text-gray-900 mb-1">Job</h1>
 <p class="text-sm text-gray-500 mb-6 font-mono">{{ job_id }}</p>
 
+{% if submitted_count is not None %}
+<div class="mb-6">
+  <p class="text-2xl font-semibold text-gray-900">{{ imported_count }} / {{ submitted_count }} <span class="text-base font-normal text-gray-500">patients imported</span></p>
+</div>
+{% endif %}
+
 <div class="bg-white border border-gray-200 rounded-lg p-6 mb-6">
   <h2 class="text-sm font-semibold text-gray-900 mb-4">Summary</h2>
   <div class="overflow-x-auto">

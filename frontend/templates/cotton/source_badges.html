@@ -1,21 +1,21 @@
-<c-vars mosaiq=None pinnacle=None proknow=None />
+<c-vars mosaiq=None pinnacle=None proknow=None mosaiq_reason=None pinnacle_reason=None proknow_reason=None />
 <div class="flex items-center gap-3 text-xs whitespace-nowrap">
   <span class="flex items-center gap-1 text-gray-600">
     Mosaiq
     {% if mosaiq == True %}<span class="text-green-600 font-bold">&#10003;</span>
-    {% elif mosaiq == False %}<span class="text-red-600 font-bold">&times;</span>
+    {% elif mosaiq == False %}<span class="text-red-600 font-bold" {% if mosaiq_reason %}title="{{ mosaiq_reason }}"{% endif %}>&times;</span>
     {% else %}<span class="text-gray-400">&mdash;</span>{% endif %}
   </span>
   <span class="flex items-center gap-1 text-gray-600">
     Pinnacle
     {% if pinnacle == True %}<span class="text-green-600 font-bold">&#10003;</span>
-    {% elif pinnacle == False %}<span class="text-red-600 font-bold">&times;</span>
+    {% elif pinnacle == False %}<span class="text-red-600 font-bold" {% if pinnacle_reason %}title="{{ pinnacle_reason }}"{% endif %}>&times;</span>
     {% else %}<span class="text-gray-400">&mdash;</span>{% endif %}
   </span>
   <span class="flex items-center gap-1 text-gray-600">
     ProKnow
     {% if proknow == True %}<span class="text-green-600 font-bold">&#10003;</span>
-    {% elif proknow == False %}<span class="text-red-600 font-bold">&times;</span>
+    {% elif proknow == False %}<span class="text-red-600 font-bold" {% if proknow_reason %}title="{{ proknow_reason }}"{% endif %}>&times;</span>
     {% else %}<span class="text-gray-400">&mdash;</span>{% endif %}
   </span>
 </div>

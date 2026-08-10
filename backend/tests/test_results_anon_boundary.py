@@ -93,6 +93,23 @@ def test_job_summary_includes_job_metadata(client, job_id):
     assert body["cancelled"] is False
 
 
+def test_job_summary_includes_imported_and_submitted_counts(client, job_id):
+    """The "N/M imported" headline figure, end-to-end through /results/job/{job_id}."""
+    status_db.create_job(job_id)
+    status_db.add_patient(job_id, "MRN1")
+    status_db.add_patient(job_id, "MRN2")
+    status_db.add_patient(job_id, "MRN3")
+    status_db.add_event(job_id, "MRN1", stage="retrieve", event_type="success", details={"imported": True})
+    status_db.add_event(job_id, "MRN2", stage="retrieve", event_type="success", details={"imported": False})
+    status_db.add_event(job_id, "MRN3", stage="retrieve", event_type="failure", error_message="boom")
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["imported_count"] == 1
+    assert body["submitted_count"] == 3
+
+
 def test_job_patients_summary_includes_source_presence_and_anon_id(client, job_id):
     status_db.create_job(job_id)
     status_db.add_event(
@@ -106,7 +123,49 @@ def test_job_patients_summary_includes_source_presence_and_anon_id(client, job_i
     assert body["patients"] == [{
         "mrn": ANON_MRN, "in_mosaiq": True, "in_pinnacle": False, "in_proknow": True, "status": "imported",
         "outcome": "success", "error_message": None,
+        "mosaiq_reason": None, "pinnacle_reason": None, "proknow_reason": None,
     }]
+    assert REAL_MRN not in resp.text
+
+
+def test_job_patients_summary_scrubs_the_real_mrn_out_of_reason_fields(client, job_id):
+    """
+    THE anonymisation-boundary regression test for §E. mosaiq_reason/
+    pinnacle_reason/proknow_reason come straight out of a worker's own
+    return value (Importer.find_patient), not a structured column -- exactly
+    like error_message, they routinely quote the real MRN (Mosaiq/ProKnow
+    exception text; Pinnacle's error_message, built from/quoting the mrn).
+    Reading them unscrubbed would leak a real patient identifier straight
+    across the anonymisation boundary -- precisely the failure mode this
+    whole plan exists to prevent. Every one of the three must come back with
+    the anon id substituted in, and the real MRN must not appear anywhere in
+    the raw response body.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="retrieve", event_type="success",
+        details={
+            "in_mosaiq": False,
+            "mosaiq_reason": f"Could not query AE_ONE: connection refused for patient {REAL_MRN}",
+            "in_pinnacle": True,
+            "pinnacle_reason": f"Could not reconstruct DICOM: no RTSTRUCT for {REAL_MRN} at /pinnacle/{REAL_MRN}/Plan_1",
+            "in_proknow": False,
+            "proknow_reason": "Patient not found on ProKnow",
+        },
+    )
+
+    resp = client.get(f"/results/job/{job_id}/patients/summary")
+    assert resp.status_code == 200
+    patient = resp.json()["patients"][0]
+
+    assert patient["mosaiq_reason"] == f"Could not query AE_ONE: connection refused for patient {ANON_MRN}"
+    assert patient["pinnacle_reason"] == (
+        f"Could not reconstruct DICOM: no RTSTRUCT for {ANON_MRN} at /pinnacle/{ANON_MRN}/Plan_1"
+    )
+    assert patient["proknow_reason"] == "Patient not found on ProKnow"
+
+    # The load-bearing assertion: the real MRN must not appear ANYWHERE in
+    # the raw response body, not just in the fields we happened to check above.
     assert REAL_MRN not in resp.text
 
 
