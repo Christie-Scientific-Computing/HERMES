@@ -8,6 +8,7 @@ import logging
 import sqlite3
 import polars as pl
 import requests
+from datetime import datetime, timezone
 from proknow import ProKnow
 from collections import defaultdict
 from pyorthanc import Orthanc, Modality, find_series, find_studies, upload
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from backend.src.retrieve.PinnacleExport.entrypoint import entry as pinn_entry
 from backend.src.retrieve.PinnacleExport.src.database import ExportRequest
+from backend.src.plans.db_client import PlansDB
 
 
 logger = logging.getLogger(__name__)
@@ -47,10 +49,20 @@ class Importer():
 
     def __init__(self, import_level:str | None = None):
         self.pk: ProKnow = None # Defining here for clarity
-        self.ot: Orthanc = None 
-        self.pinn_db: sqlite3.Connection = None 
+        self.ot: Orthanc = None
+        self.pinn_db: sqlite3.Connection = None
         self._init_connections() # This populates above
         self.dicom_sources = [PULL_MODALITY_AET_ONE, PULL_MODALITY_AET_TWO]
+
+        # Read-only reader for PinnacleExport's own status/errors tables (see
+        # search_pinnacle_db) -- cheap to construct, doesn't connect eagerly.
+        self.plans_db = PlansDB()
+        # "Since" cutoff used by search_pinnacle_db to ignore a Pinnacle
+        # reconstruction status left over from a much older, unrelated run.
+        # One Importer is constructed per patient in a batch (see
+        # retrieve/endpoints.py's _import_worker), so in practice this is
+        # "since we started looking at this particular patient".
+        self._started_at = datetime.now(timezone.utc)
 
         self.tmp_dir = Path('./tmp/proknow/')
         self.tmp_dir.mkdir(exist_ok=True)
@@ -108,27 +120,27 @@ class Importer():
         3. Verifies against Orthanc ground truth (post-cleanup)
 
         """
-        locations: dict[str, bool] = self.find_patient(mrn)
+        locations: dict = self.find_patient(mrn)
         self.import_patient(mrn, locations)
         verification = self.verify_on_orthanc(mrn)
         return {'status': 'success', **locations, **verification}
 
 
-    def find_patient(self, mrn: int) -> dict[str, bool]:
-        in_mosaiq: bool = self.search_mosaiq(mrn)
-        in_pinnacle: bool = self.search_pinnacle_db(mrn)
+    def find_patient(self, mrn: int) -> dict:
+        in_mosaiq, mosaiq_reason = self.search_mosaiq(mrn)
+        in_pinnacle, pinnacle_reason = self.search_pinnacle_db(mrn)
         #TODO
         #in_raystation: bool | None = self.search_raystation(mrn)
-        in_proknow: bool = self.search_proknow(mrn)
+        in_proknow, proknow_reason = self.search_proknow(mrn)
 
         logger.info(
             "Patient found in Mosaiq (%s), Pinnacle (%s), ProKnow (%s)",
             in_mosaiq, in_pinnacle, in_proknow
         )
         return {
-            'in_mosaiq': in_mosaiq,
-            'in_pinnacle': in_pinnacle,
-            'in_proknow': in_proknow
+            'in_mosaiq': in_mosaiq, 'mosaiq_reason': mosaiq_reason,
+            'in_pinnacle': in_pinnacle, 'pinnacle_reason': pinnacle_reason,
+            'in_proknow': in_proknow, 'proknow_reason': proknow_reason,
         }
 
     def import_patient(self, mrn: int, locations: dict[str, bool]) -> None:
@@ -320,24 +332,47 @@ class Importer():
         shutil.rmtree(self.tmp_dir)
         
 
-    ## ============= Methods to search for a single patient across locations =================== 
-    def search_mosaiq(self, mrn: int) -> bool:
+    ## ============= Methods to search for a single patient across locations ===================
+    def search_mosaiq(self, mrn: int) -> tuple[bool, str | None]:
+        """
+        Search Mosaiq's configured DICOM sources for this patient.
+
+        Returns (found, reason). `reason` distinguishes three cases so callers
+        (and, eventually, an operator reading the reported outcome) can tell
+        them apart -- today they all collapsed to a bare `False`:
+          - nothing found in any source at all -> "Not found in Mosaiq"
+          - studies found, but none contain an RTDOSE series (Planning-level
+            import) -> "Incomplete planning data"
+          - a source query raised -> "Could not query {src}: {exc}", surfaced
+            rather than silently swallowed as it was before.
+
+        Two query call sites can raise: the outer per-source study query and,
+        for every study that returns, an inner per-study series query. Both
+        are guarded so a failure on either one becomes a reason rather than
+        an uncaught exception that would otherwise propagate out of
+        find_patient and skip the Pinnacle/ProKnow checks entirely.
+        """
         study_query = {
             "Level": "Study",
             "Query": {"PatientID": str(mrn)}
         }
 
-        # Get studies with associated RTDOSE i.e.(Hopefully) complete planning data 
+        any_studies_found = False
+        query_error: str | None = None
+
+        # Get studies with associated RTDOSE i.e.(Hopefully) complete planning data
         for src in self.dicom_sources:
             modality = Modality(self.ot, src)
             try:
                 studies = modality.find(study_query)
-                #return True
-            except Exception as e:
-                logger.debug(f'Could not find {mrn} in {src}')
+            except Exception as exc:
+                logger.debug('Could not find %s in %s', mrn, src)
+                query_error = f"Could not query {src}: {exc}"
                 continue
             study_uids = [s['StudyInstanceUID'] for s in studies['answers'] if 'StudyInstanceUID' in s]
-        
+            if study_uids:
+                any_studies_found = True
+
             for study_uid in study_uids:
                 series_query = {
                     'Level': 'Series',
@@ -346,18 +381,57 @@ class Importer():
                         'Modality': ''
                     }
                 }
-                series = modality.find(series_query)
+                try:
+                    series = modality.find(series_query)
+                except Exception as exc:
+                    # A series-query failure on one study shouldn't abort the
+                    # whole search -- remember it and keep trying other
+                    # studies/sources, same as the outer query above.
+                    logger.debug('Could not query series for study %s in %s: %s', study_uid, src, exc)
+                    query_error = f"Could not query {src}: {exc}"
+                    continue
                 for s in series['answers']:
-                    if self.import_level in ('Planning', 'Everything') and s['Modality'] == 'RTDOSE': 
+                    if self.import_level in ('Planning', 'Everything') and s['Modality'] == 'RTDOSE':
                         #If at least one RTDOSE (i.e. complete planning data)
-                        return True
+                        return True, None
 
                     if self.import_level in ('Images', 'Everything') and s['Modality'] in self.accepted_modalities:
-                        return True
+                        return True, None
 
-        return False # If no RTDOSE found or import_level=Images and no images 
+        # Nothing matched. Prefer the most specific/actionable reason: found
+        # some studies but incomplete data beats a query error, which beats a
+        # plain "never found".
+        if any_studies_found:
+            return False, "Incomplete planning data"
+        if query_error:
+            return False, query_error
+        return False, "Not found in Mosaiq"
 
-    def search_pinnacle_db(self, mrn: int) -> bool:
+    def search_pinnacle_db(self, mrn: int) -> tuple[bool, str | None]:
+        """
+        Is this patient's export request indexed in Pinnacle's own
+        pinn_db.sqlite, and (if so) what does PinnacleExport's own
+        pinnacle_export.status/errors record about the actual DICOM
+        reconstruction it performs afterward?
+
+        `found` keeps its original meaning -- "is an export request indexed"
+        -- unchanged, since that's what import_patient uses to decide whether
+        to call import_from_pinnacle at all (this method runs before that
+        call, as part of find_patient). `reason` is purely additional
+        diagnostic context layered on top:
+          - not indexed at all -> "Not found in Pinnacle export index"
+          - indexed, and the latest status row (since this Importer started
+            looking at this patient) has a linked error -> "Could not
+            reconstruct DICOM: {error_message}"
+          - indexed, but no status row yet -> "Pinnacle reconstruction
+            pending". PinnacleExport processes out-of-band, so this is the
+            expected state for a patient being imported for the first time:
+            by the time we're here, import_from_pinnacle (which triggers the
+            reconstruction) hasn't even run yet for *this* job -- any status
+            row we do see reflects an earlier, separate attempt. Deliberately
+            not polled/blocked on: a slow Pinnacle job must not stall the
+            rest of a batch.
+        """
         try:
             conn = sqlite3.connect(PINN_DB)
             conn.row_factory = sqlite3.Row
@@ -365,25 +439,51 @@ class Importer():
             logger.error(f"Failed to connect to Pinnacle database ({PINN_DB}): {exc}")
             raise
 
-        cursor = conn.cursor()
-        entries = cursor.execute("SELECT * FROM entries WHERE MedicalRecordNumber = ?", (mrn,)).fetchall()
-        if entries:
-            return True
-        else:
+        try:
+            cursor = conn.cursor()
+            entries = cursor.execute("SELECT * FROM entries WHERE MedicalRecordNumber = ?", (mrn,)).fetchall()
+        finally:
+            conn.close()
+
+        if not entries:
             logger.debug("Patient (%s) not found in Pinnacle DB", mrn)
-            return False
-        conn.close()
+            return False, "Not found in Pinnacle export index"
+
+        try:
+            status = self.plans_db.latest_status_for_patient(str(mrn), since=self._started_at)
+        except Exception as exc:
+            # Best-effort: a status-lookup hiccup shouldn't make an otherwise
+            # indexed patient look unfound.
+            logger.warning("Could not check Pinnacle reconstruction status for %s: %s", mrn, exc)
+            status = None
+
+        if status is None:
+            return True, "Pinnacle reconstruction pending"
+        if status.get("error_message"):
+            return True, f"Could not reconstruct DICOM: {status['error_message']}"
+        return True, None
 
     def search_raystation(self, mrn: int) -> bool:
         raise NotImplementedError("Raystation search not implemented")
 
-    def search_proknow(self, mrn: int) -> bool:
+    def search_proknow(self, mrn: int) -> tuple[bool, str | None]:
+        """
+        `patients.find` (proknow SDK) returns None -- not an exception --
+        when nothing matches, so that's the genuine "not found" signal;
+        anything else raised (HttpError, WorkspaceLookupError, etc.) is a
+        connectivity/auth failure and gets its own reason rather than being
+        folded into the same "not found" bucket as before.
+        """
         try:
-            patient = self.pk.patients.find(workspace = PROKNOW_WORKSPACE, mrn=str(mrn)).get()
-            return True
+            match = self.pk.patients.find(workspace=PROKNOW_WORKSPACE, mrn=str(mrn))
+            if match is None:
+                logger.debug("Patient (%s) not found on ProKnow", mrn)
+                return False, "Patient not found on ProKnow"
+            match.get()
+            return True, None
         except Exception as exc:
-            logger.debug("Patient isn't on ProKnow. Error: %s", exc)
-            return False
+            logger.error("Could not query ProKnow for %s: %s", mrn, exc)
+            return False, f"Could not query ProKnow: {exc}"
     
     #### ========================= HELPERS ================================
     @staticmethod
