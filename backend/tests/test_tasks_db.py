@@ -14,23 +14,12 @@ from backend.src.status.hash_chain import compute_row_hash
 from backend.src.status.tasks_db import TasksDB
 from backend.src.db import get_conn
 
-
-@pytest.fixture(autouse=True)
-def _clean_tasks_table():
-    """
-    TasksDB.claim() is deliberately global -- a real worker claims the next
-    queued task across every job, not just one. Against this suite's shared,
-    persistent test Postgres (tests don't run in a transaction that rolls
-    back), leftover 'queued' rows from an earlier run or another test in
-    this file would otherwise be claimable by an unrelated test, making
-    claim-ordering assertions flaky. Truncate before every test in this file
-    so each one starts from an empty tasks table; events.task_id is
-    ON DELETE SET NULL (see the tasks migration), so this never fails on FK
-    references from events written by other tests.
-    """
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM tasks")
-    yield
+# The `_clean_tasks_table` autouse fixture that used to live here has moved
+# to conftest.py (session-wide, not just this file) -- test_worker.py and
+# test_import_queue_endpoint.py hit the exact same TasksDB.claim() global-
+# claim hazard this fixture exists to prevent, so one shared fixture covers
+# every file that touches the tasks table rather than each needing its own
+# copy.
 
 
 @pytest.fixture
@@ -153,8 +142,8 @@ def test_claim_prefers_higher_priority(tasks_db, job_id):
 def test_mark_succeeded_sets_state_and_details(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
     task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(task["task_id"])
-    tasks_db.mark_succeeded(task["task_id"], details={"imported": True})
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    tasks_db.mark_succeeded(task["task_id"], "worker-1", details={"imported": True})
 
     row = tasks_db.get_task(task["task_id"])
     assert row["state"] == "succeeded"
@@ -167,9 +156,9 @@ def test_mark_failed_terminal_by_default(tasks_db, job_id):
     today's un-retried run_batch_job behaviour."""
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
     task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(task["task_id"])
+    tasks_db.mark_running(task["task_id"], "worker-1")
 
-    outcome = tasks_db.mark_failed(task["task_id"], "boom")
+    outcome = tasks_db.mark_failed(task["task_id"], "worker-1", "boom")
     assert outcome == "failed"
 
     row = tasks_db.get_task(task["task_id"])
@@ -184,9 +173,9 @@ def test_mark_failed_requeues_while_attempts_remain(tasks_db, job_id):
     task = tasks_db.claim("worker-1")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("UPDATE tasks SET max_attempts = 3 WHERE task_id = %s", (task["task_id"],))
-    tasks_db.mark_running(task["task_id"])
+    tasks_db.mark_running(task["task_id"], "worker-1")
 
-    outcome = tasks_db.mark_failed(task["task_id"], "transient error")
+    outcome = tasks_db.mark_failed(task["task_id"], "worker-1", "transient error")
     assert outcome == "requeued"
     row = tasks_db.get_task(task["task_id"])
     assert row["state"] == "queued"
@@ -198,16 +187,16 @@ def test_mark_failed_requeues_while_attempts_remain(tasks_db, job_id):
     # requeued task is claimable again
     reclaimed = tasks_db.claim("worker-2")
     assert reclaimed["task_id"] == task["task_id"]
-    tasks_db.mark_running(reclaimed["task_id"])
+    tasks_db.mark_running(reclaimed["task_id"], "worker-2")
 
     # second failure: attempts becomes 2, still < max_attempts (3) -> requeued again
-    outcome2 = tasks_db.mark_failed(reclaimed["task_id"], "still failing")
+    outcome2 = tasks_db.mark_failed(reclaimed["task_id"], "worker-2", "still failing")
     assert outcome2 == "requeued"
     reclaimed2 = tasks_db.claim("worker-3")
-    tasks_db.mark_running(reclaimed2["task_id"])
+    tasks_db.mark_running(reclaimed2["task_id"], "worker-3")
 
     # third failure: attempts becomes 3, no longer < max_attempts (3) -> terminal
-    outcome3 = tasks_db.mark_failed(reclaimed2["task_id"], "final failure")
+    outcome3 = tasks_db.mark_failed(reclaimed2["task_id"], "worker-3", "final failure")
     assert outcome3 == "failed"
     row = tasks_db.get_task(task["task_id"])
     assert row["state"] == "failed"
@@ -232,10 +221,10 @@ def test_mark_running_guards_against_non_claimed_state(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
     task = tasks_db.claim("worker-1")
 
-    assert tasks_db.mark_running(task["task_id"]) is True
+    assert tasks_db.mark_running(task["task_id"], "worker-1") is True
     first_started_at = tasks_db.get_task(task["task_id"])["started_at"]
 
-    assert tasks_db.mark_running(task["task_id"]) is False
+    assert tasks_db.mark_running(task["task_id"], "worker-1") is False
     assert tasks_db.get_task(task["task_id"])["started_at"] == first_started_at
 
 
@@ -254,7 +243,7 @@ def test_mark_running_refreshes_claimed_at_so_reap_does_not_double_claim(tasks_d
         old_ts = datetime.now(timezone.utc) - timedelta(seconds=7200)
         cur.execute("UPDATE tasks SET claimed_at = %s WHERE task_id = %s", (old_ts, task["task_id"]))
 
-    tasks_db.mark_running(task["task_id"])
+    tasks_db.mark_running(task["task_id"], "worker-1")
 
     reaped = tasks_db.reap_stale_claims(stale_seconds=1800)
     assert reaped == 0
@@ -263,39 +252,95 @@ def test_mark_running_refreshes_claimed_at_so_reap_does_not_double_claim(tasks_d
     assert row["claimed_by"] == "worker-1"  # not reset by a reap
 
 
+def test_mark_running_ownership_guard_blocks_wrong_worker(tasks_db, job_id):
+    """
+    A task reclaimed by a different worker after a reap must not be moved
+    to 'running' by the original (now-stale) worker's late call.
+    """
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+
+    assert tasks_db.mark_running(task["task_id"], "worker-2") is False
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "claimed"  # unchanged -- still owned by worker-1
+
+
 def test_mark_succeeded_guards_against_terminal_state(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
     task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(task["task_id"])
-    assert tasks_db.mark_succeeded(task["task_id"], details={"imported": True}) is True
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    assert tasks_db.mark_succeeded(task["task_id"], "worker-1", details={"imported": True}) is True
 
     # a duplicate/late call after the task already succeeded must not
     # silently overwrite it (e.g. re-run with different details)
-    applied_again = tasks_db.mark_succeeded(task["task_id"], details={"imported": False})
+    applied_again = tasks_db.mark_succeeded(task["task_id"], "worker-1", details={"imported": False})
     assert applied_again is False
     row = tasks_db.get_task(task["task_id"])
     assert row["state"] == "succeeded"
     assert row["details"] == {"imported": True}  # unchanged
 
 
+def test_mark_succeeded_ownership_guard_blocks_reaped_worker(tasks_db, job_id):
+    """
+    Regression test for the "reaped-but-still-alive worker clobbers the new
+    owner's result" hazard found in review: worker-1 claims and starts a
+    task; it's reaped (simulating worker-1 taking longer than
+    stale_seconds, not actually dying) and re-claimed by worker-2, which
+    finishes it. worker-1's eventual, late mark_succeeded call must not
+    overwrite worker-2's result.
+    """
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"], "worker-1")
+
+    with get_conn() as conn, conn.cursor() as cur:
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=7200)
+        cur.execute("UPDATE tasks SET claimed_at = %s WHERE task_id = %s", (old_ts, task["task_id"]))
+    tasks_db.reap_stale_claims(stale_seconds=1800)
+
+    reclaimed = tasks_db.claim("worker-2")
+    assert reclaimed["task_id"] == task["task_id"]
+    tasks_db.mark_running(reclaimed["task_id"], "worker-2")
+    tasks_db.mark_succeeded(reclaimed["task_id"], "worker-2", details={"owner": "worker-2"})
+
+    # worker-1's late, in-flight call finally completes -- must not win
+    applied = tasks_db.mark_succeeded(task["task_id"], "worker-1", details={"owner": "worker-1"})
+    assert applied is False
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "succeeded"
+    assert row["details"] == {"owner": "worker-2"}  # worker-2's result stands
+
+
 def test_mark_failed_guards_against_terminal_state(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
     task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(task["task_id"])
-    tasks_db.mark_succeeded(task["task_id"], details={})
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    tasks_db.mark_succeeded(task["task_id"], "worker-1", details={})
 
-    outcome = tasks_db.mark_failed(task["task_id"], "late failure report")
+    outcome = tasks_db.mark_failed(task["task_id"], "worker-1", "late failure report")
     assert outcome == "unchanged"
     row = tasks_db.get_task(task["task_id"])
     assert row["state"] == "succeeded"  # not resurrected into failed/queued
     assert row["attempts"] == 0  # not incremented either
 
 
+def test_mark_failed_ownership_guard_blocks_wrong_worker(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"], "worker-1")
+
+    outcome = tasks_db.mark_failed(task["task_id"], "worker-2", "not my task")
+    assert outcome == "unchanged"
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "running"
+    assert row["attempts"] == 0
+
+
 def test_cancel_task_guards_against_terminal_state(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
     task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(task["task_id"])
-    tasks_db.mark_succeeded(task["task_id"], details={"imported": True})
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    tasks_db.mark_succeeded(task["task_id"], "worker-1", details={"imported": True})
 
     applied = tasks_db.cancel_task(task["task_id"], reason="revoked after completion")
     assert applied is False
@@ -306,7 +351,7 @@ def test_cancel_task_guards_against_terminal_state(tasks_db, job_id):
 def test_cancel_queued_leaves_running_rows_alone(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(3), kind="import", stage="retrieve", params={})
     running_task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(running_task["task_id"])
+    tasks_db.mark_running(running_task["task_id"], "worker-1")
 
     cancelled_count = tasks_db.cancel_queued(job_id)
     assert cancelled_count == 2  # the other two, still queued
@@ -354,10 +399,10 @@ def test_job_has_pending_true_until_all_terminal(tasks_db, job_id):
     assert tasks_db.job_has_pending(job_id) is True
 
     task = tasks_db.claim("worker-1")
-    tasks_db.mark_running(task["task_id"])
+    tasks_db.mark_running(task["task_id"], "worker-1")
     assert tasks_db.job_has_pending(job_id) is True
 
-    tasks_db.mark_succeeded(task["task_id"], details={})
+    tasks_db.mark_succeeded(task["task_id"], "worker-1", details={})
     assert tasks_db.job_has_pending(job_id) is False
 
 

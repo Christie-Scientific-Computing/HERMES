@@ -14,6 +14,30 @@ def _database_url():
     yield TEST_DATABASE_URL
 
 
+@pytest.fixture(autouse=True)
+def _clean_tasks_table():
+    """
+    TasksDB.claim() (backend/src/status/tasks_db.py) is deliberately
+    global -- a real worker claims the next queued task across every job,
+    not just one. Against this suite's shared, persistent test Postgres
+    (tests don't run inside a transaction that rolls back), a leftover
+    'queued' row from an earlier test -- in this file or any other --
+    would otherwise be claimable by an unrelated test, making
+    claim-ordering assertions flaky or silently wrong (e.g. a test
+    asserting on a freshly-enqueued task's `kind` instead getting some
+    other test's leftover row). Autouse + session-wide so every test file
+    that touches TasksDB gets this for free rather than each needing its
+    own copy. events.task_id is ON DELETE SET NULL (see the tasks
+    migration), so this never fails on FK references from events written
+    by other tests.
+    """
+    from backend.src.db import get_conn
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM tasks")
+    yield
+
+
 @pytest.fixture
 def active_project():
     """
