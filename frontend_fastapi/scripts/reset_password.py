@@ -10,21 +10,12 @@ import argparse
 import sys
 
 from frontend_fastapi import security
-from frontend_fastapi.database import SessionLocal
-from frontend_fastapi.models import User
+from frontend_fastapi.scripts._common import mutate_user_by_username
 
 
 def reset_password(username: str, new_password: str) -> bool:
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter_by(username=username).one_or_none()
-        if user is None:
-            return False
-        user.password_hash = security.hash_password(new_password)
-        db.commit()
-        return True
-    finally:
-        db.close()
+    new_hash = security.hash_password(new_password)  # hash once, not once per (nonexistent) retry
+    return mutate_user_by_username(username, lambda user: setattr(user, "password_hash", new_hash))
 
 
 def main() -> None:

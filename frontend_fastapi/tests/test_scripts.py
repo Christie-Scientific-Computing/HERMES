@@ -11,9 +11,16 @@ def _make_user(db, username="alice", password="correct horse battery staple", is
     return user
 
 
+def _use_test_engine(monkeypatch, SessionFactory) -> None:
+    # Both scripts share mutate_user_by_username's SessionLocal (scripts/
+    # _common.py) -- one patch target covers both, unlike before this was
+    # extracted, when each script had its own separate SessionLocal import.
+    monkeypatch.setattr("frontend_fastapi.scripts._common.SessionLocal", SessionFactory)
+
+
 def test_reset_password_updates_an_existing_user(db, SessionFactory, monkeypatch):
     _make_user(db, username="alice", password="old password here")
-    monkeypatch.setattr("frontend_fastapi.scripts.reset_password.SessionLocal", SessionFactory)
+    _use_test_engine(monkeypatch, SessionFactory)
 
     assert reset_password("alice", "a new strong password") is True
 
@@ -23,13 +30,13 @@ def test_reset_password_updates_an_existing_user(db, SessionFactory, monkeypatch
 
 
 def test_reset_password_returns_false_for_unknown_user(db, SessionFactory, monkeypatch):
-    monkeypatch.setattr("frontend_fastapi.scripts.reset_password.SessionLocal", SessionFactory)
+    _use_test_engine(monkeypatch, SessionFactory)
     assert reset_password("nobody", "whatever") is False
 
 
 def test_set_staff_grants_by_default(db, SessionFactory, monkeypatch):
     _make_user(db, username="alice", is_staff=False)
-    monkeypatch.setattr("frontend_fastapi.scripts.set_staff.SessionLocal", SessionFactory)
+    _use_test_engine(monkeypatch, SessionFactory)
 
     assert set_staff("alice", is_staff=True) is True
 
@@ -40,7 +47,7 @@ def test_set_staff_grants_by_default(db, SessionFactory, monkeypatch):
 
 def test_set_staff_can_revoke(db, SessionFactory, monkeypatch):
     _make_user(db, username="alice", is_staff=True)
-    monkeypatch.setattr("frontend_fastapi.scripts.set_staff.SessionLocal", SessionFactory)
+    _use_test_engine(monkeypatch, SessionFactory)
 
     assert set_staff("alice", is_staff=False) is True
 
@@ -50,5 +57,5 @@ def test_set_staff_can_revoke(db, SessionFactory, monkeypatch):
 
 
 def test_set_staff_returns_false_for_unknown_user(db, SessionFactory, monkeypatch):
-    monkeypatch.setattr("frontend_fastapi.scripts.set_staff.SessionLocal", SessionFactory)
+    _use_test_engine(monkeypatch, SessionFactory)
     assert set_staff("nobody", is_staff=True) is False

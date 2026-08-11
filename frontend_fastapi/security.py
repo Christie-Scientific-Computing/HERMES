@@ -68,16 +68,24 @@ def is_usable_password(password_hash: str) -> bool:
 _MIN_PASSWORD_LENGTH = 8
 
 
-def password_strength_errors(password: str, *, username: str = "", email: str = "") -> list[str]:
+def password_strength_errors(
+    password: str, *, username: str = "", email: str = "", first_name: str = "", last_name: str = "",
+) -> list[str]:
+    """Same attribute set Django's UserAttributeSimilarityValidator checks
+    by default (username/first_name/last_name/email) -- see this
+    function's own module-level comment for what's deliberately NOT
+    ported (the common-password wordlist)."""
     errors = []
     if len(password) < _MIN_PASSWORD_LENGTH:
         errors.append(f"This password is too short. It must contain at least {_MIN_PASSWORD_LENGTH} characters.")
     lowered = password.lower()
-    if username and username.lower() in lowered:
-        errors.append("This password is too similar to the username.")
     email_local = email.split("@")[0] if email else ""
-    if email_local and len(email_local) > 3 and email_local.lower() in lowered:
-        errors.append("This password is too similar to the email address.")
+    for label, value in (
+        ("username", username), ("email address", email_local),
+        ("first name", first_name), ("last name", last_name),
+    ):
+        if value and len(value) > 3 and value.lower() in lowered:
+            errors.append(f"This password is too similar to the {label}.")
     return errors
 
 

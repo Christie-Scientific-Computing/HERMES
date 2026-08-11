@@ -101,3 +101,15 @@ def test_password_strength_ignores_short_email_local_parts():
     # unrelated password by coincidence to be a meaningful similarity signal.
     errors = security.password_strength_errors("cwaitforitlongpassword", email="cw@example.com")
     assert errors == []
+
+
+def test_password_strength_rejects_password_containing_first_name():
+    """Matches Django's UserAttributeSimilarityValidator, which checks
+    first_name/last_name too, not just username/email."""
+    errors = security.password_strength_errors("sarahconnor1", first_name="Sarah")
+    assert any("too similar to the first name" in e for e in errors)
+
+
+def test_password_strength_rejects_password_containing_last_name():
+    errors = security.password_strength_errors("connorpassword", last_name="Connor")
+    assert any("too similar to the last name" in e for e in errors)

@@ -14,21 +14,11 @@ problem neither script solves.
 import argparse
 import sys
 
-from frontend_fastapi.database import SessionLocal
-from frontend_fastapi.models import User
+from frontend_fastapi.scripts._common import mutate_user_by_username
 
 
 def set_staff(username: str, is_staff: bool) -> bool:
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter_by(username=username).one_or_none()
-        if user is None:
-            return False
-        user.is_staff = is_staff
-        db.commit()
-        return True
-    finally:
-        db.close()
+    return mutate_user_by_username(username, lambda user: setattr(user, "is_staff", is_staff))
 
 
 def main() -> None:

@@ -45,7 +45,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(254), default="")
     first_name: Mapped[str] = mapped_column(String(150), default="")
     last_name: Mapped[str] = mapped_column(String(150), default="")
-    department: Mapped[str] = mapped_column(String(150), default="")
+    department: Mapped[str] = mapped_column(String(200), default="")  # matches Django's Profile.department max_length
     password_hash: Mapped[str] = mapped_column(String(255))
     is_staff: Mapped[bool] = mapped_column(Boolean, default=False)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False)

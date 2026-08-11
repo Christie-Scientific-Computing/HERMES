@@ -21,3 +21,20 @@ def test_migrations_produce_the_expected_tables(tmp_path):
 
     assert {"users", "sessions", "project_documents"} <= tables
     assert db_path.exists()
+
+
+def test_users_department_column_matches_the_form_validator_length(tmp_path):
+    """Regression test: forms/accounts.py's _IdentityForm.department field
+    allows up to 200 characters (matching Django's Profile.department) --
+    the column itself must actually accommodate that, not silently
+    truncate (SQLite) or raise an unhandled DB error (Postgres) for a
+    151-200 character submission that passed form validation."""
+    db_path = tmp_path / "migration_column_test.sqlite3"
+    database_url = f"sqlite:///{db_path}"
+    run_migrations(database_url)
+
+    engine = create_engine(database_url)
+    columns = {c["name"]: c for c in inspect(engine).get_columns("users")}
+    engine.dispose()
+
+    assert columns["department"]["type"].length == 200

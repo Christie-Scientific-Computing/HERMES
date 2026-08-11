@@ -42,7 +42,8 @@ class InviteUserForm(_IdentityForm):
 
 def _validate_password_strength(form: Form, field) -> None:
     errors = security.password_strength_errors(
-        field.data or "", username=form.username.data or "", email=form.email.data or ""
+        field.data or "", username=form.username.data or "", email=form.email.data or "",
+        first_name=form.first_name.data or "", last_name=form.last_name.data or "",
     )
     if errors:
         raise ValidationError(errors[0])

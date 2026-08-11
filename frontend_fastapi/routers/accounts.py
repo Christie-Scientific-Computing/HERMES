@@ -4,10 +4,9 @@ list users. Port of accounts/views.py (Django) -- see that file for the
 exact behavior being matched. Makes zero backend_client calls (all
 local-DB), same as the Django original.
 """
-import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
@@ -24,6 +23,8 @@ from frontend_fastapi.templating import templates
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
+_DUPLICATE_USERNAME_ERROR = "A user with that username already exists."
+
 
 def _reject_duplicate_username(form, db: DBSession) -> bool:
     """True (and appends a field error) if form.username.data is already
@@ -38,7 +39,7 @@ def _reject_duplicate_username(form, db: DBSession) -> bool:
     what makes the ordinary case return a clean form error instead of
     reaching that path at all."""
     if form.username.data and db.query(User).filter_by(username=form.username.data).one_or_none() is not None:
-        form.username.errors.append("A user with that username already exists.")
+        form.username.errors.append(_DUPLICATE_USERNAME_ERROR)
         return True
     return False
 
@@ -61,7 +62,7 @@ def _add_user_or_reject(db: DBSession, form, new_user: User) -> bool:
         db.rollback()
         if not isinstance(form.username.errors, list):
             form.username.errors = list(form.username.errors)
-        form.username.errors.append("A user with that username already exists.")
+        form.username.errors.append(_DUPLICATE_USERNAME_ERROR)
         return False
     return True
 
@@ -131,7 +132,8 @@ async def invite_form(user: User = Depends(require_data_custodian), ctx: dict = 
 
 @router.post("/invite")
 async def invite_submit(
-    request: Request, user: User = Depends(require_data_custodian), session: Session = Depends(get_session),
+    request: Request, background_tasks: BackgroundTasks,
+    user: User = Depends(require_data_custodian), session: Session = Depends(get_session),
     db: DBSession = Depends(get_db), ctx: dict = Depends(get_template_context),
 ):
     form = InviteUserForm(formdata=await request.form())
@@ -139,6 +141,7 @@ async def invite_submit(
     if _reject_duplicate_username(form, db):
         is_valid = False
 
+    new_user = None
     if is_valid:
         new_user = User(
             username=form.username.data, email=form.email.data,
@@ -146,30 +149,31 @@ async def invite_submit(
             department=form.department.data or "", is_staff=form.is_staff.data,
             is_active=True, password_hash=security.unusable_password(),
         )
-        if not _add_user_or_reject(db, form, new_user):
-            return templates.TemplateResponse(request, "accounts/invite.html", {**ctx, "form": form}, status_code=400)
+        is_valid = _add_user_or_reject(db, form, new_user)
 
-        token = security.make_account_token(new_user.id, new_user.password_hash)
-        activate_url = str(request.url_for("activate_account", token=token))
-        # email_backend.send_mail is sync (smtplib, up to a 10s timeout) --
-        # this route is async def, so FastAPI does NOT run it in a
-        # threadpool the way it does for sync Depends()/routes. Calling it
-        # directly would block the whole event loop, stalling every other
-        # concurrent request, for as long as a slow/unreachable SMTP relay
-        # takes to time out.
-        await asyncio.to_thread(
-            email_backend.send_mail,
-            subject="You've been invited to HERMES",
-            body=f"An account has been created for you on HERMES.\n\nSet your password to activate it: {activate_url}",
-            to=new_user.email,
-        )
-        # Load-bearing, not cosmetic: with no SMTP configured (the default,
-        # see settings.py), this flash message is the ONLY way a data
-        # custodian retrieves a new hire's activation link.
-        flash(session, "success", f"Invited {new_user.username}. Activation link: {activate_url}")
-        return RedirectResponse(request.url_for("invite"), status_code=303)
+    if not is_valid:
+        return templates.TemplateResponse(request, "accounts/invite.html", {**ctx, "form": form}, status_code=400)
 
-    return templates.TemplateResponse(request, "accounts/invite.html", {**ctx, "form": form}, status_code=400)
+    token = security.make_account_token(new_user.id, new_user.password_hash)
+    activate_url = str(request.url_for("activate_account", token=token))
+    # BackgroundTasks (not an awaited call): send_mail is sync (smtplib, up
+    # to a 10s timeout) and best-effort -- never raises, and the response
+    # below doesn't depend on whether it succeeds (the flash message is
+    # shown regardless, see below). FastAPI runs it in a threadpool AFTER
+    # the response is sent, so a slow/unreachable SMTP relay adds zero
+    # latency to this request instead of blocking the event loop in front
+    # of it.
+    background_tasks.add_task(
+        email_backend.send_mail,
+        subject="You've been invited to HERMES",
+        body=f"An account has been created for you on HERMES.\n\nSet your password to activate it: {activate_url}",
+        to=new_user.email,
+    )
+    # Load-bearing, not cosmetic: with no SMTP configured (the default,
+    # see settings.py), this flash message is the ONLY way a data
+    # custodian retrieves a new hire's activation link.
+    flash(session, "success", f"Invited {new_user.username}. Activation link: {activate_url}")
+    return RedirectResponse(request.url_for("invite"), status_code=303)
 
 
 @router.get("/users/create", name="create_user")
@@ -194,13 +198,13 @@ async def create_user_submit(
             department=form.department.data or "", is_staff=form.is_staff.data,
             is_active=True, password_hash=security.hash_password(form.password1.data),
         )
-        if not _add_user_or_reject(db, form, new_user):
-            return templates.TemplateResponse(request, "accounts/create_user.html", {**ctx, "form": form}, status_code=400)
+        is_valid = _add_user_or_reject(db, form, new_user)
 
-        flash(session, "success", f"Created account for {new_user.username}. They can sign in immediately.")
-        return RedirectResponse(request.url_for("user_list"), status_code=303)
+    if not is_valid:
+        return templates.TemplateResponse(request, "accounts/create_user.html", {**ctx, "form": form}, status_code=400)
 
-    return templates.TemplateResponse(request, "accounts/create_user.html", {**ctx, "form": form}, status_code=400)
+    flash(session, "success", f"Created account for {new_user.username}. They can sign in immediately.")
+    return RedirectResponse(request.url_for("user_list"), status_code=303)
 
 
 @router.get("/activate/{token}", name="activate_account")
@@ -229,7 +233,8 @@ async def activate_submit(
     is_valid = form.validate()
     if is_valid:
         strength_errors = security.password_strength_errors(
-            form.password1.data, username=user.username, email=user.email
+            form.password1.data, username=user.username, email=user.email,
+            first_name=user.first_name, last_name=user.last_name,
         )
         form.password1.errors.extend(strength_errors)
         is_valid = not strength_errors
