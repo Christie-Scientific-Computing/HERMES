@@ -174,8 +174,19 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
     "free text carries real MRNs too") -- both go through the same
     `_scrub`/`_scrub_json` this file already uses elsewhere, keyed off each
     row's own (real_id, display_id) pair.
+
+    Every TasksDB/StatusDB call below is wrapped in asyncio.to_thread --
+    these are plain synchronous psycopg2 round-trips (CLAUDE.md's "Async
+    threading" section), and unlike a single request/response endpoint,
+    this generator stays open and re-polls for a job's entire duration, one
+    connection per browser tab watching it. Without to_thread, every poll
+    tick of every open connection would block the single event loop every
+    other concurrent request also depends on -- the exact hazard
+    backend/src/common/sse.py's run_batch_job already wraps its own DB
+    calls in asyncio.to_thread to avoid, worse here since this stream is
+    long-lived by design rather than one call per batch item.
     """
-    total = tasks_db.count_tasks(job_id)
+    total = await asyncio.to_thread(tasks_db.count_tasks, job_id)
     yield format_sse({"type": "start", "total": total})
 
     # Tracks each task's last-reported state so a re-read (see
@@ -185,7 +196,7 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
     cancelled_reported = False
 
     while True:
-        if not cancelled_reported and status_db.is_cancelled(job_id):
+        if not cancelled_reported and await asyncio.to_thread(status_db.is_cancelled, job_id):
             yield format_sse({"type": "cancelled"})
             cancelled_reported = True
             # Deliberately not a `break`: TasksDB.cancel_queued (called by
@@ -197,7 +208,7 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
             # actually pending so that outcome still gets reported, instead
             # of the stream silently going quiet on it.
 
-        rows = tasks_db.job_progress(job_id)
+        rows = await asyncio.to_thread(tasks_db.job_progress, job_id)
         has_pending = False
         for row in rows:
             task_id, state = row["task_id"], row["state"]

@@ -179,3 +179,121 @@ def test_handle_one_denial_with_unknown_project_also_cancels(tasks_db, status_db
     assert calls == []
     row = tasks_db.get_task(task["task_id"])
     assert row["state"] == "cancelled"
+
+
+# --- Export handlers: _run_export, dispatched via _EXPORT_FACTORIES ---
+#
+# All three export kinds share one _run_export dispatcher that reuses
+# export/endpoints.py's own worker factories directly (see worker.py's
+# _HANDLERS comment for why, unlike _run_import) -- so what's worth testing
+# here is worker.py's own wiring (BatchItem reconstruction, which params go
+# where, submitted_by threading), not Exporter/Orthanc/ProKnow behaviour
+# itself, which already has its own coverage (test_export_manifest.py,
+# test_export_anon_boundary.py). Monkeypatching the factories to fakes
+# keeps these tests fast and connection-free.
+
+def test_reconstruct_batch_item_round_trips_extra():
+    """The UID-move flow's "identifier" lives in extra, not real_id -- this
+    must survive the claim -> task dict -> BatchItem round trip intact."""
+    task = {
+        "real_id": "1.2.3", "display_id": "1.2.3", "status_mrn": "R1",
+        "input_path": "/tmp/x.csv", "extra": {"study_uid": "1.2.3", "series_uid": "1.2.3.4"},
+    }
+    item = worker._reconstruct_batch_item(task)
+    assert item.real_id == "1.2.3"
+    assert item.display_id == "1.2.3"
+    assert item.status_mrn == "R1"
+    assert item.input_path == "/tmp/x.csv"
+    assert item.extra == {"study_uid": "1.2.3", "series_uid": "1.2.3.4"}
+
+
+def test_run_export_dicom_move_calls_factory_with_params(monkeypatch):
+    calls = []
+
+    def _fake_factory(destination, submitted_by=None):
+        calls.append({"destination": destination, "submitted_by": submitted_by})
+        return lambda item: {"mrn_seen": item.real_id}
+
+    monkeypatch.setattr(worker.export_endpoints, "_dicom_move_worker", _fake_factory)
+
+    task = {"kind": "dicom_move", "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
+            "input_path": None, "extra": {},
+            "params": {"destination": "SOME_AE", "project_id": "p", "username": "alice"}}
+    result = worker._run_export(task)
+
+    assert calls == [{"destination": "SOME_AE", "submitted_by": "alice"}]
+    assert result == {"mrn_seen": "R1"}
+
+
+def test_run_export_proknow_upload_calls_factory_with_params(monkeypatch):
+    calls = []
+
+    def _fake_factory(collection, submitted_by=None):
+        calls.append({"collection": collection, "submitted_by": submitted_by})
+        return lambda item: {"mrn_seen": item.real_id}
+
+    monkeypatch.setattr(worker.export_endpoints, "_proknow_worker", _fake_factory)
+
+    task = {"kind": "proknow_upload", "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
+            "input_path": None, "extra": {},
+            "params": {"collection": "SomeCollection", "project_id": "p", "username": "bob"}}
+    result = worker._run_export(task)
+
+    assert calls == [{"collection": "SomeCollection", "submitted_by": "bob"}]
+    assert result == {"mrn_seen": "R1"}
+
+
+def test_run_export_uid_move_calls_factory_and_preserves_extra(monkeypatch):
+    calls = []
+    seen_items = []
+
+    def _fake_factory(destination, submitted_by=None):
+        calls.append({"destination": destination, "submitted_by": submitted_by})
+
+        def _worker(item):
+            seen_items.append(item)
+            return {"status": "Success"}
+        return _worker
+
+    monkeypatch.setattr(worker.export_endpoints, "_uid_move_worker", _fake_factory)
+
+    task = {
+        "kind": "uid_move", "real_id": "1.2.3", "display_id": "1.2.3", "status_mrn": "R1", "input_path": None,
+        "extra": {"study_uid": "1.2.3", "series_uid": None},
+        "params": {"destination": "SOME_AE", "project_id": "p", "username": "carol"},
+    }
+    result = worker._run_export(task)
+
+    assert calls == [{"destination": "SOME_AE", "submitted_by": "carol"}]
+    assert result == {"status": "Success"}
+    assert seen_items[0].extra == {"study_uid": "1.2.3", "series_uid": None}
+
+
+def test_export_kinds_registered_in_handlers():
+    assert set(worker._HANDLERS) == {"import", "dicom_move", "proknow_upload", "uid_move"}
+    assert worker._HANDLERS["dicom_move"] is worker._run_export
+    assert worker._HANDLERS["proknow_upload"] is worker._run_export
+    assert worker._HANDLERS["uid_move"] is worker._run_export
+
+
+def test_handle_one_dicom_move_end_to_end(tasks_db, status_db, job_id, active_project, monkeypatch, _restore_handlers):
+    """A full claim/execute/terminal-write pass through the real 'dicom_move'
+    _HANDLERS entry (not a fake kind), with only the underlying Exporter
+    call faked out."""
+    project_id, username = active_project
+
+    def _fake_factory(destination, submitted_by=None):
+        return lambda item: {"destination": destination, "submitted_by": submitted_by, "status": "Success"}
+
+    monkeypatch.setattr(worker.export_endpoints, "_dicom_move_worker", _fake_factory)
+
+    item = BatchItem(real_id="R1", display_id="A1", status_mrn="R1")
+    tasks_db.enqueue(job_id, [item], kind="dicom_move", stage="export",
+                      params={"destination": "SOME_AE", "project_id": project_id, "username": username})
+    task = tasks_db.claim("test-worker")
+
+    worker._handle_one(tasks_db, status_db, task)
+
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "succeeded"
+    assert row["details"] == {"destination": "SOME_AE", "submitted_by": username, "status": "Success"}

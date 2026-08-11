@@ -22,14 +22,24 @@ import logging
 
 from dotenv import load_dotenv
 
+# Must run before any backend.src.* import below: retrieve/endpoints.py and
+# export/endpoints.py both read DATABASE_URL (among other env vars) at
+# module level and raise/exit immediately if it's unset -- on a deployment
+# that relies solely on a .env file (rather than an already-exported shell
+# env var, as docker-compose's `environment:` block provides), importing
+# them before load_dotenv() has run crashes at import time with an
+# unhelpful ValueError, bypassing this file's own clean sys.exit(1) check
+# in main() below.
+load_dotenv()
+
 from backend.src.db import init_pool
 from backend.src.status.tasks_db import TasksDB
 from backend.src.status.db_client import StatusDB
 from backend.src.projects import enforcement
+from backend.src.common.sse import BatchItem
 from backend.src.retrieve.logic import Importer
 from backend.src.retrieve.endpoints import Response as ImportResponse
-
-load_dotenv()
+from backend.src.export import endpoints as export_endpoints
 
 logging.basicConfig(
     filename=None,
@@ -73,14 +83,61 @@ def _run_import(task: dict) -> dict:
     return ImportResponse(mrn=task["real_id"], **res).model_dump(exclude={"mrn"}, exclude_none=True)
 
 
-# kind -> factory dispatch. Only "import" is wired today (step 2 of
-# docs/worker-queue-design.md's sequencing); the three export flows join
-# this dict in a later step, once their endpoints are converted to enqueue
-# rather than run inline. Extending with a new flow -- or, later, a
+def _reconstruct_batch_item(task: dict) -> BatchItem:
+    """Faithfully rebuild the BatchItem the export worker factories below
+    expect, from a claimed task row -- `extra` matters here specifically
+    for the UID-move flow, whose "identifier" isn't a patient id at all
+    (it reads item.extra["study_uid"]/["series_uid"])."""
+    return BatchItem(
+        real_id=task["real_id"], display_id=task["display_id"], status_mrn=task["status_mrn"],
+        input_path=task["input_path"], extra=task["extra"],
+    )
+
+
+# kind -> (worker-factory attribute name on export_endpoints, params-key
+# for the factory's first arg). Export handlers reuse export/endpoints.py's
+# own worker factories directly (unlike _run_import, which reimplements
+# _import_worker's body to add per-process Importer caching) -- Exporter
+# needs no such cache (export/logic.py's Exporter.__init__ does no I/O,
+# unlike Importer's), so there's nothing to gain from not reusing them
+# as-is, and every future change to the export Response shape (manifest
+# fields, etc.) is automatically picked up here too. All three factories
+# share the exact same (destination_or_collection, submitted_by) shape, so
+# one dispatcher below covers all of them instead of three near-identical
+# functions.
+#
+# Stored as attribute *names*, not the functions themselves: binding
+# `export_endpoints._dicom_move_worker` directly into this dict would
+# capture that function object once, at import time -- getattr() below
+# does a fresh lookup on export_endpoints every call, the same as the
+# three separate functions this replaced did implicitly (each referenced
+# `export_endpoints._x_worker` directly in its body). This also matters
+# for tests: monkeypatching `export_endpoints._dicom_move_worker` only
+# takes effect on a live attribute lookup, not a value already captured
+# into a dict.
+_EXPORT_FACTORIES = {
+    "dicom_move": ("_dicom_move_worker", "destination"),
+    "proknow_upload": ("_proknow_worker", "collection"),
+    "uid_move": ("_uid_move_worker", "destination"),
+}
+
+
+def _run_export(task: dict) -> dict:
+    factory_name, param_key = _EXPORT_FACTORIES[task["kind"]]
+    factory = getattr(export_endpoints, factory_name)
+    item = _reconstruct_batch_item(task)
+    worker_fn = factory(task["params"][param_key], submitted_by=task["params"]["username"])
+    return worker_fn(item)
+
+
+# kind -> handler dispatch. Extending with a new flow -- or, later, a
 # per-user destination-allow-list check (docs/safety-plan.md §A) -- means
 # adding one entry/one call here, not touching the claim/execute loop below.
 _HANDLERS = {
     "import": _run_import,
+    "dicom_move": _run_export,
+    "proknow_upload": _run_export,
+    "uid_move": _run_export,
 }
 
 
