@@ -54,9 +54,13 @@
             <img src="/static/img/hermes-icon-dark-navbar.svg" alt="HERMES" class="h-10 w-10">
             <span class="text-white text-lg font-bold tracking-tight">HERMES</span>
           </a>
-          {% if user and user.is_staff %}
+          {% if user %}
           <div class="hidden md:flex items-center gap-4 text-sm">
-            <a href="/accounts/users" class="text-hermes-200 hover:text-white">Users</a>
+            <a href="/projects" class="text-hermes-200 hover:text-white">Projects</a>
+            {% if user.is_staff %}
+              <a href="/projects/review" class="text-hermes-200 hover:text-white">Review Queue</a>
+              <a href="/accounts/users" class="text-hermes-200 hover:text-white">Users</a>
+            {% endif %}
           </div>
           {% endif %}
         </div>

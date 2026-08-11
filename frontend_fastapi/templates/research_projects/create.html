@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "_form_field.html" import form_field %}
+{% block title %}Request a project — HERMES{% endblock %}
+{% block content %}
+<div class="max-w-lg">
+  <h1 class="text-xl font-semibold text-gray-900 mb-1">Request a new project</h1>
+  <p class="text-sm text-gray-500 mb-6">
+    Every import/export requires membership in an approved, non-expired project.
+    Create a draft here, then submit it for review once you're ready.
+  </p>
+  {% if backend_error %}
+  <div class="rounded-md p-4 bg-red-50 text-red-800 border border-red-200 text-sm mb-4">{{ backend_error }}</div>
+  {% endif %}
+  <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for field in form %}{{ form_field(field) }}{% endfor %}
+    <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+      Create draft
+    </button>
+  </form>
+</div>
+{% endblock %}

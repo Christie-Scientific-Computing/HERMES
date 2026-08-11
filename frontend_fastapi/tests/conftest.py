@@ -8,6 +8,7 @@ own primitives (sessions, CSRF, login/logout, flash, the auth gates) get
 exercised through actual HTTP request/response cycles rather than only as
 bare function calls.
 """
+import httpx
 import pytest
 from fastapi import Depends, FastAPI, Form, Response
 from fastapi.testclient import TestClient
@@ -17,7 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from frontend_fastapi import auth, security
+from frontend_fastapi import auth, backend_client, security
 from frontend_fastapi.deps import (
     csrf_protect,
     get_current_user,
@@ -35,8 +36,38 @@ from frontend_fastapi.flash import flash
 # lifespan, which this fixture never runs; see main.py).
 from frontend_fastapi.main import _forbidden, _not_authenticated
 from frontend_fastapi.models import Base, Session, User
-from frontend_fastapi.routers import accounts
+from frontend_fastapi.routers import accounts, research_projects
 from frontend_fastapi.session_middleware import SessionMiddleware
+
+
+@pytest.fixture(autouse=True)
+def _isolated_backend_client(monkeypatch):
+    """
+    backend_client.client is a module-level httpx.AsyncClient, deliberately
+    long-lived in production (see that module's docstring: one pooled
+    client, closed once in main.py's lifespan). Under pytest-asyncio's
+    function-scoped event loop, reusing that same object across tests binds
+    its internal connection pool to a loop that's already closed by the
+    time the next test runs, raising "RuntimeError: Event loop is closed"
+    the moment any route calls it (every authenticated page render does,
+    via get_template_context's nav_active_projects lookup) -- a pure
+    test-harness artifact, not a production bug (a real uvicorn process has
+    exactly one event loop for its entire lifetime).
+
+    Autouse so every test gets a fresh client bound to the current test's
+    event loop, defaulting to an empty-but-successful /projects response so
+    that lookup resolves without every test file needing to think about it.
+    Tests that care about a specific backend response (e.g. this module's
+    own research_projects tests) monkeypatch backend_client.client again
+    themselves, same as test_backend_client.py's existing per-test pattern.
+    """
+    def default_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"projects": []})
+
+    monkeypatch.setattr(
+        backend_client, "client",
+        httpx.AsyncClient(base_url="http://backend.invalid", transport=httpx.MockTransport(default_handler)),
+    )
 
 
 @pytest.fixture()
@@ -113,6 +144,7 @@ def app(SessionFactory):
     # place for the lower-level session/CSRF/auth-gate primitive tests
     # that predate any real router existing.
     test_app.include_router(accounts.router)
+    test_app.include_router(research_projects.router)
 
     @test_app.post("/test/login")
     async def _login(

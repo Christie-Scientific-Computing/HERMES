@@ -61,7 +61,46 @@ async def _get(path: str, params: Optional[dict] = None) -> dict:
     return resp.json()
 
 
+async def _post(path: str, json: Optional[dict] = None, params: Optional[dict] = None) -> dict:
+    resp = await client.post(path, json=json, params=params)
+    _raise_for_status(resp)
+    return resp.json()
+
+
+async def _delete(path: str, params: Optional[dict] = None) -> dict:
+    resp = await client.delete(path, params=params)
+    _raise_for_status(resp)
+    return resp.json()
+
+
 # ---- Projects (research_projects, ported in Phase 2) ----
+
+async def create_project(title: str, created_by: str, description: str = "", ethics_reference: str = "") -> dict:
+    return await _post("/projects", json={
+        "title": title, "created_by": created_by,
+        "description": description or None, "ethics_reference": ethics_reference or None,
+    })
+
+
+async def submit_project(project_id: str, username: str) -> dict:
+    return await _post(f"/projects/{project_id}/submit", json={"username": username})
+
+
+async def review_project(project_id: str, reviewer: str, approved: bool, comment: str = "", expiry_date=None) -> dict:
+    # expiry_date may arrive as a datetime.date (WTForms' DateField),
+    # datetime.datetime, an already-isoformatted str, or None -- httpx's
+    # JSON encoder only knows how to serialize plain str/None, so normalize
+    # anything date-like (both date and datetime expose .isoformat()) here
+    # rather than pushing that distinction onto every caller.
+    return await _post(f"/projects/{project_id}/review", json={
+        "reviewer": reviewer, "approved": approved, "comment": comment or None,
+        "expiry_date": expiry_date.isoformat() if hasattr(expiry_date, "isoformat") else expiry_date,
+    })
+
+
+async def revoke_project(project_id: str, revoked_by: str, comment: str = "") -> dict:
+    return await _post(f"/projects/{project_id}/revoke", json={"revoked_by": revoked_by, "comment": comment or None})
+
 
 async def list_projects(username: Optional[str] = None, status: Optional[str] = None) -> list[dict]:
     params = {}
@@ -70,6 +109,22 @@ async def list_projects(username: Optional[str] = None, status: Optional[str] = 
     if status:
         params["status"] = status
     return (await _get("/projects", params=params))["projects"]
+
+
+async def get_project(project_id: str) -> dict:
+    return await _get(f"/projects/{project_id}")
+
+
+async def add_member(project_id: str, username: str, added_by: str, role: str = "member") -> dict:
+    return await _post(f"/projects/{project_id}/members", json={"username": username, "role": role, "added_by": added_by})
+
+
+async def remove_member(project_id: str, username: str, removed_by: str) -> dict:
+    return await _delete(f"/projects/{project_id}/members/{username}", params={"removed_by": removed_by})
+
+
+async def list_project_jobs(project_id: str) -> list[dict]:
+    return (await _get(f"/projects/{project_id}/jobs"))["jobs"]
 
 
 async def list_user_active_projects(username: str) -> list[dict]:
