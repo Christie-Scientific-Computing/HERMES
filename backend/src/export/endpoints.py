@@ -9,7 +9,7 @@ import numpy as np
 import requests as http_requests
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from proknow import ProKnow
 from dotenv import load_dotenv
 from pyorthanc import Orthanc, find_series, find_studies
@@ -58,6 +58,11 @@ class Request(BaseModel):
     path_to_csv: str | None = None
     destination: str | None = None # DICOM AE
     collection: str | None = None # ProKnow collection
+    # DICOM C-MOVE only (dicom_move) -- see Exporter.dicom_c_move's
+    # docstring. Sent to Orthanc as MoveOriginatorID so a receiving
+    # anonymising node on the DMZ can pick the right pseudonymisation table
+    # (e.g. a clinical-trial patient) from the incoming DIMSE message.
+    message_id: int | None = Field(default=None, ge=0, le=65535)
 
 # Note: _dicom_move_worker/_proknow_worker/_uid_move_worker (below) dump this
 # with exclude_none=True, since their output feeds events.details/the SSE
@@ -114,9 +119,9 @@ async def get_proknow_collections(username: str = Query(...)):
         raise HTTPException(status_code=502, detail=f"ProKnow query failed: {exc}")
 
 
-def _dicom_move_worker(destination: str, submitted_by: str | None = None):
+def _dicom_move_worker(destination: str, submitted_by: str | None = None, message_id: int | None = None):
     def worker(item: BatchItem) -> dict:
-        res = Exporter(destination=destination).dicom_c_move(item.real_id)
+        res = Exporter(destination=destination).dicom_c_move(item.real_id, message_id=message_id)
         return Response(
             mrn=item.real_id,
             destination=destination,
@@ -202,7 +207,7 @@ async def dicom_move(body: Request):
     return StreamingResponse(
         run_batch_job(
             req['job_id'], items, stage='export',
-            worker=_dicom_move_worker(req['destination'], submitted_by=req['username']),
+            worker=_dicom_move_worker(req['destination'], submitted_by=req['username'], message_id=req.get('message_id')),
             status_db=status_db,
             description=f"Batch export to {req['destination']}",
             created_by=req['username'],
@@ -305,6 +310,12 @@ async def dicom_move_file(
     project_id: str = Form(...),
     username: str = Form(...),
     destination: str = Form(..., description="Orthanc modality AE title"),
+    message_id: int | None = Form(
+        None, ge=0, le=65535,
+        description="Optional DICOM Move Originator Message ID, sent to Orthanc as "
+                     "MoveOriginatorID -- lets a receiving anonymising node pick the right "
+                     "pseudonymisation table (e.g. for clinical-trial patients).",
+    ),
 ):
     """Accept a CSV file upload and enqueue a DICOM C-MOVE batch job for
     backend/worker.py to execute (docs/worker-queue-design.md). Used by the frontend."""
@@ -315,9 +326,12 @@ async def dicom_move_file(
     tmp_path.write_bytes(await file.read())
 
     items = _build_export_items(str(tmp_path))
+    params = {"destination": destination}
+    if message_id is not None:
+        params["message_id"] = message_id
     return _enqueue_export_job(
         job_id, items, kind="dicom_move", description=f"Batch export to {destination}",
-        project_id=project_id, username=username, params={"destination": destination},
+        project_id=project_id, username=username, params=params,
     )
 
 

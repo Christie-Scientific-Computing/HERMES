@@ -291,8 +291,33 @@ class RetrieveDataQueueTests(_StubbedBackend):
         self.assertEqual(kwargs["content"], b"patient_id\n1001\n")
         self.assertEqual(kwargs["destination"], "AE1")
         self.assertEqual(kwargs["username"], self.username)
+        # Left blank -- must reach backend_client as None, not "" or missing.
+        self.assertIsNone(kwargs["message_id"])
         self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
                               fetch_redirect_response=False)
+
+    def test_dicom_mode_with_message_id_passes_it_through(self):
+        """Clinical-trial export path: a message_id in the form must reach
+        backend_client.dicom_move_file as a real int (docs on
+        Exporter.dicom_c_move -- forwarded to Orthanc as MoveOriginatorID)."""
+        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:retrieve_data"), {
+            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
+            "message_id": "51966",
+        })
+        kwargs = self.backend.dicom_move_file.call_args.kwargs
+        self.assertEqual(kwargs["message_id"], 51966)
+        self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
+                              fetch_redirect_response=False)
+
+    def test_dicom_mode_rejects_message_id_outside_dicom_us_range(self):
+        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:retrieve_data"), {
+            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
+            "message_id": "70000",
+        })
+        self.assertEqual(resp.status_code, 200)  # re-renders the form, no redirect
+        self.backend.dicom_move_file.assert_not_called()
 
     def test_proknow_mode_enqueues_and_redirects_to_watch(self):
         csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")

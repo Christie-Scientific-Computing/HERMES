@@ -102,8 +102,9 @@ def _reconstruct_batch_item(task: dict) -> BatchItem:
 # unlike Importer's), so there's nothing to gain from not reusing them
 # as-is, and every future change to the export Response shape (manifest
 # fields, etc.) is automatically picked up here too. All three factories
-# share the exact same (destination_or_collection, submitted_by) shape, so
-# one dispatcher below covers all of them instead of three near-identical
+# share the same (destination_or_collection, submitted_by) shape -- plus an
+# optional message_id, "dicom_move"-only (see _run_export below) -- so one
+# dispatcher below covers all of them instead of three near-identical
 # functions.
 #
 # Stored as attribute *names*, not the functions themselves: binding
@@ -126,7 +127,13 @@ def _run_export(task: dict) -> dict:
     factory_name, param_key = _EXPORT_FACTORIES[task["kind"]]
     factory = getattr(export_endpoints, factory_name)
     item = _reconstruct_batch_item(task)
-    worker_fn = factory(task["params"][param_key], submitted_by=task["params"]["username"])
+    kwargs = {"submitted_by": task["params"]["username"]}
+    if task["kind"] == "dicom_move":
+        # Only _dicom_move_worker accepts this -- _proknow_worker/
+        # _uid_move_worker don't, so it's kept out of kwargs for those kinds
+        # rather than passed as None everywhere.
+        kwargs["message_id"] = task["params"].get("message_id")
+    worker_fn = factory(task["params"][param_key], **kwargs)
     return worker_fn(item)
 
 

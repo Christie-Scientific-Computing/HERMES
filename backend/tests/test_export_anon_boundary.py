@@ -35,7 +35,7 @@ def client(monkeypatch):
         def __init__(self, destination):
             self.destination = destination
 
-        def dicom_c_move(self, patient_id):
+        def dicom_c_move(self, patient_id, message_id=None):
             assert patient_id in (REAL_MRN_1, REAL_MRN_2), f"worker got non-real id: {patient_id}"
             return {"status": "success"}
 
@@ -168,7 +168,7 @@ def test_cancel_mid_batch_stops_remaining_items(client, tmp_path, monkeypatch, a
         def __init__(self, destination):
             pass
 
-        def dicom_c_move(self, patient_id):
+        def dicom_c_move(self, patient_id, message_id=None):
             nonlocal call_count
             call_count += 1
             export_endpoints.status_db.cancel_job(job_id)

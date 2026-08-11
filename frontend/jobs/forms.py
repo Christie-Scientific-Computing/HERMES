@@ -41,6 +41,21 @@ class BatchImportForm(ProjectScopedForm):
 class DicomExportForm(ProjectScopedForm):
     file = forms.FileField(label="CSV file (patient_id column)")
     destination = forms.ChoiceField(label="Orthanc modality AE title", choices=[])
+    # Optional DICOM C-MOVE Message ID -- forwarded to Orthanc as
+    # MoveOriginatorID (see backend/src/export/logic.py's
+    # Exporter.dicom_c_move) so a receiving anonymising node on the DMZ can
+    # pick the right pseudonymisation table (e.g. for clinical-trial
+    # patients, who need a different PatientID mapping than routine
+    # pseudo-anonymisation). Left blank for an ordinary export. min_value/
+    # max_value match DICOM's Message ID VR (US, unsigned 16-bit): 0-65535
+    # -- Django's NumberInput widget renders these as the input's HTML
+    # min/max attributes for free, on top of the server-side check.
+    message_id = forms.IntegerField(
+        label="Message ID (optional)", required=False, min_value=0, max_value=65535,
+        help_text="For clinical-trial patients: the DICOM Message ID the receiving "
+                   "anonymising node uses to pick a pseudonymisation table. Leave blank "
+                   "for an ordinary export.",
+    )
 
     def set_destination_choices(self, modalities: list[str]) -> None:
         self._set_choices("destination", modalities)

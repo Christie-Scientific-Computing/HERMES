@@ -96,7 +96,23 @@ class Exporter():
 
         return {'status': 'Success', **manifest}
 
-    def dicom_c_move(self, patient_id: str):
+    def dicom_c_move(self, patient_id: str, message_id: int | None = None):
+        """
+        `message_id`, when given, is sent to Orthanc as `MoveOriginatorID` --
+        Orthanc includes it as the Move Originator Message ID (DICOM tag
+        0000,1031) on the outgoing C-STORE association, exactly as if this
+        store had resulted from a real C-MOVE request bearing that Message
+        ID. This is how a receiving anonymising node on the DMZ can be told
+        which pseudonymisation table to apply to an otherwise ordinary
+        export (e.g. a clinical-trial patient who needs a different
+        PatientID mapping than routine pseudo-anonymisation) -- it's a
+        signalling channel to the destination, not something HERMES
+        interprets itself. Must fit DICOM's Message ID VR (US, unsigned
+        16-bit): 0-65535.
+        """
+        if message_id is not None and not (0 <= message_id <= 65535):
+            raise ValueError(f"message_id must be between 0 and 65535 (got {message_id})")
+
         try:
             client = Orthanc(url=ORTHANC_URL, username=ORTHANC_USER,
                     password=ORTHANC_PASS, verify=False,
@@ -122,13 +138,16 @@ class Exporter():
         manifest = self._build_manifest(client, patient_id, series_list)
 
         series_to_send = [x.identifier for x in series_list]
+        store_json = {
+            "Resources": series_to_send,
+            "Synchronous": False,
+        }
+        if message_id is not None:
+            store_json["MoveOriginatorID"] = message_id
         try:
             res = client.post_modalities_id_store(
                 id_=self.destination,
-                json={
-                    "Resources": series_to_send,
-                    "Synchronous": False
-                }
+                json=store_json,
             )
             logger.info("DICOM moved")
         except Exception as e:
