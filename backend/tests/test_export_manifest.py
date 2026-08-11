@@ -118,6 +118,62 @@ def test_dicom_c_move_manifest_uses_orthanc_reported_checksums(monkeypatch):
     ]
 
 
+# ---------------------------------------------------------------------------
+# message_id -> Orthanc's MoveOriginatorID (clinical-trial pseudonymisation
+# signalling to the DMZ anonymising node)
+# ---------------------------------------------------------------------------
+
+def test_dicom_c_move_sends_message_id_as_move_originator_id(monkeypatch):
+    from backend.src.export import logic
+
+    study = FakeStudy(uid="1.2.840.study.3")
+    series_a = FakeSeries("series-a", {"SeriesInstanceUID": "1.2.840.series.a"})
+    fake_client = _FakeOrthancMoveClient({"series-a": []}, {})
+
+    monkeypatch.setattr(logic, "Orthanc", lambda **kwargs: fake_client)
+    monkeypatch.setattr(logic, "find_series", lambda client, query: [series_a])
+    monkeypatch.setattr(logic, "find_studies", lambda client, query: [study])
+
+    exp = logic.Exporter(destination="TRIAL_AE")
+    res = exp.dicom_c_move("500125", message_id=51966)
+
+    assert res["status"] == "Success"
+    assert fake_client.move_calls == [
+        {"id_": "TRIAL_AE", "json": {"Resources": ["series-a"], "Synchronous": False, "MoveOriginatorID": 51966}}
+    ]
+
+
+def test_dicom_c_move_omits_move_originator_id_when_no_message_id_given(monkeypatch):
+    """Ordinary (non-trial) exports must not gain a MoveOriginatorID key at
+    all -- not even null -- since Orthanc/the DMZ node should see exactly
+    the same request shape as before this feature existed."""
+    from backend.src.export import logic
+
+    study = FakeStudy(uid="1.2.840.study.4")
+    series_a = FakeSeries("series-a", {"SeriesInstanceUID": "1.2.840.series.a"})
+    fake_client = _FakeOrthancMoveClient({"series-a": []}, {})
+
+    monkeypatch.setattr(logic, "Orthanc", lambda **kwargs: fake_client)
+    monkeypatch.setattr(logic, "find_series", lambda client, query: [series_a])
+    monkeypatch.setattr(logic, "find_studies", lambda client, query: [study])
+
+    logic.Exporter(destination="SOME_AE").dicom_c_move("500126")
+
+    assert "MoveOriginatorID" not in fake_client.move_calls[0]["json"]
+
+
+@pytest.mark.parametrize("bad_message_id", [-1, 65536, 100000])
+def test_dicom_c_move_rejects_message_id_outside_dicom_us_range(monkeypatch, bad_message_id):
+    """DICOM's Message ID VR (US) is an unsigned 16-bit value -- fail fast
+    and clearly rather than let an out-of-range value reach Orthanc/the
+    wire and fail there in a way that's harder to diagnose."""
+    from backend.src.export import logic
+
+    exp = logic.Exporter(destination="SOME_AE")
+    with pytest.raises(ValueError, match="message_id"):
+        exp.dicom_c_move("500127", message_id=bad_message_id)
+
+
 def test_dicom_c_move_manifest_survives_a_checksum_lookup_failure(monkeypatch):
     """A single instance's MD5 lookup failing shouldn't blow up the whole
     export -- it's an audit nicety, not load-bearing for the move itself."""
@@ -299,7 +355,7 @@ def client(monkeypatch):
         def __init__(self, destination):
             self.destination = destination
 
-        def dicom_c_move(self, patient_id):
+        def dicom_c_move(self, patient_id, message_id=None):
             return {
                 "status": "Success",
                 "series_count": 2,

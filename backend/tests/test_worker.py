@@ -208,10 +208,14 @@ def test_reconstruct_batch_item_round_trips_extra():
 
 
 def test_run_export_dicom_move_calls_factory_with_params(monkeypatch):
+    """dicom_move always threads a message_id kwarg through to
+    _dicom_move_worker (None when the task's params don't have one) --
+    unlike _proknow_worker/_uid_move_worker, which never see it at all
+    (see test_run_export_message_id_is_dicom_move_only below)."""
     calls = []
 
-    def _fake_factory(destination, submitted_by=None):
-        calls.append({"destination": destination, "submitted_by": submitted_by})
+    def _fake_factory(destination, submitted_by=None, message_id=None):
+        calls.append({"destination": destination, "submitted_by": submitted_by, "message_id": message_id})
         return lambda item: {"mrn_seen": item.real_id}
 
     monkeypatch.setattr(worker.export_endpoints, "_dicom_move_worker", _fake_factory)
@@ -221,8 +225,51 @@ def test_run_export_dicom_move_calls_factory_with_params(monkeypatch):
             "params": {"destination": "SOME_AE", "project_id": "p", "username": "alice"}}
     result = worker._run_export(task)
 
-    assert calls == [{"destination": "SOME_AE", "submitted_by": "alice"}]
+    assert calls == [{"destination": "SOME_AE", "submitted_by": "alice", "message_id": None}]
     assert result == {"mrn_seen": "R1"}
+
+
+def test_run_export_dicom_move_threads_message_id_through(monkeypatch):
+    """The clinical-trial pseudonymisation-signalling path (docs on
+    Exporter.dicom_c_move): a message_id in the task's params must reach
+    _dicom_move_worker, which is what actually forwards it to Orthanc as
+    MoveOriginatorID."""
+    calls = []
+
+    def _fake_factory(destination, submitted_by=None, message_id=None):
+        calls.append({"destination": destination, "submitted_by": submitted_by, "message_id": message_id})
+        return lambda item: {"mrn_seen": item.real_id}
+
+    monkeypatch.setattr(worker.export_endpoints, "_dicom_move_worker", _fake_factory)
+
+    task = {"kind": "dicom_move", "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
+            "input_path": None, "extra": {},
+            "params": {"destination": "TRIAL_AE", "message_id": 51966, "project_id": "p", "username": "alice"}}
+    result = worker._run_export(task)
+
+    assert calls == [{"destination": "TRIAL_AE", "submitted_by": "alice", "message_id": 51966}]
+    assert result == {"mrn_seen": "R1"}
+
+
+def test_run_export_message_id_is_dicom_move_only(monkeypatch):
+    """proknow_upload/uid_move factories don't accept a message_id kwarg at
+    all -- _run_export must not pass one, even if a stray "message_id" key
+    somehow ended up in their task params (e.g. hand-edited params)."""
+    calls = []
+
+    def _fake_proknow(collection, submitted_by=None):
+        calls.append({"collection": collection, "submitted_by": submitted_by})
+        return lambda item: {"ok": True}
+
+    monkeypatch.setattr(worker.export_endpoints, "_proknow_worker", _fake_proknow)
+
+    task = {"kind": "proknow_upload", "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
+            "input_path": None, "extra": {},
+            "params": {"collection": "C", "message_id": 51966, "project_id": "p", "username": "bob"}}
+    result = worker._run_export(task)  # would TypeError if message_id were passed to _fake_proknow
+
+    assert calls == [{"collection": "C", "submitted_by": "bob"}]
+    assert result == {"ok": True}
 
 
 def test_run_export_proknow_upload_calls_factory_with_params(monkeypatch):
@@ -282,7 +329,7 @@ def test_handle_one_dicom_move_end_to_end(tasks_db, status_db, job_id, active_pr
     call faked out."""
     project_id, username = active_project
 
-    def _fake_factory(destination, submitted_by=None):
+    def _fake_factory(destination, submitted_by=None, message_id=None):
         return lambda item: {"destination": destination, "submitted_by": submitted_by, "status": "Success"}
 
     monkeypatch.setattr(worker.export_endpoints, "_dicom_move_worker", _fake_factory)

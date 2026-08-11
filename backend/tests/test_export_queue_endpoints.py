@@ -62,6 +62,46 @@ def test_dicom_move_file_enqueues(client, active_project):
     assert submitted_count == 1
 
 
+def test_dicom_move_file_with_message_id_enqueues_it_in_params(client, active_project):
+    """Clinical-trial export path (docs on Exporter.dicom_c_move): a
+    message_id form field must reach the enqueued task's params, since
+    that's what worker.py's _run_export reads to thread it through to
+    Orthanc as MoveOriginatorID."""
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/export/dicom_move_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "destination": "TRIAL_AE", "message_id": "51966",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    tasks_db = TasksDB()
+    task = tasks_db.claim("integration-test-worker")
+    assert task["params"] == {
+        "destination": "TRIAL_AE", "message_id": 51966, "project_id": project_id, "username": username,
+    }
+
+
+def test_dicom_move_file_rejects_message_id_outside_dicom_us_range(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/export/dicom_move_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "destination": "TRIAL_AE", "message_id": "70000",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 422
+
+
 def test_proknow_upload_file_enqueues(client, active_project):
     project_id, username = active_project
     job_id = f"queue-test-{uuid.uuid4()}"
