@@ -41,7 +41,7 @@ class StatusDB:
                 (job_id, mrn, input_path, datetime.now(timezone.utc)),
             )
 
-    def add_event(self, job_id: str, mrn: str, stage: str, event_type: str, error_message: Optional[str] = None, details: Optional[dict] = None, attempt: int = 1):
+    def add_event(self, job_id: str, mrn: str, stage: str, event_type: str, error_message: Optional[str] = None, details: Optional[dict] = None, attempt: int = 1, task_id: Optional[int] = None):
         """
         Insert one event and extend the hash chain (docs/safety-plan.md §D1)
         in the same transaction:
@@ -60,6 +60,13 @@ class StatusDB:
         `get_conn()` wraps all of this in one commit/rollback unit, so the
         lock is held for the whole read-compute-insert-update sequence and
         released atomically.
+
+        `task_id` (optional, added for the worker queue -- see
+        backend/src/status/tasks_db.py) links this event back to the task
+        row that produced it. It plays no part in the hash chain --
+        hash_chain.py's canonical_event_json hashes a fixed field set that
+        never included it, by design, so passing it here cannot change any
+        previously- or subsequently-computed row_hash.
         """
         ts = datetime.now(timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
@@ -71,11 +78,11 @@ class StatusDB:
 
             cur.execute(
                 """
-                INSERT INTO events(job_id, mrn, stage, event_type, ts, attempt, error_message, details, prev_hash, row_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO events(job_id, mrn, stage, event_type, ts, attempt, error_message, details, prev_hash, row_hash, task_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (job_id, mrn, stage, event_type, ts, attempt, error_message,
-                 Json(details) if details is not None else None, prev_hash, row_hash),
+                 Json(details) if details is not None else None, prev_hash, row_hash, task_id),
             )
             cur.execute("UPDATE event_chain_state SET last_hash = %s WHERE id = 1", (row_hash,))
 
