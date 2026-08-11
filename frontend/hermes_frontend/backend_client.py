@@ -256,9 +256,13 @@ def proknow_upload_patient(job_id: str, mrn: str, collection: str, project_id: s
 
 
 def dicom_move_file(job_id: str, filename: str, content: bytes, project_id: str,
-                     username: str, destination: str) -> dict:
+                     username: str, destination: str, message_id: Optional[int] = None) -> dict:
+    # message_id is genuinely optional (an ordinary export has none) -- omit
+    # the key entirely rather than sending it as None, which httpx would
+    # otherwise stringify into the literal multipart value "None".
+    extra = {"message_id": message_id} if message_id is not None else {}
     return _post_batch_file("/export/dicom_move_file", job_id, filename, content,
-                             project_id, username, destination=destination)
+                             project_id, username, destination=destination, **extra)
 
 
 def proknow_upload_file(job_id: str, filename: str, content: bytes, project_id: str,

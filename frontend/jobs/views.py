@@ -199,6 +199,7 @@ def retrieve_data(request):
                         backend_client.dicom_move_file, uploaded.read(), uploaded.name,
                         dicom_form.cleaned_data["project_id"], request.user.username,
                         destination=dicom_form.cleaned_data["destination"],
+                        message_id=dicom_form.cleaned_data["message_id"],
                     )
                     return redirect("jobs:job_watch", job_id=job_id)
                 except backend_client.BackendError as e:
