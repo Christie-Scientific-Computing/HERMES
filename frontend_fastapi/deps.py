@@ -33,12 +33,23 @@ def get_session(request: Request, db: DBSession = Depends(get_db)) -> Session:
     request.state before any dependency runs -- guaranteed present for
     every route this dependency is used from (SessionMiddleware only skips
     /static and /health, neither of which use it).
+
+    Cached on request.state rather than relying solely on FastAPI's own
+    per-dependency cache: csrf_protect calls this as a plain function (not
+    via Depends(), see its own docstring for why), which FastAPI's cache
+    doesn't cover -- without this, a request that both goes through
+    csrf_protect AND some other Depends(get_session) route (any mutating,
+    authenticated route) would fetch the same row twice.
     """
+    cached = getattr(request.state, "session", None)
+    if cached is not None:
+        return cached
     session = db.get(Session, request.state.session_id)
-    # Stashed on request.state so main.py's exception handlers (which run
-    # outside normal Depends() resolution, for a NotAuthenticated/Forbidden
-    # a later dependency in the same chain raises) can still render an
-    # accurate CSRF-protected error page without a second DB round trip.
+    request.state.session = session
+    # Stashed separately so main.py's exception handlers (which run outside
+    # normal Depends() resolution, for a NotAuthenticated/Forbidden a later
+    # dependency in the same chain raises) can still render an accurate
+    # CSRF-protected error page without a second DB round trip.
     request.state.csrf_token = session.csrf_token
     return session
 
