@@ -71,3 +71,25 @@ def test_mismatched_passwords_are_rejected(client, db, csrf_token):
         "csrf_token": csrf_token(),
     })
     assert resp.status_code == 400
+
+
+def test_deactivated_account_cannot_be_activated(client, db, csrf_token):
+    """Regression test: an outstanding activation token stays cryptographically
+    valid for up to 3 days after an invite -- if the account is deactivated
+    in that window (e.g. the invite was a mistake), the token must stop
+    working too, matching login_submit's own is_active check rather than
+    silently bypassing it."""
+    user = _invite(db)
+    token = security.make_account_token(user.id, user.password_hash)
+    user.is_active = False
+    db.commit()
+
+    resp = client.get(f"/accounts/activate/{token}")
+    assert resp.status_code == 400
+
+    resp = client.post(f"/accounts/activate/{token}", data={
+        "password1": "a genuinely strong passphrase", "password2": "a genuinely strong passphrase",
+        "csrf_token": csrf_token(),
+    })
+    assert resp.status_code == 400
+    assert client.get("/test/whoami").json()["username"] is None

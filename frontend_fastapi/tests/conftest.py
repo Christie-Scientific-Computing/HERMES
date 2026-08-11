@@ -176,3 +176,13 @@ def csrf_token(client):
     def _get() -> str:
         return client.get("/test/context").json()["csrf_token"]
     return _get
+
+
+@pytest.fixture()
+def login(client, csrf_token):
+    """Logs `client` in as an already-created user, via the real
+    /accounts/login route -- shared by every test that needs an
+    authenticated session but isn't itself testing login."""
+    def _login(username: str, password: str = "correct horse battery staple") -> None:
+        client.post("/accounts/login", data={"username": username, "password": password, "csrf_token": csrf_token()})
+    return _login

@@ -38,7 +38,6 @@ def test_blank_submission_shows_the_same_generic_error(client, csrf_token):
     resp = client.post("/accounts/login", data={"username": "", "password": "", "csrf_token": csrf_token()})
     assert resp.status_code == 400
     assert "Incorrect username or password" in resp.text
-    assert "Incorrect username or password" in resp.text
 
 
 def test_inactive_user_cannot_log_in(client, make_user, csrf_token):
@@ -88,6 +87,20 @@ def test_next_param_rejects_a_protocol_relative_url(client, make_user, csrf_toke
     resp = client.post("/accounts/login", data={
         "username": "alice", "password": "correct horse battery staple",
         "csrf_token": csrf_token(), "next": "//evil.example.com",
+    }, follow_redirects=False)
+    assert resp.headers["location"] == "/"
+
+
+def test_next_param_rejects_a_backslash_prefixed_url(client, make_user, csrf_token):
+    """Regression test: browsers resolving a redirect Location header
+    normalize a leading backslash to a forward slash for http(s) URLs, so
+    "/\\evil.example.com" becomes the protocol-relative (i.e. external)
+    "//evil.example.com" by the time it's actually navigated to -- a bare
+    startswith("//") check on the raw string misses this entirely."""
+    make_user(username="alice", password="correct horse battery staple")
+    resp = client.post("/accounts/login", data={
+        "username": "alice", "password": "correct horse battery staple",
+        "csrf_token": csrf_token(), "next": "/\\evil.example.com",
     }, follow_redirects=False)
     assert resp.headers["location"] == "/"
 

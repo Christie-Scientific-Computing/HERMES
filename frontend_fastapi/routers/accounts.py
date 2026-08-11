@@ -4,10 +4,12 @@ list users. Port of accounts/views.py (Django) -- see that file for the
 exact behavior being matched. Makes zero backend_client calls (all
 local-DB), same as the Django original.
 """
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
 from frontend_fastapi import auth, email_backend, security
@@ -27,22 +29,59 @@ def _reject_duplicate_username(form, db: DBSession) -> bool:
     """True (and appends a field error) if form.username.data is already
     taken. Must be called AFTER form.validate() -- WTForms' Field.errors
     is an immutable empty tuple until validate() runs and replaces it with
-    a real list, so appending to it any earlier raises AttributeError."""
+    a real list, so appending to it any earlier raises AttributeError.
+
+    A plain check-then-insert: cheap and correct in the overwhelmingly
+    common case, but two concurrent submissions for the same username can
+    both pass this check before either has committed. _add_user_or_reject
+    below is what actually guarantees no duplicate row -- this is just
+    what makes the ordinary case return a clean form error instead of
+    reaching that path at all."""
     if form.username.data and db.query(User).filter_by(username=form.username.data).one_or_none() is not None:
         form.username.errors.append("A user with that username already exists.")
         return True
     return False
 
 
+def _add_user_or_reject(db: DBSession, form, new_user: User) -> bool:
+    """Adds+flushes new_user, converting a raced unique-constraint
+    violation on username (see _reject_duplicate_username's docstring)
+    into the same form error rather than an unhandled IntegrityError.
+
+    Unlike _reject_duplicate_username, doesn't assume form.validate() has
+    already run -- form.username.errors starts as an immutable tuple until
+    validate() replaces it with a real list (see that function's
+    docstring), and nothing enforces that every caller of this one
+    validates first, so this normalizes it defensively rather than risking
+    the same AttributeError."""
+    db.add(new_user)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        if not isinstance(form.username.errors, list):
+            form.username.errors = list(form.username.errors)
+        form.username.errors.append("A user with that username already exists.")
+        return False
+    return True
+
+
 def _safe_next(next_url: str) -> str:
     """Only ever redirect to a same-site path -- an unchecked `next` param
     is a classic open-redirect/phishing vector (send a victim to a trusted
     login page that then bounces them to an attacker-controlled site).
-    "//evil.com" is rejected too: browsers treat a leading "//" as
-    protocol-relative, i.e. still external, not a local path."""
-    if next_url and next_url.startswith("/") and not next_url.startswith("//"):
-        return next_url
-    return LOGIN_REDIRECT_URL
+
+    Checks the backslash-normalized form too, not just the raw string:
+    browsers resolving a Location header normalize a leading backslash to
+    a forward slash for special schemes (http/https), so "/\\evil.com" --
+    which doesn't start with "//" itself -- becomes the protocol-relative
+    "//evil.com" by the time the browser actually navigates, the same
+    external-redirect bypass a bare "//" check alone would miss."""
+    if not next_url or not next_url.startswith("/"):
+        return LOGIN_REDIRECT_URL
+    if next_url.replace("\\", "/").startswith("//"):
+        return LOGIN_REDIRECT_URL
+    return next_url
 
 
 @router.get("/login", name="login")
@@ -107,12 +146,19 @@ async def invite_submit(
             department=form.department.data or "", is_staff=form.is_staff.data,
             is_active=True, password_hash=security.unusable_password(),
         )
-        db.add(new_user)
-        db.flush()  # need new_user.id for the activation token below
+        if not _add_user_or_reject(db, form, new_user):
+            return templates.TemplateResponse(request, "accounts/invite.html", {**ctx, "form": form}, status_code=400)
 
         token = security.make_account_token(new_user.id, new_user.password_hash)
         activate_url = str(request.url_for("activate_account", token=token))
-        email_backend.send_mail(
+        # email_backend.send_mail is sync (smtplib, up to a 10s timeout) --
+        # this route is async def, so FastAPI does NOT run it in a
+        # threadpool the way it does for sync Depends()/routes. Calling it
+        # directly would block the whole event loop, stalling every other
+        # concurrent request, for as long as a slow/unreachable SMTP relay
+        # takes to time out.
+        await asyncio.to_thread(
+            email_backend.send_mail,
             subject="You've been invited to HERMES",
             body=f"An account has been created for you on HERMES.\n\nSet your password to activate it: {activate_url}",
             to=new_user.email,
@@ -148,7 +194,9 @@ async def create_user_submit(
             department=form.department.data or "", is_staff=form.is_staff.data,
             is_active=True, password_hash=security.hash_password(form.password1.data),
         )
-        db.add(new_user)
+        if not _add_user_or_reject(db, form, new_user):
+            return templates.TemplateResponse(request, "accounts/create_user.html", {**ctx, "form": form}, status_code=400)
+
         flash(session, "success", f"Created account for {new_user.username}. They can sign in immediately.")
         return RedirectResponse(request.url_for("user_list"), status_code=303)
 
@@ -200,7 +248,7 @@ def _resolve_activation_token(db: DBSession, token: str) -> User | None:
     if data is None:
         return None
     user = db.get(User, data["uid"])
-    if user is None or not security.account_token_matches(data, user.password_hash):
+    if user is None or not user.is_active or not security.account_token_matches(data, user.password_hash):
         return None
     return user
 
