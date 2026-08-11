@@ -30,9 +30,55 @@ def verify_password(raw_password: str, password_hash: str) -> bool:
         return False
     except Exception:
         # argon2 raises InvalidHash for a malformed/foreign hash (e.g. a
-        # fixture typo, or a row from a hashing scheme this app never
-        # wrote) -- treat any of that as "doesn't match", not a 500.
+        # fixture typo, an unusable-password sentinel, or a row from a
+        # hashing scheme this app never wrote) -- treat any of that as
+        # "doesn't match", not a 500. This is also what makes
+        # unusable_password()'s sentinel actually unusable: it isn't a
+        # valid argon2 hash, so verification always lands here.
         return False
+
+
+_UNUSABLE_PASSWORD_PREFIX = "!"
+
+
+def unusable_password() -> str:
+    """An invited-but-not-yet-activated account has no password to check
+    against yet -- this sentinel guarantees verify_password() always
+    returns False for it (see the except-branch comment above), the same
+    role Django's User.set_unusable_password() plays."""
+    return _UNUSABLE_PASSWORD_PREFIX + _random_token()
+
+
+def is_usable_password(password_hash: str) -> bool:
+    return not password_hash.startswith(_UNUSABLE_PASSWORD_PREFIX)
+
+
+# --- Password strength -------------------------------------------------------
+#
+# Partial parity with Django's AUTH_PASSWORD_VALIDATORS
+# (frontend/hermes_frontend/settings.py) -- an explicit, documented decision
+# per docs/frontend-rewrite-implementation-plan.md Phase 0's open item, not
+# a silent drop. Covers the two checks that need no external data
+# (MinimumLengthValidator, and a cheap approximation of
+# UserAttributeSimilarityValidator). Deliberately does NOT port
+# CommonPasswordValidator (Django's ~20k-entry common-password wordlist) --
+# vendoring or replacing it (e.g. with a zxcvbn strength score) is a
+# separate decision for whoever owns this deployment's actual password
+# policy, not something to guess at here.
+_MIN_PASSWORD_LENGTH = 8
+
+
+def password_strength_errors(password: str, *, username: str = "", email: str = "") -> list[str]:
+    errors = []
+    if len(password) < _MIN_PASSWORD_LENGTH:
+        errors.append(f"This password is too short. It must contain at least {_MIN_PASSWORD_LENGTH} characters.")
+    lowered = password.lower()
+    if username and username.lower() in lowered:
+        errors.append("This password is too similar to the username.")
+    email_local = email.split("@")[0] if email else ""
+    if email_local and len(email_local) > 3 and email_local.lower() in lowered:
+        errors.append("This password is too similar to the email address.")
+    return errors
 
 
 def _random_token() -> str:

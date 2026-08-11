@@ -30,7 +30,15 @@ def test_account_token_roundtrip_valid():
 
 def test_account_token_tampered_signature_rejected():
     token = security.make_account_token(user_id=42, password_hash="hash-v1")
-    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    # Flips the FIRST character of the signature segment, not the last --
+    # base64's final character can sit in a padding-affected position where
+    # more than one character decodes to the same bytes (depends on the
+    # signature's length mod 4), making a last-character flip a flaky,
+    # sometimes-no-op tamper. The first character of any base64 group has
+    # no such ambiguity: a different value always changes the decoded byte.
+    header, timestamp, signature = token.rsplit(".", 2)
+    tampered_signature = ("a" if signature[0] != "a" else "b") + signature[1:]
+    tampered = f"{header}.{timestamp}.{tampered_signature}"
     assert security.read_account_token(tampered) is None
 
 
@@ -51,3 +59,45 @@ def test_account_token_invalidated_once_password_changes():
     data = security.read_account_token(token)
     assert data is not None
     assert security.account_token_matches(data, current_password_hash="hash-v2-after-activation") is False
+
+
+def test_unusable_password_never_verifies_against_anything():
+    sentinel = security.unusable_password()
+    assert security.is_usable_password(sentinel) is False
+    assert security.verify_password("", sentinel) is False
+    assert security.verify_password("some guess", sentinel) is False
+
+
+def test_usable_password_is_a_real_hash():
+    hashed = security.hash_password("correct horse battery staple")
+    assert security.is_usable_password(hashed) is True
+
+
+def test_unusable_password_sentinels_are_distinct():
+    assert security.unusable_password() != security.unusable_password()
+
+
+def test_password_strength_rejects_short_passwords():
+    errors = security.password_strength_errors("short1")
+    assert any("too short" in e for e in errors)
+
+
+def test_password_strength_accepts_a_reasonable_password():
+    assert security.password_strength_errors("a genuinely strong passphrase") == []
+
+
+def test_password_strength_rejects_password_containing_username():
+    errors = security.password_strength_errors("carol carol carol", username="carol")
+    assert any("too similar to the username" in e for e in errors)
+
+
+def test_password_strength_rejects_password_containing_email_local_part():
+    errors = security.password_strength_errors("carolwilson is great", email="carolwilson@example.com")
+    assert any("too similar to the email" in e for e in errors)
+
+
+def test_password_strength_ignores_short_email_local_parts():
+    # A 2-character local part ("cw@...") is too likely to appear in an
+    # unrelated password by coincidence to be a meaningful similarity signal.
+    errors = security.password_strength_errors("cwaitforitlongpassword", email="cw@example.com")
+    assert errors == []

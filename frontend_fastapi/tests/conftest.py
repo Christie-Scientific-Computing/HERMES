@@ -35,6 +35,7 @@ from frontend_fastapi.flash import flash
 # lifespan, which this fixture never runs; see main.py).
 from frontend_fastapi.main import _forbidden, _not_authenticated
 from frontend_fastapi.models import Base, Session, User
+from frontend_fastapi.routers import accounts
 from frontend_fastapi.session_middleware import SessionMiddleware
 
 
@@ -106,6 +107,12 @@ def app(SessionFactory):
 
     test_app.exception_handler(NotAuthenticated)(_not_authenticated)
     test_app.exception_handler(Forbidden)(_forbidden)
+    # The real accounts router, exercised through the same isolated test
+    # engine as everything else here -- Phase 1's tests hit /accounts/*
+    # directly rather than the /test/* stand-ins below, which stay in
+    # place for the lower-level session/CSRF/auth-gate primitive tests
+    # that predate any real router existing.
+    test_app.include_router(accounts.router)
 
     @test_app.post("/test/login")
     async def _login(
@@ -160,3 +167,12 @@ def app(SessionFactory):
 @pytest.fixture()
 def client(app):
     return TestClient(app, base_url="http://localhost")
+
+
+@pytest.fixture()
+def csrf_token(client):
+    """Fetches a real CSRF token for the client's current session --
+    every mutating request needs one now that csrf_protect is global."""
+    def _get() -> str:
+        return client.get("/test/context").json()["csrf_token"]
+    return _get

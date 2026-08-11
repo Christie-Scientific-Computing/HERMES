@@ -1,9 +1,10 @@
 """
 FastAPI + Jinja2 frontend for HERMES -- replaces frontend/ (Django). See
 docs/frontend-rewrite-implementation-plan.md for the phased rewrite this
-belongs to; this module currently wires up only Phase 0's scaffolding
-(sessions, CSRF, auth gates, flash messages, static files, migrations).
-Routers for accounts/research_projects/jobs/etc. are added phase by phase.
+belongs to. Phase 0 built the scaffolding (sessions, CSRF, auth gates,
+flash messages, static files, migrations); Phase 1 adds the first
+user-facing router (accounts/). research_projects/jobs/etc. follow phase
+by phase.
 
 Run with:
     python -m uvicorn frontend_fastapi.main:app --reload
@@ -21,6 +22,7 @@ from frontend_fastapi import backend_client
 from frontend_fastapi.deps import csrf_protect
 from frontend_fastapi.exceptions import Forbidden, NotAuthenticated
 from frontend_fastapi.migrations import run_migrations
+from frontend_fastapi.routers import accounts
 from frontend_fastapi.session_middleware import SessionMiddleware
 from frontend_fastapi.settings import ALLOWED_HOSTS, DATABASE_URL, LOGIN_URL, STATIC_DIR
 from frontend_fastapi.templating import templates
@@ -54,6 +56,7 @@ app.add_middleware(SessionMiddleware)
 # header poisoning otherwise goes unguarded).
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.include_router(accounts.router)
 
 
 def _best_effort_error_context(request: Request) -> dict:

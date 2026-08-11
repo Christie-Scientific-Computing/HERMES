@@ -38,9 +38,11 @@ psycopg2-binary
 alembic
 SQLAlchemy
 
-# frontend_fastapi/ — auth, sessions, CSRF
+# frontend_fastapi/ — auth, sessions, CSRF, forms
 argon2-cffi       # password hashing
 itsdangerous      # signed invite/activate tokens
+WTForms           # form field validation (Jinja2 templates render fields directly)
+email-validator   # WTForms' Email() validator requires this explicitly
 # CSRF is hand-rolled (frontend_fastapi/deps.py: csrf_protect), tied to the
 # session-stored token rather than a separate stateless cookie -- no
 # extra dependency needed for it.

@@ -72,3 +72,18 @@ HERMES_INTERNAL_KEY = os.getenv("HERMES_INTERNAL_KEY")
 
 LOGIN_URL = "/accounts/login"
 LOGIN_REDIRECT_URL = "/"
+
+# --- Email --------------------------------------------------------------------
+# No SMTP server exists for most deployments -- unset HERMES_FRONTEND_SMTP_HOST
+# (the default) means email_backend.send_mail logs the message instead of
+# attempting delivery, mirroring Django's console EmailBackend default
+# (frontend/hermes_frontend/settings.py) rather than hanging/failing against
+# a nonexistent localhost:25. The in-app activation-link flash message
+# (routers/accounts.py's invite_user) works regardless of whether this is
+# ever pointed at a real relay -- see that view's own comment.
+SMTP_HOST = os.getenv("HERMES_FRONTEND_SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("HERMES_FRONTEND_SMTP_PORT", "25"))
+SMTP_USE_TLS = os.getenv("HERMES_FRONTEND_SMTP_USE_TLS", "true").lower() == "true"
+SMTP_USERNAME = os.getenv("HERMES_FRONTEND_SMTP_USERNAME", "")
+SMTP_PASSWORD = os.getenv("HERMES_FRONTEND_SMTP_PASSWORD", "")
+SMTP_FROM_ADDRESS = os.getenv("HERMES_FRONTEND_SMTP_FROM_ADDRESS", "hermes@localhost")
