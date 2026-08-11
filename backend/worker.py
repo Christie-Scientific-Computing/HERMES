@@ -16,6 +16,7 @@ the sole migrator. This calls backend.src.db.init_pool directly instead.
 import os
 import signal
 import socket
+import sys
 import time
 import logging
 
@@ -144,8 +145,14 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
 def main() -> None:
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
-        logger.warning("DATABASE_URL not set; ABORTING!")
-        return
+        # A non-zero exit here matters specifically for a worker under
+        # docker-compose's restart policy or any process supervisor keyed
+        # off exit code: a bare `return` exits 0, which reads as a clean
+        # shutdown rather than a misconfiguration -- retrieve/endpoints.py
+        # and results/endpoints.py both hard-fail (raise ValueError) for
+        # this identical condition; this should be no quieter.
+        logger.error("DATABASE_URL not set; ABORTING!")
+        sys.exit(1)
     init_pool(database_url)  # NOT setup_status_db -- no alembic here, see module docstring
 
     tasks_db = TasksDB()

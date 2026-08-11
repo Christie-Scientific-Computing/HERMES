@@ -383,15 +383,26 @@ def test_reap_stale_claims_requeues_old_claim_and_leaves_recent_alone(tasks_db, 
     assert fresh_row["claimed_by"] == "worker-alive"
 
 
-def test_job_progress_only_returns_rows_after_watermark(tasks_db, job_id):
+def test_job_progress_returns_every_task_with_current_state(tasks_db, job_id):
+    """
+    No watermark: job_progress must keep returning a task after its state
+    changes, since the observer stream relies on re-reading every task each
+    poll tick to detect transitions (see job_progress's docstring for why a
+    task_id-based watermark can't work here).
+    """
     tasks_db.enqueue(job_id, _items(3), kind="import", stage="retrieve", params={})
     all_rows = tasks_db.job_progress(job_id)
     assert len(all_rows) == 3
+    assert [r["state"] for r in all_rows] == ["queued", "queued", "queued"]
 
-    watermark = all_rows[1]["task_id"]
-    remaining = tasks_db.job_progress(job_id, after_task_id=watermark)
-    assert len(remaining) == 1
-    assert remaining[0]["task_id"] == all_rows[2]["task_id"]
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    tasks_db.mark_succeeded(task["task_id"], "worker-1", details={"imported": True})
+
+    rows_after = {r["task_id"]: r for r in tasks_db.job_progress(job_id)}
+    assert len(rows_after) == 3  # the succeeded task is still returned, not dropped
+    assert rows_after[task["task_id"]]["state"] == "succeeded"
+    assert rows_after[task["task_id"]]["details"] == {"imported": True}
 
 
 def test_job_has_pending_true_until_all_terminal(tasks_db, job_id):

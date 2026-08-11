@@ -254,6 +254,13 @@ async def batch_import_file(
 @router.post("/cancel/{job_id}")
 async def cancel_import(job_id: str):
     status_db.cancel_job(job_id)
+    # Also flip any still-queued tasks straight to 'cancelled' -- TasksDB.claim
+    # already excludes tasks whose job is cancelled, so this doesn't change
+    # what gets run, only how quickly the observer stream's job_has_pending()
+    # can report 'done' rather than waiting on a claim that will never come.
+    # A no-op (0 rows) for a job with no queued tasks, e.g. one that never
+    # went through the queue at all -- harmless either way.
+    tasks_db.cancel_queued(job_id)
     logger.info(f"Cancelling: {job_id}")
     return {"cancelled": True}
 

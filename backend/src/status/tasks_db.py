@@ -244,22 +244,30 @@ class TasksDB:
             cur.execute("SELECT COUNT(*) FROM tasks WHERE job_id=%s", (job_id,))
             return cur.fetchone()[0]
 
-    def job_progress(self, job_id: str, after_task_id: int = 0) -> list[dict]:
+    def job_progress(self, job_id: str) -> list[dict]:
         """
-        Tasks for this job with task_id > after_task_id, ordered by
-        task_id -- the observer stream's state-transition read. Each poll
-        tick is then a small indexed range scan against ix_tasks_job_id,
-        not a rescan of the whole job.
+        Every task for this job, current state included -- the observer
+        stream's read (backend/src/results/endpoints.py).
+
+        Deliberately not filtered by a task_id watermark: task rows are
+        mutated in place as they progress (claimed -> running ->
+        succeeded/failed), not appended as a new row per transition, so a
+        "only task_id greater than X" filter can only ever report a task
+        once, at whatever state it happened to be in on its first
+        appearance -- it would silently miss every later transition
+        (e.g. running -> succeeded) once that task_id has already been
+        returned. (An earlier version of this method had exactly that bug;
+        caught before it had any real caller.) The observer instead
+        re-reads every task each poll tick and diffs against its own
+        in-memory last-seen-state map to decide what to emit -- correct,
+        and cheap enough at this domain's scale (a batch job's task count
+        is a patient-list CSV, not a large table).
         """
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
-                SELECT task_id, state, display_id, details, error_message
-                FROM tasks
-                WHERE job_id = %s AND task_id > %s
-                ORDER BY task_id
-                """,
-                (job_id, after_task_id),
+                "SELECT task_id, state, real_id, display_id, details, error_message "
+                "FROM tasks WHERE job_id = %s ORDER BY task_id",
+                (job_id,),
             )
             return [dict(r) for r in cur.fetchall()]
 
