@@ -3,8 +3,13 @@ Login/logout session mutation. Split out from deps.py because these aren't
 FastAPI dependencies (they're called from inside a route body, once a
 username/password or logout action has actually been validated), and because
 login specifically needs the Response object to re-issue the session cookie
-(see login_user's docstring) -- a step deps.get_session doesn't take for an
-already-existing session.
+with the "remember me" choice baked into its Max-Age (see login_user's
+docstring) -- unlike session_middleware.SessionMiddleware's own cookie
+issue for a brand-new anonymous session, this one is safe to set directly
+on the injected Response: it only ever runs once a route's entire
+dependency chain has already succeeded, so there's no risk of a sibling
+dependency raising afterward and discarding it (see SessionMiddleware's
+docstring for why that risk is real for session bootstrap specifically).
 """
 from datetime import timedelta
 
@@ -37,12 +42,10 @@ def login_user(db: DBSession, response: Response, old_session: Session, user: Us
         user_id=user.id,
         csrf_token=security.new_csrf_token(),
         flash_messages=list(old_session.flash_messages),
-        remember=remember,
         expires_at=utcnow() + timedelta(days=SESSION_LIFETIME_DAYS),
     )
     db.delete(old_session)
     db.add(new_session)
-    db.flush()  # old_session's DELETE must be visible before the cookie swap below is trusted
 
     response.set_cookie(
         SESSION_COOKIE_NAME, new_session.id,

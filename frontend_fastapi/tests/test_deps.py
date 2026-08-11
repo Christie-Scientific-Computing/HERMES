@@ -40,23 +40,25 @@ def test_template_context_pops_flash_messages(client):
 
 
 def test_template_context_fetches_active_projects_for_logged_in_user(client, make_user, monkeypatch):
+    async def _fake_list(username):
+        return [{"project_id": "p1", "title": "Study A"}]
+
     make_user(username="alice")
-    monkeypatch.setattr(
-        backend_client, "list_user_active_projects",
-        lambda username: [{"project_id": "p1", "title": "Study A"}],
-    )
-    client.post("/test/login", data={"username": "alice", "remember": "true"})
+    monkeypatch.setattr(backend_client, "list_user_active_projects", _fake_list)
+    csrf_token = client.get("/test/context").json()["csrf_token"]
+    client.post("/test/login", data={"username": "alice", "remember": "true", "csrf_token": csrf_token})
     ctx = client.get("/test/context").json()
     assert ctx["has_user"] is True
     assert ctx["nav_active_projects"] == [{"project_id": "p1", "title": "Study A"}]
 
 
 def test_template_context_survives_backend_being_unreachable(client, make_user, monkeypatch):
-    def _raise(username):
+    async def _raise(username):
         raise backend_client.BackendError(503, "backend down")
 
     make_user(username="alice")
     monkeypatch.setattr(backend_client, "list_user_active_projects", _raise)
-    client.post("/test/login", data={"username": "alice", "remember": "true"})
+    csrf_token = client.get("/test/context").json()["csrf_token"]
+    client.post("/test/login", data={"username": "alice", "remember": "true", "csrf_token": csrf_token})
     ctx = client.get("/test/context").json()
     assert ctx["nav_active_projects"] == []

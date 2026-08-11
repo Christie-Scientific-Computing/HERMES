@@ -51,7 +51,6 @@ def upgrade() -> None:
     sa.Column('user_id', sa.Integer(), nullable=True),
     sa.Column('csrf_token', sa.String(length=43), nullable=False),
     sa.Column('flash_messages', sa.JSON(), nullable=False),
-    sa.Column('remember', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),

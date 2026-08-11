@@ -35,12 +35,16 @@ def verify_password(raw_password: str, password_hash: str) -> bool:
         return False
 
 
-def new_session_id() -> str:
+def _random_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+def new_session_id() -> str:
+    return _random_token()
 
 
 def new_csrf_token() -> str:
-    return secrets.token_urlsafe(32)
+    return _random_token()
 
 
 # --- Account tokens (invite / activate / password reset) --------------------

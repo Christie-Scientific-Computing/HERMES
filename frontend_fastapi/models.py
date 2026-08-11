@@ -57,9 +57,11 @@ class Session(Base):
     """
     A browser session. Anonymous visitors get a row too (user_id NULL) --
     that's what makes CSRF protection and flash messages work before
-    login, exactly like Django's session framework. See deps.get_session
-    for how the row is loaded/created and auth.login_user for how login
-    rotates it (a fresh id, never reusing a pre-login session id).
+    login, exactly like Django's session framework. See
+    session_middleware.SessionMiddleware for how the row is loaded/created,
+    deps.get_session for how the rest of a request reads it, and
+    auth.login_user for how login rotates it (a fresh id, never reusing a
+    pre-login session id).
     """
     __tablename__ = "sessions"
 
@@ -71,11 +73,6 @@ class Session(Base):
     # flash.flash()'s session.flash_messages.append(...) would silently
     # never be persisted without this wrapper.
     flash_messages: Mapped[list] = mapped_column(MutableList.as_mutable(JSON), default=list)
-    # Persists the per-login "remember me" choice so every later request's
-    # cookie re-issue (if any) can keep honouring it -- see settings.py's
-    # SESSION_LIFETIME_DAYS docstring for the row-lifetime-vs-cookie-Max-Age
-    # split this backs.
-    remember: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

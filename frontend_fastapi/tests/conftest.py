@@ -9,18 +9,16 @@ exercised through actual HTTP request/response cycles rather than only as
 bare function calls.
 """
 import pytest
-from fastapi import Depends, FastAPI, Form, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi import Depends, FastAPI, Form, Response
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from frontend_fastapi import auth, security
 from frontend_fastapi.deps import (
-    Forbidden,
-    NotAuthenticated,
     csrf_protect,
     get_current_user,
     get_session,
@@ -28,8 +26,16 @@ from frontend_fastapi.deps import (
     require_data_custodian,
     require_login,
 )
+from frontend_fastapi.exceptions import Forbidden, NotAuthenticated
 from frontend_fastapi.flash import flash
+
+# Reuses the REAL exception handlers (not test-only stand-ins) so fixes to
+# them are actually exercised by this suite -- importing frontend_fastapi.main
+# has no side effects at import time (DB access only happens inside its
+# lifespan, which this fixture never runs; see main.py).
+from frontend_fastapi.main import _forbidden, _not_authenticated
 from frontend_fastapi.models import Base, Session, User
+from frontend_fastapi.session_middleware import SessionMiddleware
 
 
 @pytest.fixture()
@@ -74,29 +80,32 @@ def make_user(db):
 
 @pytest.fixture()
 def app(SessionFactory):
-    test_app = FastAPI()
+    from frontend_fastapi import database
+    from frontend_fastapi.database import get_db as real_get_db
 
     def override_get_db():
-        db = SessionFactory()
-        try:
-            yield db
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        # Reuses the real commit/rollback/NotAuthenticated+Forbidden-handling
+        # logic against the test engine instead of duplicating it -- see
+        # database._db_session's docstring for why that logic exists at all.
+        yield from database._db_session(SessionFactory)
 
-    from frontend_fastapi.database import get_db as real_get_db
+    # csrf_protect applied globally, same as main.py -- so tests exercise
+    # the actual production wiring (every route protected by default)
+    # rather than a looser test-only approximation.
+    test_app = FastAPI(dependencies=[Depends(csrf_protect)])
     test_app.dependency_overrides[real_get_db] = override_get_db
+    # SessionMiddleware talks to the DB directly (see its own docstring for
+    # why), bypassing dependency_overrides entirely -- it needs the test
+    # engine handed to it explicitly instead.
+    test_app.add_middleware(SessionMiddleware, session_factory=SessionFactory)
+    # Mirrors main.py's own TrustedHostMiddleware wiring -- deliberately
+    # does NOT include "testserver" (httpx TestClient's default Host), so
+    # the `client` fixture below uses base_url="http://localhost" and a
+    # dedicated test can prove a mismatched Host is actually rejected.
+    test_app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 
-    @test_app.exception_handler(NotAuthenticated)
-    async def _not_authenticated(request: Request, exc: NotAuthenticated):
-        return RedirectResponse(f"/accounts/login?next={request.url.path}", status_code=303)
-
-    @test_app.exception_handler(Forbidden)
-    async def _forbidden(request: Request, exc: Forbidden):
-        return Response(status_code=403, content="forbidden")
+    test_app.exception_handler(NotAuthenticated)(_not_authenticated)
+    test_app.exception_handler(Forbidden)(_forbidden)
 
     @test_app.post("/test/login")
     async def _login(
@@ -124,8 +133,11 @@ def app(SessionFactory):
     async def _staff_only(user: User = Depends(require_data_custodian)):
         return {"username": user.username}
 
-    @test_app.post("/test/csrf-protected", dependencies=[Depends(csrf_protect)])
+    @test_app.post("/test/csrf-protected")
     async def _csrf_protected():
+        # No explicit Depends(csrf_protect) here on purpose -- proves the
+        # APP-LEVEL dependency (registered above) protects a route that
+        # never opted in itself, not just ones that remember to.
         return {"ok": True}
 
     @test_app.get("/test/flash-and-render")
@@ -147,4 +159,4 @@ def app(SessionFactory):
 
 @pytest.fixture()
 def client(app):
-    return TestClient(app)
+    return TestClient(app, base_url="http://localhost")
