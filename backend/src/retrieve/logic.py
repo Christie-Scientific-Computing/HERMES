@@ -3,6 +3,7 @@ Logic for the import page, endpoints call these methods
 """
 import os
 import re
+import tempfile
 import shutil
 import logging
 import sqlite3
@@ -64,14 +65,12 @@ class Importer():
         # "since we started looking at this particular patient".
         self._started_at = datetime.now(timezone.utc)
 
-        self.tmp_dir = Path('./tmp/proknow/')
-        self.tmp_dir.mkdir(exist_ok=True)
-
         # Define import level
         self._set_import_level(import_level)
         
         # Station name in RTPLAN/RTSTRUCT when uploaded to mosaiq. Will delete these ones if too many files found on orthanc
         self.pinnacle_station_name = (r'cht-pinnapp\d+', r'pinncm\d+', 'cht-vsim', 'Christie-acqsim')
+
 
     def _set_import_level(self, import_level: str) -> None:
         if import_level is None or import_level == 'Planning data':
@@ -145,8 +144,8 @@ class Importer():
 
     def import_patient(self, mrn: int, locations: dict[str, bool]) -> None:
         
-        # if locations['in_proknow']:
-        #     self.import_from_proknow(mrn)
+        if locations['in_proknow']:
+            self.import_from_proknow(mrn)
         
         if locations['in_mosaiq']:
             self.import_from_mosaiq(mrn)
@@ -310,7 +309,8 @@ class Importer():
 
 
     def import_from_proknow(self, mrn):
-
+        tmp_dir = tempfile.TemporaryDirectory()
+        
         # Download locally
         patients = self.pk.patients.lookup(PROKNOW_WORKSPACE, [str(mrn)])
         assert len(patients) == 1
@@ -318,7 +318,7 @@ class Importer():
         entities = [x.get() for x in patient.find_entities(lambda x: True)]
         for entity in entities:
             logger.info("Downloading entity (%s) from proknow", entity.data['type'])
-            dl_path = entity.download(str(self.tmp_dir))
+            dl_path = entity.download(tmp_dir.name)
             if os.path.isdir(dl_path):
                 logger.info("Downloaded %s files to %s", len(os.listdir(dl_path)), dl_path)
                 # Images are downloaded without dcm extension, so orthanc directory upload doesn't work.
@@ -329,7 +329,7 @@ class Importer():
             else:
                 logger.info("Downloaded %s", dl_path)
                 upload(self.ot, dl_path, check_before_upload=True)
-        shutil.rmtree(self.tmp_dir)
+        tmp_dir.cleanup()
         
 
     ## ============= Methods to search for a single patient across locations ===================
