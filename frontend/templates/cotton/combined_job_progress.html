@@ -1,0 +1,147 @@
+<c-vars job_id="" />
+{# Two-stage progress for a combined import->export job (jobs:import_export_data)
+   -- not a reuse of c-job-progress, which is single-stage by design. Listens to
+   the same SSE vocabulary (backend/src/results/endpoints.py's _observe_job), just
+   routes progress/success/error events into an Import or Export bar by their
+   "stage" field, and tracks a growing export total via the "total" event
+   (chained export tasks are enqueued one at a time as imports succeed, so the
+   export total isn't known upfront the way the import total is). #}
+<div class="bg-white border border-gray-200 rounded-lg p-6">
+  <div class="flex items-center justify-between mb-4">
+    <span id="status-label-{{ job_id }}" class="text-sm font-medium text-gray-700">Starting&hellip;</span>
+    <form method="post" action="{% url 'jobs:cancel_job' job_id %}" onsubmit="return confirm('Cancel this job? Items already in progress will finish, but no further items will start.');">
+      {% csrf_token %}
+      <button type="submit" class="text-xs text-red-600 hover:underline">Cancel</button>
+    </form>
+  </div>
+
+  <div class="mb-4">
+    <p class="text-xs font-medium text-gray-500 mb-1">Import</p>
+    <div class="w-full bg-gray-100 rounded-full h-2 mb-1">
+      <div id="import-bar-{{ job_id }}" class="bg-hermes-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+    </div>
+    <p id="import-count-{{ job_id }}" class="text-xs text-gray-400">0 / 0</p>
+  </div>
+
+  <div class="mb-4">
+    <p class="text-xs font-medium text-gray-500 mb-1">Export</p>
+    <div class="w-full bg-gray-100 rounded-full h-2 mb-1">
+      <div id="export-bar-{{ job_id }}" class="bg-hermes-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+    </div>
+    <p id="export-count-{{ job_id }}" class="text-xs text-gray-400">0 / 0 &mdash; grows as imports finish</p>
+  </div>
+
+  <ul id="event-log-{{ job_id }}" class="divide-y divide-gray-100 text-sm max-h-96 overflow-y-auto"></ul>
+</div>
+
+<script>
+(function () {
+  const streamUrl = "{% url 'jobs:job_stream' job_id %}";
+  const es = new EventSource(streamUrl);
+  const statusLabel = document.getElementById('status-label-{{ job_id }}');
+  const importBar = document.getElementById('import-bar-{{ job_id }}');
+  const importCount = document.getElementById('import-count-{{ job_id }}');
+  const exportBar = document.getElementById('export-bar-{{ job_id }}');
+  const exportCount = document.getElementById('export-count-{{ job_id }}');
+  const eventLog = document.getElementById('event-log-{{ job_id }}');
+
+  // importTotal is fixed once known (the "start" event, before any export
+  // task has been chained in) -- exportTotal grows over the job's lifetime
+  // as backend/worker.py's _maybe_chain_export enqueues one export task per
+  // successful import, derived from each "total" event as grandTotal minus
+  // the fixed importTotal.
+  let importTotal = 0, importDone = 0;
+  let exportTotal = 0, exportDone = 0;
+
+  function addRow(text, colorClass) {
+    const li = document.createElement('li');
+    li.className = 'py-1.5 ' + (colorClass || 'text-gray-600');
+    li.textContent = text;
+    eventLog.prepend(li);
+  }
+
+  function updateImport() {
+    importCount.textContent = importDone + ' / ' + importTotal;
+    if (importTotal > 0) {
+      importBar.style.width = Math.min(100, Math.round((importDone / importTotal) * 100)) + '%';
+    }
+  }
+
+  function updateExport() {
+    const suffix = exportTotal > importTotal || exportDone > 0 ? '' : ' — grows as imports finish';
+    exportCount.textContent = exportDone + ' / ' + exportTotal + suffix;
+    if (exportTotal > 0) {
+      exportBar.style.width = Math.min(100, Math.round((exportDone / exportTotal) * 100)) + '%';
+    }
+  }
+
+  es.addEventListener('start', (e) => {
+    const data = JSON.parse(e.data);
+    importTotal = data.total || 0;
+    statusLabel.textContent = 'Running (' + importTotal + ' patient' + (importTotal === 1 ? '' : 's') + ')';
+    updateImport();
+    updateExport();
+  });
+
+  es.addEventListener('total', (e) => {
+    const data = JSON.parse(e.data);
+    exportTotal = Math.max(0, (data.total || 0) - importTotal);
+    updateExport();
+  });
+
+  es.addEventListener('progress', (e) => {
+    const data = JSON.parse(e.data);
+    const label = data.stage === 'export' ? 'Exporting ' : 'Importing ';
+    addRow(label + data.current + '…', 'text-gray-500');
+  });
+
+  es.addEventListener('success', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.stage === 'export') {
+      exportDone += 1;
+      addRow('✓ Exported ' + data.mrn, 'text-green-700');
+      updateExport();
+    } else {
+      importDone += 1;
+      if (data.imported === false) {
+        // Ground truth from Importer.handle_patient: nothing was found for
+        // this patient, so no export task will ever exist for it -- a real,
+        // expected terminal state, not a stuck spinner.
+        addRow('– ' + data.mrn + ' — not found, nothing to export', 'text-gray-500');
+      } else {
+        addRow('✓ Imported ' + data.mrn, 'text-green-700');
+      }
+      updateImport();
+    }
+  });
+
+  es.addEventListener('error', (e) => {
+    const data = JSON.parse(e.data);
+    const label = data.stage === 'export' ? 'Export failed: ' : 'Import failed: ';
+    if (data.stage === 'export') {
+      exportDone += 1;
+      updateExport();
+    } else {
+      importDone += 1;
+      updateImport();
+    }
+    addRow('✗ ' + label + (data.mrn || '') + ' — ' + (data.error || 'failed'), 'text-red-700');
+  });
+
+  es.addEventListener('cancelled', () => {
+    statusLabel.textContent = 'Cancelled';
+    addRow('Job cancelled — no further items will start.', 'text-yellow-700 font-medium');
+  });
+
+  es.addEventListener('done', () => {
+    statusLabel.textContent = 'Finished';
+    es.close();
+  });
+
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {
+      statusLabel.textContent = statusLabel.textContent === 'Finished' ? 'Finished' : 'Connection closed';
+    }
+  };
+})();
+</script>

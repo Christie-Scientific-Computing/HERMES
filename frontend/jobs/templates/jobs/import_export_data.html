@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Import & Export — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-1">Import &amp; export</h1>
+<p class="text-sm text-gray-500 mb-4">One job: each patient is exported automatically as soon as its own import succeeds — no need to come back and start a second job.</p>
+
+<div class="flex flex-wrap gap-4 border-b border-gray-200 mb-6 text-sm">
+  <button type="button" onclick="hermesShowTab('single_dicom')" id="tab-btn-single_dicom"
+          class="pb-2 border-b-2 {% if active_tab == 'single_dicom' %}border-hermes-700 text-hermes-700 font-medium{% else %}border-transparent text-gray-500{% endif %}">
+    Single patient &rarr; DICOM
+  </button>
+  <button type="button" onclick="hermesShowTab('single_proknow')" id="tab-btn-single_proknow"
+          class="pb-2 border-b-2 {% if active_tab == 'single_proknow' %}border-hermes-700 text-hermes-700 font-medium{% else %}border-transparent text-gray-500{% endif %}">
+    Single patient &rarr; ProKnow
+  </button>
+  <button type="button" onclick="hermesShowTab('batch_dicom')" id="tab-btn-batch_dicom"
+          class="pb-2 border-b-2 {% if active_tab == 'batch_dicom' %}border-hermes-700 text-hermes-700 font-medium{% else %}border-transparent text-gray-500{% endif %}">
+    Batch (CSV) &rarr; DICOM
+  </button>
+  <button type="button" onclick="hermesShowTab('batch_proknow')" id="tab-btn-batch_proknow"
+          class="pb-2 border-b-2 {% if active_tab == 'batch_proknow' %}border-hermes-700 text-hermes-700 font-medium{% else %}border-transparent text-gray-500{% endif %}">
+    Batch (CSV) &rarr; ProKnow
+  </button>
+</div>
+
+<div class="grid gap-6 lg:grid-cols-2">
+  <div class="max-w-md space-y-4">
+    <div id="tab-panel-single_dicom" {% if active_tab != 'single_dicom' %}class="hidden"{% endif %}>
+      {% if modalities_error %}
+      <div class="mb-4 rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">
+        Could not load available Orthanc destinations: {{ modalities_error }}
+      </div>
+      {% endif %}
+      {% if has_projects %}
+      <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+        {% csrf_token %}
+        <input type="hidden" name="mode" value="single_dicom">
+        {% for field in single_dicom_form %}
+          <div>
+            <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<p class="text-xs text-gray-400 mt-1">{{ field.help_text }}</p>{% endif %}
+            {% if field.errors %}<p class="text-xs text-red-600 mt-1">{{ field.errors|striptags }}</p>{% endif %}
+          </div>
+        {% endfor %}
+        <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+          Import &amp; export
+        </button>
+      </form>
+      {% else %}
+      <c-no-projects-notice />
+      {% endif %}
+    </div>
+
+    <div id="tab-panel-single_proknow" {% if active_tab != 'single_proknow' %}class="hidden"{% endif %}>
+      {% if collections_error %}
+      <div class="mb-4 rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">
+        Could not load available ProKnow collections: {{ collections_error }}
+      </div>
+      {% endif %}
+      {% if has_projects %}
+      <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+        {% csrf_token %}
+        <input type="hidden" name="mode" value="single_proknow">
+        {% for field in single_proknow_form %}
+          <div>
+            <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
+            {{ field }}
+            {% if field.errors %}<p class="text-xs text-red-600 mt-1">{{ field.errors|striptags }}</p>{% endif %}
+          </div>
+        {% endfor %}
+        <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+          Import &amp; export
+        </button>
+      </form>
+      {% else %}
+      <c-no-projects-notice />
+      {% endif %}
+    </div>
+
+    <div id="tab-panel-batch_dicom" {% if active_tab != 'batch_dicom' %}class="hidden"{% endif %}>
+      {% if modalities_error %}
+      <div class="mb-4 rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">
+        Could not load available Orthanc destinations: {{ modalities_error }}
+      </div>
+      {% endif %}
+      {% if has_projects %}
+      <form method="post" enctype="multipart/form-data" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+        {% csrf_token %}
+        <input type="hidden" name="mode" value="batch_dicom">
+        {% for field in batch_dicom_form %}
+          <div>
+            <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<p class="text-xs text-gray-400 mt-1">{{ field.help_text }}</p>{% endif %}
+            {% if field.errors %}<p class="text-xs text-red-600 mt-1">{{ field.errors|striptags }}</p>{% endif %}
+          </div>
+        {% endfor %}
+        <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+          Start job
+        </button>
+      </form>
+      {% else %}
+      <c-no-projects-notice />
+      {% endif %}
+    </div>
+
+    <div id="tab-panel-batch_proknow" {% if active_tab != 'batch_proknow' %}class="hidden"{% endif %}>
+      {% if collections_error %}
+      <div class="mb-4 rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">
+        Could not load available ProKnow collections: {{ collections_error }}
+      </div>
+      {% endif %}
+      {% if has_projects %}
+      <form method="post" enctype="multipart/form-data" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+        {% csrf_token %}
+        <input type="hidden" name="mode" value="batch_proknow">
+        {% for field in batch_proknow_form %}
+          <div>
+            <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
+            {{ field }}
+            {% if field.help_text %}<p class="text-xs text-gray-400 mt-1">{{ field.help_text }}</p>{% endif %}
+            {% if field.errors %}<p class="text-xs text-red-600 mt-1">{{ field.errors|striptags }}</p>{% endif %}
+          </div>
+        {% endfor %}
+        <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+          Start job
+        </button>
+      </form>
+      {% else %}
+      <c-no-projects-notice />
+      {% endif %}
+    </div>
+  </div>
+
+  {% if job_id %}
+  <div>
+    <c-combined-job-progress job_id="{{ job_id }}" />
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function hermesShowTab(tab) {
+  ['single_dicom', 'single_proknow', 'batch_dicom', 'batch_proknow'].forEach(function (t) {
+    document.getElementById('tab-panel-' + t).classList.toggle('hidden', t !== tab);
+    var btn = document.getElementById('tab-btn-' + t);
+    btn.classList.toggle('border-hermes-700', t === tab);
+    btn.classList.toggle('text-hermes-700', t === tab);
+    btn.classList.toggle('font-medium', t === tab);
+    btn.classList.toggle('border-transparent', t !== tab);
+    btn.classList.toggle('text-gray-500', t !== tab);
+  });
+}
+</script>
+{% endblock %}

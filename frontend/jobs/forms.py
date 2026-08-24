@@ -69,6 +69,54 @@ class ProKnowExportForm(ProjectScopedForm):
         self._set_choices("collection", collections)
 
 
+class CombinedSingleDicomForm(ProjectScopedForm):
+    mrn = forms.CharField(label="Patient ID (anon)", max_length=100)
+    import_level = forms.ChoiceField(choices=IMPORT_LEVEL_CHOICES, initial="Planning data")
+    destination = forms.ChoiceField(label="Orthanc modality AE title", choices=[])
+    message_id = forms.IntegerField(
+        label="Message ID (optional)", required=False, min_value=0, max_value=65535,
+        help_text="For clinical-trial patients: the DICOM Message ID the receiving "
+                   "anonymising node uses to pick a pseudonymisation table. Leave blank "
+                   "for an ordinary export.",
+    )
+
+    def set_destination_choices(self, modalities: list[str]) -> None:
+        self._set_choices("destination", modalities)
+
+
+class CombinedSingleProKnowForm(ProjectScopedForm):
+    mrn = forms.CharField(label="Patient ID (anon)", max_length=100)
+    import_level = forms.ChoiceField(choices=IMPORT_LEVEL_CHOICES, initial="Planning data")
+    collection = forms.ChoiceField(label="ProKnow collection", choices=[])
+
+    def set_collection_choices(self, collections: list[str]) -> None:
+        self._set_choices("collection", collections)
+
+
+class CombinedBatchDicomForm(ProjectScopedForm):
+    file = forms.FileField(label="CSV file (patient_id column)")
+    import_level = forms.ChoiceField(choices=IMPORT_LEVEL_CHOICES, initial="Planning data")
+    destination = forms.ChoiceField(label="Orthanc modality AE title", choices=[])
+    message_id = forms.IntegerField(
+        label="Message ID (optional)", required=False, min_value=0, max_value=65535,
+        help_text="For clinical-trial patients: the DICOM Message ID the receiving "
+                   "anonymising node uses to pick a pseudonymisation table. Leave blank "
+                   "for an ordinary export.",
+    )
+
+    def set_destination_choices(self, modalities: list[str]) -> None:
+        self._set_choices("destination", modalities)
+
+
+class CombinedBatchProKnowForm(ProjectScopedForm):
+    file = forms.FileField(label="CSV file (patient_id column)")
+    import_level = forms.ChoiceField(choices=IMPORT_LEVEL_CHOICES, initial="Planning data")
+    collection = forms.ChoiceField(label="ProKnow collection", choices=[])
+
+    def set_collection_choices(self, collections: list[str]) -> None:
+        self._set_choices("collection", collections)
+
+
 class JobLookupForm(forms.Form):
     job_id = forms.CharField(max_length=100)
 

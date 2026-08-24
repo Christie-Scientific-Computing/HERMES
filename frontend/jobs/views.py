@@ -49,7 +49,8 @@ from django.shortcuts import redirect, render
 
 from hermes_frontend import backend_client
 from jobs.forms import (
-    BatchImportForm, DicomExportForm, JobLookupForm, PatientLookupForm,
+    BatchImportForm, CombinedBatchDicomForm, CombinedBatchProKnowForm, CombinedSingleDicomForm,
+    CombinedSingleProKnowForm, DicomExportForm, JobLookupForm, PatientLookupForm,
     ProKnowExportForm, SingleImportForm,
 )
 
@@ -227,6 +228,131 @@ def retrieve_data(request):
     })
 
 
+@login_required
+def import_export_data(request):
+    """
+    The one-stop-shop job: import, then automatically chain a matching
+    export for each patient once its own import succeeds
+    (backend/worker.py's _maybe_chain_export) -- no second visit required
+    once the import finishes. Four tabs (single/batch x dicom/proknow),
+    mirroring collect_data's single/batch split and retrieve_data's
+    dicom/proknow split combined onto one page. Unlike collect_data/
+    retrieve_data, this is additive: those two pages are unchanged and
+    still work exactly as before for a plain import-only or export-only job.
+    """
+    projects = _project_choices_for(request.user)
+
+    modalities, modalities_error = [], None
+    collections, collections_error = [], None
+    if projects:
+        try:
+            modalities = backend_client.get_orthanc_modalities(request.user.username)
+        except backend_client.BackendError as e:
+            modalities_error = e.detail
+        try:
+            collections = backend_client.get_proknow_collections(request.user.username)
+        except backend_client.BackendError as e:
+            collections_error = e.detail
+
+    single_dicom_form = CombinedSingleDicomForm()
+    single_proknow_form = CombinedSingleProKnowForm()
+    batch_dicom_form = CombinedBatchDicomForm()
+    batch_proknow_form = CombinedBatchProKnowForm()
+    for form in (single_dicom_form, batch_dicom_form):
+        form.set_project_choices(projects)
+        form.set_destination_choices(modalities)
+    for form in (single_proknow_form, batch_proknow_form):
+        form.set_project_choices(projects)
+        form.set_collection_choices(collections)
+
+    job_id = None
+    active_tab = request.POST.get("mode", "single_dicom")
+
+    if request.method == "POST":
+        mode = request.POST.get("mode")
+        if mode == "single_dicom":
+            single_dicom_form = CombinedSingleDicomForm(request.POST)
+            single_dicom_form.set_project_choices(projects)
+            single_dicom_form.set_destination_choices(modalities)
+            if single_dicom_form.is_valid():
+                csv_bytes = f"patient_id\n{single_dicom_form.cleaned_data['mrn']}\n".encode()
+                try:
+                    job_id = _enqueue_batch_job(
+                        backend_client.combined_import_export_file, csv_bytes, "single_patient.csv",
+                        single_dicom_form.cleaned_data["project_id"], request.user.username,
+                        import_level=single_dicom_form.cleaned_data["import_level"],
+                        export_kind="dicom_move",
+                        destination_or_collection=single_dicom_form.cleaned_data["destination"],
+                        message_id=single_dicom_form.cleaned_data["message_id"],
+                    )
+                    single_dicom_form = CombinedSingleDicomForm()  # fresh form, ready for another entry
+                    single_dicom_form.set_project_choices(projects)
+                    single_dicom_form.set_destination_choices(modalities)
+                except backend_client.BackendError as e:
+                    messages.error(request, f"Could not start job: {e.detail}")
+        elif mode == "single_proknow":
+            single_proknow_form = CombinedSingleProKnowForm(request.POST)
+            single_proknow_form.set_project_choices(projects)
+            single_proknow_form.set_collection_choices(collections)
+            if single_proknow_form.is_valid():
+                csv_bytes = f"patient_id\n{single_proknow_form.cleaned_data['mrn']}\n".encode()
+                try:
+                    job_id = _enqueue_batch_job(
+                        backend_client.combined_import_export_file, csv_bytes, "single_patient.csv",
+                        single_proknow_form.cleaned_data["project_id"], request.user.username,
+                        import_level=single_proknow_form.cleaned_data["import_level"],
+                        export_kind="proknow_upload",
+                        destination_or_collection=single_proknow_form.cleaned_data["collection"],
+                    )
+                    single_proknow_form = CombinedSingleProKnowForm()
+                    single_proknow_form.set_project_choices(projects)
+                    single_proknow_form.set_collection_choices(collections)
+                except backend_client.BackendError as e:
+                    messages.error(request, f"Could not start job: {e.detail}")
+        elif mode == "batch_dicom":
+            batch_dicom_form = CombinedBatchDicomForm(request.POST, request.FILES)
+            batch_dicom_form.set_project_choices(projects)
+            batch_dicom_form.set_destination_choices(modalities)
+            if batch_dicom_form.is_valid():
+                uploaded = batch_dicom_form.cleaned_data["file"]
+                try:
+                    job_id = _enqueue_batch_job(
+                        backend_client.combined_import_export_file, uploaded.read(), uploaded.name,
+                        batch_dicom_form.cleaned_data["project_id"], request.user.username,
+                        import_level=batch_dicom_form.cleaned_data["import_level"],
+                        export_kind="dicom_move",
+                        destination_or_collection=batch_dicom_form.cleaned_data["destination"],
+                        message_id=batch_dicom_form.cleaned_data["message_id"],
+                    )
+                    return redirect("jobs:job_watch", job_id=job_id)
+                except backend_client.BackendError as e:
+                    messages.error(request, f"Could not start job: {e.detail}")
+        elif mode == "batch_proknow":
+            batch_proknow_form = CombinedBatchProKnowForm(request.POST, request.FILES)
+            batch_proknow_form.set_project_choices(projects)
+            batch_proknow_form.set_collection_choices(collections)
+            if batch_proknow_form.is_valid():
+                uploaded = batch_proknow_form.cleaned_data["file"]
+                try:
+                    job_id = _enqueue_batch_job(
+                        backend_client.combined_import_export_file, uploaded.read(), uploaded.name,
+                        batch_proknow_form.cleaned_data["project_id"], request.user.username,
+                        import_level=batch_proknow_form.cleaned_data["import_level"],
+                        export_kind="proknow_upload",
+                        destination_or_collection=batch_proknow_form.cleaned_data["collection"],
+                    )
+                    return redirect("jobs:job_watch", job_id=job_id)
+                except backend_client.BackendError as e:
+                    messages.error(request, f"Could not start job: {e.detail}")
+
+    return render(request, "jobs/import_export_data.html", {
+        "single_dicom_form": single_dicom_form, "single_proknow_form": single_proknow_form,
+        "batch_dicom_form": batch_dicom_form, "batch_proknow_form": batch_proknow_form,
+        "job_id": job_id, "has_projects": bool(projects), "active_tab": active_tab,
+        "modalities_error": modalities_error, "collections_error": collections_error,
+    })
+
+
 def _user_can_watch_job(request, job_id: str) -> bool:
     """
     Live visibility check backing both job_watch and job_stream: mirrors
@@ -367,6 +493,8 @@ def job_detail(request, job_id):
         "job_id": job_id, "summary": job_info["summary"],
         "imported_count": job_info.get("imported_count"),
         "submitted_count": job_info.get("submitted_count"),
+        "exported_count": job_info.get("exported_count"),
+        "export_attempted_count": job_info.get("export_attempted_count"),
         "rows": visible, "pills": pills, "total": len(rows),
     })
 

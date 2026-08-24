@@ -8,6 +8,7 @@ urlpatterns = [
     path("", views.dashboard, name="dashboard"),
     path("collect-data/", views.collect_data, name="collect_data"),
     path("retrieve-data/", views.retrieve_data, name="retrieve_data"),
+    path("import-export/", views.import_export_data, name="import_export_data"),
     path("jobs/<str:job_id>/watch/", views.job_watch, name="job_watch"),
     path("jobs/<str:job_id>/stream/", views.job_stream, name="job_stream"),
     path("jobs/<str:job_id>/cancel/", views.cancel_job, name="cancel_job"),

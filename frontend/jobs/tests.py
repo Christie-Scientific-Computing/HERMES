@@ -340,6 +340,107 @@ class RetrieveDataQueueTests(_StubbedBackend):
         self.assertContains(resp, "Could not read CSV")
 
 
+class ImportExportDataQueueTests(_StubbedBackend):
+    """
+    jobs:import_export_data -- the combined one-stop-shop job. All four tabs
+    post to backend_client.combined_import_export_file (same enqueue-then-
+    redirect pattern as CollectDataQueueTests/RetrieveDataQueueTests); this
+    view is purely additive, so it shares no code path with collect_data/
+    retrieve_data's own views/forms.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.backend.list_user_active_projects.return_value = [{"project_id": PROJECT_ID, "title": "P"}]
+        self.backend.get_orthanc_modalities.return_value = ["AE1"]
+        self.backend.get_proknow_collections.return_value = ["Collection1"]
+        self.backend.combined_import_export_file.return_value = {"job_id": "enqueued-combined-job", "total": 1}
+
+    def test_single_dicom_mode_enqueues_and_stays_on_page(self):
+        resp = self.client.post(reverse("jobs:import_export_data"), {
+            "mode": "single_dicom", "mrn": "1001", "import_level": "Planning data",
+            "destination": "AE1", "project_id": PROJECT_ID,
+        })
+        self.assertEqual(resp.status_code, 200)  # single mode re-renders inline, doesn't redirect
+
+        kwargs = self.backend.combined_import_export_file.call_args.kwargs
+        self.assertEqual(kwargs["filename"], "single_patient.csv")
+        self.assertEqual(kwargs["content"], b"patient_id\n1001\n")
+        self.assertEqual(kwargs["import_level"], "Planning data")
+        self.assertEqual(kwargs["export_kind"], "dicom_move")
+        self.assertEqual(kwargs["destination_or_collection"], "AE1")
+        self.assertIsNone(kwargs["message_id"])
+        self.assertEqual(kwargs["username"], self.username)
+
+    def test_single_dicom_mode_with_message_id_passes_it_through(self):
+        resp = self.client.post(reverse("jobs:import_export_data"), {
+            "mode": "single_dicom", "mrn": "1001", "import_level": "Planning data",
+            "destination": "AE1", "message_id": "51966", "project_id": PROJECT_ID,
+        })
+        self.assertEqual(resp.status_code, 200)
+        kwargs = self.backend.combined_import_export_file.call_args.kwargs
+        self.assertEqual(kwargs["message_id"], 51966)
+
+    def test_single_proknow_mode_enqueues_and_stays_on_page(self):
+        resp = self.client.post(reverse("jobs:import_export_data"), {
+            "mode": "single_proknow", "mrn": "1001", "import_level": "Planning data",
+            "collection": "Collection1", "project_id": PROJECT_ID,
+        })
+        self.assertEqual(resp.status_code, 200)
+        kwargs = self.backend.combined_import_export_file.call_args.kwargs
+        self.assertEqual(kwargs["export_kind"], "proknow_upload")
+        self.assertEqual(kwargs["destination_or_collection"], "Collection1")
+
+    def test_batch_dicom_mode_enqueues_and_redirects_to_watch(self):
+        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n1002\n", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:import_export_data"), {
+            "mode": "batch_dicom", "file": csv_file, "import_level": "Planning data",
+            "destination": "AE1", "project_id": PROJECT_ID,
+        })
+        kwargs = self.backend.combined_import_export_file.call_args.kwargs
+        self.assertEqual(kwargs["filename"], "patients.csv")
+        self.assertEqual(kwargs["content"], b"patient_id\n1001\n1002\n")
+        self.assertEqual(kwargs["export_kind"], "dicom_move")
+        self.assertEqual(kwargs["destination_or_collection"], "AE1")
+        self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
+                              fetch_redirect_response=False)
+
+    def test_batch_proknow_mode_enqueues_and_redirects_to_watch(self):
+        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:import_export_data"), {
+            "mode": "batch_proknow", "file": csv_file, "import_level": "Planning data",
+            "collection": "Collection1", "project_id": PROJECT_ID,
+        })
+        kwargs = self.backend.combined_import_export_file.call_args.kwargs
+        self.assertEqual(kwargs["export_kind"], "proknow_upload")
+        self.assertEqual(kwargs["destination_or_collection"], "Collection1")
+        self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
+                              fetch_redirect_response=False)
+
+    def test_batch_dicom_mode_rejects_message_id_outside_dicom_us_range(self):
+        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:import_export_data"), {
+            "mode": "batch_dicom", "file": csv_file, "import_level": "Planning data",
+            "destination": "AE1", "project_id": PROJECT_ID, "message_id": "70000",
+        })
+        self.assertEqual(resp.status_code, 200)  # re-renders the form, no redirect
+        self.backend.combined_import_export_file.assert_not_called()
+
+    def test_batch_dicom_mode_backend_error_shows_message_not_redirect(self):
+        self.backend.combined_import_export_file.side_effect = _FakeBackendError("Could not read CSV")
+        csv_file = SimpleUploadedFile("patients.csv", b"garbage", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:import_export_data"), {
+            "mode": "batch_dicom", "file": csv_file, "import_level": "Planning data",
+            "destination": "AE1", "project_id": PROJECT_ID,
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Could not read CSV")
+
+    def test_dashboard_links_to_import_export_data(self):
+        resp = self.client.get(reverse("jobs:dashboard"))
+        self.assertContains(resp, reverse("jobs:import_export_data"))
+
+
 class JobWatchTests(_StubbedBackend):
     """job_watch's live visibility check (_user_can_watch_job, mirroring
     job_detail's _job_is_visible_to) -- re-checked on every request rather
