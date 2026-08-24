@@ -186,7 +186,12 @@ def _maybe_chain_export(tasks_db: TasksDB, status_db: StatusDB, task: dict, deta
     if kind == "dicom_move" and chain.get("message_id") is not None:
         export_params["message_id"] = chain["message_id"]
     item = BatchItem(real_id=task["real_id"], display_id=task["display_id"], status_mrn=task["status_mrn"])
-    tasks_db.enqueue(task["job_id"], [item], kind=kind, stage="export", params=export_params)
+    # chained_from_task_id backs the DB-level dedup guard (see the migration
+    # adding it and TasksDB.enqueue's docstring) -- without it, a task
+    # reaped and reclaimed while this import was still running would chain
+    # the same patient's export twice, once per worker that completed it.
+    tasks_db.enqueue(task["job_id"], [item], kind=kind, stage="export", params=export_params,
+                      chained_from_task_id=task["task_id"])
 
 
 def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:

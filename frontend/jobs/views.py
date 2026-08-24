@@ -380,7 +380,16 @@ def _user_can_watch_job(request, job_id: str) -> bool:
 def job_watch(request, job_id):
     if not _user_can_watch_job(request, job_id):
         raise Http404("Unknown job, or you don't have access to it")
-    return render(request, "jobs/job_watch.html", {"job_id": job_id})
+    # is_combined (backend's TasksDB.job_has_chain_export, checked on
+    # submission-time params) picks the two-stage progress component for a
+    # combined import->export job -- accurate from the moment the job is
+    # submitted, not only once its first import has actually succeeded and
+    # chained an export task.
+    try:
+        is_combined = backend_client.job_summary(job_id).get("is_combined", False)
+    except backend_client.BackendError:
+        is_combined = False
+    return render(request, "jobs/job_watch.html", {"job_id": job_id, "is_combined": is_combined})
 
 
 async def job_stream(request, job_id):

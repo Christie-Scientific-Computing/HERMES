@@ -185,6 +185,23 @@ Track a high-water `task_id` per state so each tick is a small indexed read. Emi
 `display_id` from the task row, never `status_mrn` — the observer then never touches
 the anon DB on a poll tick, and the real id cannot leak by construction.
 
+**Later addition — combined import→export jobs.** `backend/worker.py`'s
+`_maybe_chain_export` enqueues a follow-up export task after a successful import
+(`batch_import_file`'s optional `export_kind`/`destination`/`collection`/`message_id`
+fields), on the same `job_id`. This grows the task count over the job's lifetime, so
+`start`/`progress`/`success`/`error` each gained a `"stage"` field (`retrieve`/`export`),
+and a new `total` event (`{"type":"total","total":N,"import_total":N,"export_total":M}`)
+fires whenever the count changes — both totals computed fresh from `stage` on every
+tick, not inferred client-side, so a reconnect (page refresh, a colleague joining,
+`EventSource`'s own auto-reconnect) reports the same split a continuous connection
+would have. The enqueue happens **before** `mark_succeeded` for the import task, not
+after — reversing that order reopens exactly the "poll observes zero pending tasks
+too early" race this design already closed for the plain case. A second chain attempt
+for the same import (e.g. a reaped, reclaimed task completing twice) is a no-op at the
+database level (`tasks.chained_from_task_id` + a partial unique index), not an
+application-level check — two truly concurrent workers can otherwise both pass a
+read-then-write guard.
+
 **Cancel.** `cancel_job` unchanged, plus
 `UPDATE tasks SET state='cancelled' WHERE job_id=%s AND state='queued'`. Strictly
 stronger than today's per-item check, and it preserves what the cancel dialog already

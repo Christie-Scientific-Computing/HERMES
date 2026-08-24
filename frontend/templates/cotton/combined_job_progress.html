@@ -45,11 +45,14 @@
   const exportCount = document.getElementById('export-count-{{ job_id }}');
   const eventLog = document.getElementById('event-log-{{ job_id }}');
 
-  // importTotal is fixed once known (the "start" event, before any export
-  // task has been chained in) -- exportTotal grows over the job's lifetime
-  // as backend/worker.py's _maybe_chain_export enqueues one export task per
-  // successful import, derived from each "total" event as grandTotal minus
-  // the fixed importTotal.
+  // import_total/export_total come straight from the server (start/total
+  // events) rather than being inferred client-side -- backend/worker.py's
+  // _maybe_chain_export grows export_total over the job's lifetime as
+  // imports succeed, and a fresh connection (page refresh, a colleague
+  // joining, EventSource's own auto-reconnect) can open after some exports
+  // have already been chained in, when there'd be no reliable way to
+  // recover "the import-only total at the moment the stream first opened"
+  // by subtracting on this end.
   let importTotal = 0, importDone = 0;
   let exportTotal = 0, exportDone = 0;
 
@@ -68,8 +71,12 @@
   }
 
   function updateExport() {
-    const suffix = exportTotal > importTotal || exportDone > 0 ? '' : ' — grows as imports finish';
-    exportCount.textContent = exportDone + ' / ' + exportTotal + suffix;
+    // Once every import has reached a terminal state, no further export
+    // tasks will ever be chained in (backend/worker.py's _maybe_chain_export
+    // only runs on a successful import) -- exportTotal is final at that
+    // point, so the "still growing" caveat no longer applies.
+    const stillGrowing = importDone < importTotal;
+    exportCount.textContent = exportDone + ' / ' + exportTotal + (stillGrowing ? ' — grows as imports finish' : '');
     if (exportTotal > 0) {
       exportBar.style.width = Math.min(100, Math.round((exportDone / exportTotal) * 100)) + '%';
     }
@@ -77,7 +84,8 @@
 
   es.addEventListener('start', (e) => {
     const data = JSON.parse(e.data);
-    importTotal = data.total || 0;
+    importTotal = data.import_total || 0;
+    exportTotal = data.export_total || 0;
     statusLabel.textContent = 'Running (' + importTotal + ' patient' + (importTotal === 1 ? '' : 's') + ')';
     updateImport();
     updateExport();
@@ -85,7 +93,9 @@
 
   es.addEventListener('total', (e) => {
     const data = JSON.parse(e.data);
-    exportTotal = Math.max(0, (data.total || 0) - importTotal);
+    importTotal = data.import_total || 0;
+    exportTotal = data.export_total || 0;
+    updateImport();
     updateExport();
   });
 

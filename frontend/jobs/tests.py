@@ -464,6 +464,34 @@ class JobWatchTests(_StubbedBackend):
         resp = self.client.get(reverse("jobs:job_watch", args=["someone-elses-job-id"]))
         self.assertEqual(resp.status_code, 404)
 
+    def test_combined_job_renders_two_stage_progress_component(self):
+        """job_summary's is_combined picks c-combined-job-progress (two
+        bars) over the single-stage c-job-progress."""
+        self.backend.job_summary.return_value = {
+            "summary": [], "project_id": PROJECT_ID, "is_combined": True,
+        }
+        resp = self.client.get(reverse("jobs:job_watch", args=["combined-job-id"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="import-bar-combined-job-id"')
+        self.assertContains(resp, 'id="export-bar-combined-job-id"')
+
+    def test_plain_job_renders_single_stage_progress_component(self):
+        self.backend.job_summary.return_value = {
+            "summary": [], "project_id": PROJECT_ID, "is_combined": False,
+        }
+        resp = self.client.get(reverse("jobs:job_watch", args=["plain-job-id"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="progress-bar-plain-job-id"')
+        self.assertNotContains(resp, 'id="import-bar-plain-job-id"')
+
+    def test_job_summary_missing_is_combined_key_defaults_to_plain(self):
+        """Backward compatibility: an older/stubbed job_summary response
+        with no is_combined key at all must not crash job_watch."""
+        self.backend.job_summary.return_value = {"summary": [], "project_id": PROJECT_ID}
+        resp = self.client.get(reverse("jobs:job_watch", args=["queued-job-id"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="progress-bar-queued-job-id"')
+
 
 class JobStreamObserverTests(_StubbedBackend):
     """job_stream relays the backend's observer stream (GET

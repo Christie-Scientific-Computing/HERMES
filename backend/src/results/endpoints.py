@@ -122,6 +122,12 @@ async def job_summary(job_id: str):
     export stage (StatusDB.count_exported_patients) -- additive fields for
     a combined import->export job (backend/worker.py's _maybe_chain_export),
     both simply 0 for a job with no export-stage events at all.
+
+    `is_combined` (TasksDB.job_has_chain_export) tells a caller whether this
+    job was submitted with export chaining at all -- checked on submission-
+    time params, so it's accurate immediately, before any task has actually
+    chained anything. frontend/jobs/views.py's job_watch uses it to pick the
+    two-stage progress component instead of the single-stage one.
     """
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
@@ -133,6 +139,7 @@ async def job_summary(job_id: str):
             "job_id": job_id, "summary": summary,
             "imported_count": imported_count, "submitted_count": submitted_count,
             "exported_count": exported_count, "export_attempted_count": export_attempted_count,
+            "is_combined": tasks_db.job_has_chain_export(job_id),
         }
         job = status_db.get_job(job_id)
         if job:
@@ -193,9 +200,23 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
     calls in asyncio.to_thread to avoid, worse here since this stream is
     long-lived by design rather than one call per batch item.
     """
-    total = await asyncio.to_thread(tasks_db.count_tasks, job_id)
-    yield format_sse({"type": "start", "total": total})
-    last_total = total
+    def _totals(rows: list[dict]) -> tuple[int, int, int]:
+        # A combined import->export job (backend/worker.py's
+        # _maybe_chain_export) grows its export task count over the job's
+        # lifetime -- export tasks are chained in one at a time as imports
+        # succeed. Splitting by stage (present on every row) rather than
+        # inferring "export total = grand total - import total" client-side
+        # keeps both denominators authoritative even across a reconnect,
+        # when the client has no reliable memory of what the import-only
+        # total was at the moment the stream first opened.
+        import_total = sum(1 for r in rows if r["stage"] == "retrieve")
+        export_total = sum(1 for r in rows if r["stage"] == "export")
+        return len(rows), import_total, export_total
+
+    rows = await asyncio.to_thread(tasks_db.job_progress, job_id)
+    total, import_total, export_total = _totals(rows)
+    yield format_sse({"type": "start", "total": total, "import_total": import_total, "export_total": export_total})
+    last_totals = (total, import_total, export_total)
 
     # Tracks each task's last-reported state so a re-read (see
     # TasksDB.job_progress's docstring for why this can't be filtered at
@@ -218,23 +239,31 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
 
         rows = await asyncio.to_thread(tasks_db.job_progress, job_id)
 
-        # A combined import->export job (backend/worker.py's
-        # _maybe_chain_export) grows its task count over the job's
-        # lifetime -- export tasks are chained in one at a time as imports
-        # succeed, so the initial `total` above only ever covers the
-        # import tasks known at submission. Report the new total whenever
-        # it changes so the frontend's progress bar can grow its
-        # denominator accordingly; this is purely informational, the loop's
-        # own termination below (has_pending) already reads live state
-        # regardless of what `total` last said.
-        if len(rows) != last_total:
-            last_total = len(rows)
-            yield format_sse({"type": "total", "total": last_total})
+        totals = _totals(rows)
+        if totals != last_totals:
+            last_totals = totals
+            total, import_total, export_total = totals
+            yield format_sse({"type": "total", "total": total,
+                               "import_total": import_total, "export_total": export_total})
 
         has_pending = False
         for row in rows:
             task_id, state = row["task_id"], row["state"]
-            if state in _PENDING_TASK_STATES:
+            # Once cancellation has been observed, a still-'queued' row can
+            # never be claimed (TasksDB.claim excludes cancelled jobs) --
+            # it's permanently inert, not pending. Before that point,
+            # 'queued' counts as pending exactly as it always has.
+            #
+            # This matters specifically for a chained export enqueued in the
+            # narrow window between _maybe_chain_export's own is_cancelled
+            # check and cancel_queued's sweep (backend/worker.py): that row
+            # lands 'queued' *after* the sweep already ran, so it's never
+            # caught by cancel_queued and would otherwise sit 'queued'
+            # forever -- without this check, has_pending would never go
+            # false and this generator would poll indefinitely, never
+            # emitting `done`.
+            still_pending = state in ("claimed", "running") if cancelled_reported else state in _PENDING_TASK_STATES
+            if still_pending:
                 has_pending = True
             if last_state.get(task_id) == state:
                 continue

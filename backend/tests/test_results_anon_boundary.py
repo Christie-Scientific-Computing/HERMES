@@ -220,6 +220,31 @@ def test_job_summary_includes_exported_counts(client, job_id):
     assert body["export_attempted_count"] == 2
 
 
+def test_job_summary_is_combined_true_when_chain_export_submitted(client, job_id):
+    from backend.src.status.tasks_db import TasksDB
+    from backend.src.common.sse import BatchItem
+
+    status_db.create_job(job_id)
+    TasksDB().enqueue(
+        job_id, [BatchItem(real_id=REAL_MRN, display_id=ANON_MRN, status_mrn=REAL_MRN)],
+        kind="import", stage="retrieve",
+        params={"chain_export": {"kind": "dicom_move", "destination": "AE1"}},
+    )
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    assert resp.json()["is_combined"] is True
+
+
+def test_job_summary_is_combined_false_for_plain_import(client, job_id):
+    status_db.create_job(job_id)
+    status_db.add_event(job_id, REAL_MRN, stage="retrieve", event_type="success", details={"imported": True})
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    assert resp.json()["is_combined"] is False
+
+
 def test_job_summary_export_counts_are_zero_for_import_only_job(client, job_id):
     status_db.create_job(job_id)
     status_db.add_event(job_id, REAL_MRN, stage="retrieve", event_type="success", details={"imported": True})

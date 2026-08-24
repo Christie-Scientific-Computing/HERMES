@@ -405,6 +405,32 @@ def test_job_progress_returns_every_task_with_current_state(tasks_db, job_id):
     assert rows_after[task["task_id"]]["details"] == {"imported": True}
 
 
+def test_job_has_chain_export_true_when_a_task_carries_it(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve",
+                      params={"chain_export": {"kind": "dicom_move", "destination": "AE1"}})
+    assert tasks_db.job_has_chain_export(job_id) is True
+
+
+def test_job_has_chain_export_false_for_plain_import(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={"import_level": "Planning data"})
+    assert tasks_db.job_has_chain_export(job_id) is False
+
+
+def test_job_has_chain_export_true_before_any_task_has_run(tasks_db, job_id):
+    """Checked on submission-time params, not on a chained task actually
+    existing yet -- frontend/jobs/views.py's job_watch needs this true from
+    the moment the job is submitted, before any import has succeeded."""
+    tasks_db.enqueue(job_id, _items(3), kind="import", stage="retrieve",
+                      params={"chain_export": {"kind": "proknow_upload", "collection": "C1"}})
+    assert tasks_db.job_has_chain_export(job_id) is True
+    rows = tasks_db.job_progress(job_id)
+    assert all(r["state"] == "queued" for r in rows)  # nothing has run yet
+
+
+def test_job_has_chain_export_unknown_job_returns_false(tasks_db):
+    assert tasks_db.job_has_chain_export(f"nonexistent-{uuid.uuid4()}") is False
+
+
 def test_job_progress_includes_stage_and_kind(tasks_db, job_id):
     """
     results/endpoints.py's observer stream tags progress/success/error

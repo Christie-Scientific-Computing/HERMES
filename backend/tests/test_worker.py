@@ -339,12 +339,19 @@ def _chain_params(project_id, username, kind="dicom_move", **extra):
             "chain_export": chain}
 
 
+def _enqueue_and_claim_import(tasks_db, job_id, params):
+    """A real, claimed import task -- chained_from_task_id is a real FK to
+    tasks.task_id (see the migration adding it), so _maybe_chain_export's
+    enqueue call needs a real task_id, not a made-up placeholder."""
+    item = BatchItem(real_id="R1", display_id="A1", status_mrn="R1")
+    tasks_db.enqueue(job_id, [item], kind="import", stage="retrieve", params=params)
+    return tasks_db.claim("test-worker")
+
+
 def test_maybe_chain_export_enqueues_dicom_move_when_imported(tasks_db, status_db, job_id, active_project):
     project_id, username = active_project
-    task = {
-        "job_id": job_id, "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
-        "params": _chain_params(project_id, username, kind="dicom_move", destination="SOME_AE"),
-    }
+    task = _enqueue_and_claim_import(
+        tasks_db, job_id, _chain_params(project_id, username, kind="dicom_move", destination="SOME_AE"))
     worker._maybe_chain_export(tasks_db, status_db, task, {"imported": True})
 
     rows = tasks_db.job_progress(job_id)
@@ -358,14 +365,13 @@ def test_maybe_chain_export_enqueues_dicom_move_when_imported(tasks_db, status_d
     assert exported["display_id"] == "A1"
     assert exported["status_mrn"] == "R1"
     assert exported["params"] == {"destination": "SOME_AE", "project_id": project_id, "username": username}
+    assert exported["chained_from_task_id"] == task["task_id"]
 
 
 def test_maybe_chain_export_proknow_upload_when_imported(tasks_db, status_db, job_id, active_project):
     project_id, username = active_project
-    task = {
-        "job_id": job_id, "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
-        "params": _chain_params(project_id, username, kind="proknow_upload", collection="SomeCollection"),
-    }
+    task = _enqueue_and_claim_import(
+        tasks_db, job_id, _chain_params(project_id, username, kind="proknow_upload", collection="SomeCollection"))
     worker._maybe_chain_export(tasks_db, status_db, task, {"imported": True})
 
     claimed = tasks_db.claim("test-worker")
@@ -375,10 +381,9 @@ def test_maybe_chain_export_proknow_upload_when_imported(tasks_db, status_db, jo
 
 def test_maybe_chain_export_includes_message_id_for_dicom_move_only(tasks_db, status_db, job_id, active_project):
     project_id, username = active_project
-    task = {
-        "job_id": job_id, "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
-        "params": _chain_params(project_id, username, kind="dicom_move", destination="TRIAL_AE", message_id=51966),
-    }
+    task = _enqueue_and_claim_import(
+        tasks_db, job_id,
+        _chain_params(project_id, username, kind="dicom_move", destination="TRIAL_AE", message_id=51966))
     worker._maybe_chain_export(tasks_db, status_db, task, {"imported": True})
 
     claimed = tasks_db.claim("test-worker")
@@ -389,41 +394,64 @@ def test_maybe_chain_export_skips_when_not_imported(tasks_db, status_db, job_id,
     """A patient not found on import (imported falsy/absent) must never get
     a chained export task -- it would have nothing to export."""
     project_id, username = active_project
-    task = {
-        "job_id": job_id, "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
-        "params": _chain_params(project_id, username, destination="SOME_AE"),
-    }
+    task = _enqueue_and_claim_import(
+        tasks_db, job_id, _chain_params(project_id, username, destination="SOME_AE"))
     worker._maybe_chain_export(tasks_db, status_db, task, {"imported": False})
     worker._maybe_chain_export(tasks_db, status_db, task, {})  # no "imported" key at all
 
-    assert tasks_db.job_progress(job_id) == []
+    rows = tasks_db.job_progress(job_id)
+    assert [r["kind"] for r in rows] == ["import"]  # only the import task itself, no chained export
 
 
 def test_maybe_chain_export_skips_when_job_cancelled(tasks_db, status_db, job_id, active_project):
     """A cancelled job shouldn't spawn new export work just because an
     in-flight import happened to finish afterward."""
     project_id, username = active_project
+    task = _enqueue_and_claim_import(
+        tasks_db, job_id, _chain_params(project_id, username, destination="SOME_AE"))
     status_db.cancel_job(job_id)
-    task = {
-        "job_id": job_id, "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
-        "params": _chain_params(project_id, username, destination="SOME_AE"),
-    }
     worker._maybe_chain_export(tasks_db, status_db, task, {"imported": True})
 
-    assert tasks_db.job_progress(job_id) == []
+    rows = tasks_db.job_progress(job_id)
+    assert [r["kind"] for r in rows] == ["import"]
 
 
 def test_maybe_chain_export_no_op_without_chain_export_param(tasks_db, status_db, job_id, active_project):
     """A plain import task (no export_kind at submission) must never chain --
     the overwhelming majority of import tasks today."""
     project_id, username = active_project
-    task = {
-        "job_id": job_id, "real_id": "R1", "display_id": "A1", "status_mrn": "R1",
-        "params": {"import_level": "Planning data", "project_id": project_id, "username": username},
-    }
+    task = _enqueue_and_claim_import(
+        tasks_db, job_id, {"import_level": "Planning data", "project_id": project_id, "username": username})
     worker._maybe_chain_export(tasks_db, status_db, task, {"imported": True})
 
-    assert tasks_db.job_progress(job_id) == []
+    rows = tasks_db.job_progress(job_id)
+    assert [r["kind"] for r in rows] == ["import"]
+
+
+def test_maybe_chain_export_second_call_for_same_import_is_a_no_op(tasks_db, status_db, job_id, active_project):
+    """
+    THE duplicate-egress regression test. A task reaped from a slow worker
+    and reclaimed by another (TasksDB.reap_stale_claims) results in TWO
+    separate _handle_one calls that each complete the same import
+    successfully and each call _maybe_chain_export -- without the DB-level
+    dedup guard (chained_from_task_id + the partial unique index), this
+    would enqueue two real export tasks for one patient, i.e. two actual
+    DICOM C-MOVEs / ProKnow uploads, not just duplicate in-worker *work*
+    (the at-least-once tradeoff this codebase already accepts elsewhere).
+    """
+    project_id, username = active_project
+    task = _enqueue_and_claim_import(
+        tasks_db, job_id, _chain_params(project_id, username, kind="dicom_move", destination="SOME_AE"))
+
+    # Simulates two workers (the original, and whoever reclaimed the task
+    # after a reap) each independently completing the same import and each
+    # calling _maybe_chain_export with their own copy of the task dict.
+    worker._maybe_chain_export(tasks_db, status_db, task, {"imported": True})
+    worker._maybe_chain_export(tasks_db, status_db, task, {"imported": True})
+
+    rows = tasks_db.job_progress(job_id)
+    export_rows = [r for r in rows if r["kind"] == "dicom_move"]
+    assert len(export_rows) == 1  # not 2
 
 
 def test_chain_export_enqueued_before_import_task_marked_succeeded(
@@ -478,16 +506,27 @@ def test_chain_export_enqueued_before_import_task_marked_succeeded(
 def test_handle_one_chain_export_failure_does_not_block_import_success(
     tasks_db, status_db, job_id, active_project, monkeypatch, _restore_handlers,
 ):
-    """A chain-enqueue failure (e.g. a transient DB error) must not crash the
+    """
+    A chain-enqueue failure (e.g. a transient DB error) must not crash the
     worker or fail the import task, which genuinely succeeded -- it should
-    be recorded as its own export-stage failure event instead."""
+    be recorded as its own export-stage failure event instead.
+
+    Makes the REAL TasksDB.enqueue raise (rather than monkeypatching
+    _maybe_chain_export wholesale) so this actually proves the try/except in
+    _handle_one catches a failure from the real enqueue call, not just that
+    the try/except exists around whatever _maybe_chain_export happens to do.
+    """
     project_id, username = active_project
     worker._HANDLERS["import"] = lambda task: {"imported": True}
 
-    def _boom(*args, **kwargs):
-        raise RuntimeError("enqueue exploded")
+    real_enqueue = tasks_db.enqueue
 
-    monkeypatch.setattr(worker, "_maybe_chain_export", lambda *a, **k: _boom())
+    def _boom(job_id, items, kind, stage, params, chained_from_task_id=None):
+        if chained_from_task_id is not None:  # only the chained-export call fails
+            raise RuntimeError("enqueue exploded")
+        return real_enqueue(job_id, items, kind, stage, params, chained_from_task_id)
+
+    monkeypatch.setattr(tasks_db, "enqueue", _boom)
 
     item = BatchItem(real_id="R1", display_id="A1", status_mrn="R1")
     params = _chain_params(project_id, username, destination="SOME_AE")

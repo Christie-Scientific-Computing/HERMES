@@ -90,6 +90,8 @@ sequenceDiagram
 
 Net effect: closing the browser tab no longer kills the job, a refresh doesn't lose it, a colleague with project access can watch it, and multiple workers give real parallelism. See `docs/worker-queue-design.md` for the full design and `CLAUDE.md`'s Key Design Patterns for the exact SSE event vocabulary. Single-patient import/export and the legacy "list of MRNs" batch alias still run the old synchronous SSE-in-request path — the queue is specifically for CSV-upload batches.
 
+**Combined import→export jobs**: `frontend/`'s "Import & Export" page (`jobs:import_export_data`) submits one job that does both — `backend/worker.py`'s `_maybe_chain_export` enqueues a matching export task on the same `job_id` once a patient's import succeeds, so nobody has to come back and start a second export job by hand. See CLAUDE.md's "Chained export" pattern for the ordering/dedup details that make this safe under a multi-worker, at-least-once queue.
+
 ## Data layout — four separate databases, never conflate them
 
 ```mermaid

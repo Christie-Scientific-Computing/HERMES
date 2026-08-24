@@ -5,6 +5,10 @@
 <p class="text-sm text-gray-500 mb-6 font-mono">{{ job_id }}</p>
 
 <div class="max-w-2xl">
+  {% if is_combined %}
+  <c-combined-job-progress job_id="{{ job_id }}" />
+  {% else %}
   <c-job-progress job_id="{{ job_id }}" />
+  {% endif %}
 </div>
 {% endblock %}

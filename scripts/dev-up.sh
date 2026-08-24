@@ -67,6 +67,29 @@ echo ""
 # rather than needing a separate terminal per process.
 (python -m uvicorn backend.main:app --reload --port "$BACKEND_PORT" 2>&1 | sed -u "s/^/[backend]   /") &
 
+# backend/main.py runs its Alembic migration at import time, before uvicorn
+# ever starts accepting connections -- so waiting for the port to respond is
+# also waiting for migrations to finish. Without this, a worker started
+# against a fresh/empty database can hit a bare "relation tasks does not
+# exist" and exit (backend/worker.py's claim loop has no retry for that) a
+# few seconds before the backend it depends on has actually finished
+# creating the table.
+echo -n "Waiting for backend to come up"
+backend_ready=false
+for _ in $(seq 1 60); do
+  if curl -sf "http://localhost:$BACKEND_PORT/docs" -o /dev/null 2>/dev/null; then
+    backend_ready=true
+    break
+  fi
+  echo -n "."
+  sleep 1
+done
+echo ""
+if [ "$backend_ready" != true ]; then
+  echo "Backend did not come up within 60s -- see the [backend] output above." >&2
+  exit 1
+fi
+
 for i in $(seq 1 "$WORKER_COUNT"); do
   (python -m backend.worker 2>&1 | sed -u "s/^/[worker-$i]  /") &
 done
