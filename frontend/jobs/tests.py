@@ -473,6 +473,9 @@ class JobWatchTests(_StubbedBackend):
         resp = self.client.get(reverse("jobs:job_watch", args=["combined-job-id"]))
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, 'id="import-bar-combined-job-id"')
+        # is_combined is read off the same job_summary call the visibility
+        # check already made -- must not be a second round trip.
+        self.backend.job_summary.assert_called_once()
         self.assertContains(resp, 'id="export-bar-combined-job-id"')
 
     def test_plain_job_renders_single_stage_progress_component(self):

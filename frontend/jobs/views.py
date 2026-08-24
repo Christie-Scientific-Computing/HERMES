@@ -40,6 +40,7 @@ hand-rolled per-message dispatch.
 """
 import json
 import uuid
+from typing import Optional
 
 from asgiref.sync import sync_to_async
 from django.contrib import messages
@@ -353,42 +354,47 @@ def import_export_data(request):
     })
 
 
-def _user_can_watch_job(request, job_id: str) -> bool:
+def _check_job_visibility(request, job_id: str) -> tuple[bool, Optional[dict]]:
     """
     Live visibility check backing both job_watch and job_stream: mirrors
     job_detail's own _job_is_visible_to, re-checked on every request rather
     than trusting anything cached from submission time -- the job may have
     been enqueued minutes ago by this browser, or be someone else's job_id
-    typed/guessed into the URL.
+    typed/guessed into the URL. Returns (visible, job_info) -- job_info is
+    the one job_summary call this makes, handed back so a sync caller
+    (job_watch) doesn't need a second round trip just to read another field
+    off the same response.
 
-    Plain sync function, deliberately -- job_stream (async) calls this via
-    sync_to_async: request.user/request.session both trigger a synchronous
-    DB read on first touch, which is disallowed directly inside an async
-    def view. job_watch (a normal sync view) calls it directly.
+    Plain sync function, deliberately -- job_stream (async) calls the
+    boolean-only _user_can_watch_job wrapper below via sync_to_async:
+    request.user/request.session both trigger a synchronous DB read on
+    first touch, which is disallowed directly inside an async def view.
     """
     if not request.user.is_authenticated:
-        return False
+        return False, None
     try:
         job_info = backend_client.job_summary(job_id)
     except backend_client.BackendError:
-        return False
+        return False, None
     user_project_ids = [p["project_id"] for p in _users_projects(request.user)]
-    return _job_is_visible_to(request, job_info, user_project_ids)
+    return _job_is_visible_to(request, job_info, user_project_ids), job_info
+
+
+def _user_can_watch_job(request, job_id: str) -> bool:
+    return _check_job_visibility(request, job_id)[0]
 
 
 @login_required
 def job_watch(request, job_id):
-    if not _user_can_watch_job(request, job_id):
+    visible, job_info = _check_job_visibility(request, job_id)
+    if not visible:
         raise Http404("Unknown job, or you don't have access to it")
     # is_combined (backend's TasksDB.job_has_chain_export, checked on
     # submission-time params) picks the two-stage progress component for a
     # combined import->export job -- accurate from the moment the job is
     # submitted, not only once its first import has actually succeeded and
     # chained an export task.
-    try:
-        is_combined = backend_client.job_summary(job_id).get("is_combined", False)
-    except backend_client.BackendError:
-        is_combined = False
+    is_combined = (job_info or {}).get("is_combined", False)
     return render(request, "jobs/job_watch.html", {"job_id": job_id, "is_combined": is_combined})
 
 

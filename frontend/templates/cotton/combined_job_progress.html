@@ -53,6 +53,15 @@
   // have already been chained in, when there'd be no reliable way to
   // recover "the import-only total at the moment the stream first opened"
   // by subtracting on this end.
+  //
+  // importDone/exportDone, by contrast, are still accumulated client-side
+  // and reset to 0 on every 'start' (i.e. every fresh connection) -- this
+  // only stays correct because _observe_job (backend/src/results/
+  // endpoints.py) starts each new connection with an empty last-seen-state
+  // map, so a reconnect replays a success/error event for every
+  // already-finished task, not just new ones. Don't "fix" the reset
+  // without accounting for that replay, or a reconnect would silently
+  // undercount.
   let importTotal = 0, importDone = 0;
   let exportTotal = 0, exportDone = 0;
 

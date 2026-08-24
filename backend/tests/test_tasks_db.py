@@ -405,6 +405,24 @@ def test_job_progress_returns_every_task_with_current_state(tasks_db, job_id):
     assert rows_after[task["task_id"]]["details"] == {"imported": True}
 
 
+def test_enqueue_duplicate_patient_row_in_plain_export_csv_still_inserts_both(tasks_db, job_id):
+    """
+    The partial unique index backing chained-export dedup (migration
+    744bd8b0a4b7) is scoped to chained_from_task_id IS NOT NULL -- it must
+    have zero effect on an ordinary (non-chained) batch export submission.
+    A duplicate patient_id row in a plain export CSV is unrelated user
+    input, not something this dedup guard should silently drop.
+    """
+    dup = [
+        BatchItem(real_id="R1", display_id="A1", status_mrn="R1"),
+        BatchItem(real_id="R1", display_id="A1", status_mrn="R1"),
+    ]
+    tasks_db.enqueue(job_id, dup, kind="dicom_move", stage="export", params={"destination": "AE1"})
+
+    rows = tasks_db.job_progress(job_id)
+    assert len(rows) == 2  # both rows present, not deduped -- chained_from_task_id is NULL on both
+
+
 def test_job_has_chain_export_true_when_a_task_carries_it(tasks_db, job_id):
     tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve",
                       params={"chain_export": {"kind": "dicom_move", "destination": "AE1"}})

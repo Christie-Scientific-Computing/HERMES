@@ -35,13 +35,16 @@ def upgrade() -> None:
     # chained_from_task_id records which import task a chained export came
     # from (NULL for every other task -- plain batch import/export
     # submissions never set it). The partial unique index makes a second
-    # chain attempt for the same import a no-op at the database level
-    # (TasksDB.enqueue's ON CONFLICT DO NOTHING) rather than a race between
-    # a read and a write in application code, which two genuinely-concurrent
-    # workers could both pass. Scoped to chained_from_task_id IS NOT NULL
-    # so it has zero effect on ordinary (non-chained) export submissions --
-    # a duplicate patient_id row in a plain export CSV still enqueues two
-    # tasks today, unchanged.
+    # chained enqueue for the same (job_id, kind, status_mrn) a no-op at the
+    # database level (TasksDB.enqueue's ON CONFLICT DO NOTHING) rather than
+    # a race between a read and a write in application code, which two
+    # genuinely-concurrent workers could both pass -- this is stricter than
+    # "the same import task" (it doesn't distinguish which import chained
+    # it), so a combined CSV listing the same patient twice also produces
+    # only one chained export, not two -- the safe failure mode here.
+    # Scoped to chained_from_task_id IS NOT NULL so it has zero effect on
+    # ordinary (non-chained) export submissions -- a duplicate patient_id
+    # row in a plain export CSV still enqueues two tasks today, unchanged.
     op.add_column(
         "tasks",
         sa.Column("chained_from_task_id", sa.BigInteger, sa.ForeignKey("tasks.task_id", ondelete="SET NULL"),

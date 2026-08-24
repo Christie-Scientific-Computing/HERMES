@@ -164,6 +164,10 @@ _OBSERVER_POLL_INTERVAL = float(os.getenv("HERMES_OBSERVER_POLL_INTERVAL", "1"))
 
 
 _PENDING_TASK_STATES = ("queued", "claimed", "running")
+# Once cancellation has been observed, a 'queued' task can never be claimed
+# (TasksDB.claim excludes cancelled jobs) -- only these two states still
+# count as pending. See the cancelled_reported branch below.
+_PENDING_TASK_STATES_AFTER_CANCEL = ("claimed", "running")
 
 
 async def _observe_job(job_id: str) -> AsyncIterator[str]:
@@ -262,7 +266,8 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
             # forever -- without this check, has_pending would never go
             # false and this generator would poll indefinitely, never
             # emitting `done`.
-            still_pending = state in ("claimed", "running") if cancelled_reported else state in _PENDING_TASK_STATES
+            pending_states = _PENDING_TASK_STATES_AFTER_CANCEL if cancelled_reported else _PENDING_TASK_STATES
+            still_pending = state in pending_states
             if still_pending:
                 has_pending = True
             if last_state.get(task_id) == state:
