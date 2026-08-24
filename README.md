@@ -38,7 +38,9 @@ pip install -r requirements-dev.txt
 
 `requirements.txt` covers the backend, the worker, and `frontend_fastapi/`. `proxy/` and `webui/` have their own, smaller dependency lists (see `proxy/pyproject.toml` / `webui/pyproject.toml`) since they're run as separate processes with much narrower needs.
 
-**Fastest path to a full local stack**: `docker compose -f docker-compose.dev.yml up` brings up both Postgres databases, the backend, a worker, `frontend/` (port 8010), and `frontend_fastapi/` (port 8020) together, with dev users pre-seeded. See that file's comments for details. The manual steps below are the alternative if you want to run pieces individually.
+**Fastest path to a full local stack**: `docker compose -f docker-compose.dev.yml up` brings up both Postgres databases, the backend, a worker, `frontend/` (port 8010), and `frontend_fastapi/` (port 8020) together, with dev users pre-seeded. See that file's comments for details.
+
+**Already have Postgres running and just want backend + worker + `frontend/` without Docker?** `./scripts/dev-up.sh` starts all three (one worker by default — set `HERMES_DEV_WORKERS=3` for more) in a single terminal, interleaved and prefixed by process, and stops all of them together on Ctrl-C. The manual steps below are the alternative if you want to run pieces individually.
 
 ### 1. Configure
 
