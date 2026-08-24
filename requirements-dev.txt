@@ -1,0 +1,9 @@
+# Dependencies for the local dev docker-compose stack (docker-compose.dev.yml).
+# Everything backend/ and frontend_fastapi/ need, per the root requirements.txt,
+# plus frontend/ (Django) -- which has no dependency file of its own anywhere
+# in the repo today. Versions pinned to what's already validated working in
+# this repo's own .venv.
+-r requirements.txt
+
+Django==6.0.7
+django-cotton==2.7.2

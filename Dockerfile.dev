@@ -1,0 +1,65 @@
+# Dev-only image for docker-compose.dev.yml -- NOT used by the production
+# docker-compose.yml/Dockerfile at the repo root. Shared by backend, worker,
+# frontend, and frontend_fastapi (same pattern the prod Dockerfile/compose
+# already use: one image, a different `command:` per service).
+#
+# Application code is supplied at runtime via bind mount (see
+# docker-compose.dev.yml) for hot reload, not baked in here with COPY -- the
+# one exception is the PinnacleExport stub below, which must survive that
+# bind mount via a named-volume overlay (see docker-compose.dev.yml's
+# `pinnacle_stub` volume for why).
+# 3.12, not the prod Dockerfile's 3.11 -- Django 6.0.7 (requirements-dev.txt)
+# requires >=3.12, and this matches the Python version already validated
+# working in this repo's own .venv (see .venv/pyvenv.cfg).
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+# --- PinnacleExport stub -----------------------------------------------------
+# backend/src/retrieve/logic.py does `from
+# backend.src.retrieve.PinnacleExport.entrypoint import entry` at module
+# level, and both backend/main.py (via retrieve/endpoints.py) and
+# backend/worker.py import that module transitively -- so the process can't
+# even boot without *something* at this path. The real submodule is private
+# and PAT-gated (see the prod Dockerfile) and genuinely unnecessary here:
+# Pinnacle integration is explicitly out of scope for this dev stack. This
+# stub only needs to satisfy the two symbols actually imported
+# (backend/src/retrieve/logic.py:18-19), each used at exactly one call site
+# each (logic.py:309, logic.py:512) -- entry() raises clearly if ever
+# actually invoked; ExportRequest matches the one real constructor call's
+# keyword arguments.
+RUN mkdir -p backend/src/retrieve/PinnacleExport/src
+RUN cat <<'EOF' > backend/src/retrieve/PinnacleExport/__init__.py
+EOF
+RUN cat <<'EOF' > backend/src/retrieve/PinnacleExport/src/__init__.py
+EOF
+RUN cat <<'EOF' > backend/src/retrieve/PinnacleExport/entrypoint.py
+"""Dev-stub replacement for the private PinnacleExport submodule -- see
+Dockerfile.dev. Pinnacle integration is out of scope for the local dev
+stack; this only exists so backend/src/retrieve/logic.py's module-level
+import succeeds."""
+
+
+def entry(payload):
+    raise RuntimeError(
+        "PinnacleExport is not available in this dev environment "
+        "(Dockerfile.dev stub) -- Pinnacle export was intentionally left "
+        "out of scope."
+    )
+EOF
+RUN cat <<'EOF' > backend/src/retrieve/PinnacleExport/src/database.py
+"""Dev-stub replacement for the private PinnacleExport submodule -- see
+Dockerfile.dev."""
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class ExportRequest:
+    mrn: int
+    patient_id: str
+    path: Path
+EOF

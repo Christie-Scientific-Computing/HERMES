@@ -1,0 +1,182 @@
+# Local dev stack for testing/reviewing recent work end-to-end -- separate
+# from the production docker-compose.yml/Dockerfile at the repo root (which
+# pull a pinned ghcr.io image and expect real Orthanc/cert/credentials
+# infrastructure). This one builds locally from Dockerfile.dev and
+# deliberately leaves Orthanc/ProKnow/Pinnacle/Mosaiq unconfigured -- the
+# backend is designed to start fine without them (only the specific
+# endpoints that call out to them fail), and those integrations need real
+# clinical infrastructure this stack doesn't try to fake.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up --build
+#   docker compose -f docker-compose.dev.yml exec backend python -m backend.scripts.dev_seed
+#
+# Then:
+#   frontend/ (Django, full-featured)        -> http://localhost:8010
+#   frontend_fastapi/ (rewrite, Phase 1 only) -> http://localhost:8020
+#   backend API docs                          -> http://localhost:8000/docs
+#
+# Seeded logins (both frontends): admin/admin123 (staff+superuser),
+# alice/alice123 (regular user, also seeded as a project member in HermesDB
+# by dev_seed.py above).
+
+x-hermes-env: &hermes-env
+  DATABASE_URL: postgresql://hermes:hermes@hermes-db:5432/hermes
+  PINNACLE_SCHEMA: pinnacle_export
+  ANON_DB_HOST: anon-db
+  ANON_DB_PORT: "5432"
+  ANON_DB_NAME: anon
+  ANON_DB_USER: anon
+  ANON_DB_PASS: anon
+  HERMES_INTERNAL_KEY: dev-shared-internal-key
+  # backend/src/retrieve/logic.py:40 does `int(os.getenv('PINNACLE_PUSH_PORT'))`
+  # at MODULE level, with no default -- unlike every other Orthanc/ProKnow/
+  # Pinnacle/Mosaiq var below, an unset value crashes the import outright
+  # (backend and worker both import this module transitively), not just the
+  # specific endpoints that use it. This dummy value only needs to parse as
+  # an int; nothing in this dev stack ever actually connects to it.
+  PINNACLE_PUSH_PORT: "104"
+  # Orthanc/ProKnow/Pinnacle-push-host/Mosaiq deliberately left unset -- see
+  # the header comment above. The backend starts fine without them; only the
+  # specific endpoints that call out to them will fail, which is expected.
+
+services:
+
+  hermes-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hermes
+      POSTGRES_USER: hermes
+      POSTGRES_PASSWORD: hermes
+    ports:
+      - "55432:5432"
+    volumes:
+      - hermes_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hermes -d hermes"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  anon-db:
+    # Stand-in for the externally-owned anon-mapping DB (ANON_DB_*) --
+    # normally HERMES only ever SELECTs against this; here it's a throwaway
+    # local Postgres seeded with a fake key_value table by
+    # backend/scripts/dev_seed.py, purely so the anon-boundary code paths
+    # (backend/src/identity/anon.py) are actually exercised locally.
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: anon
+      POSTGRES_USER: anon
+      POSTGRES_PASSWORD: anon
+    ports:
+      - "55433:5432"
+    volumes:
+      - anon_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U anon -d anon"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: hermes-dev:local
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *hermes-env
+    depends_on:
+      hermes-db:
+        condition: service_healthy
+      anon-db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      # See Dockerfile.dev: a plain `.:/app` bind would shadow the
+      # image-baked PinnacleExport stub with the host's (nonexistent)
+      # directory. This named volume overlays just that subpath, and Docker
+      # auto-populates it from the image's own content there on first start.
+      - pinnacle_stub:/app/backend/src/retrieve/PinnacleExport
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: hermes-dev:local
+    command: python -m backend.worker
+    environment:
+      <<: *hermes-env
+    depends_on:
+      hermes-db:
+        condition: service_healthy
+      anon-db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - pinnacle_stub:/app/backend/src/retrieve/PinnacleExport
+    restart: unless-stopped
+
+  frontend:
+    # The full-featured production frontend (Django) -- jobs,
+    # research_projects, accounts. Most functionality is only testable
+    # through this app today; frontend_fastapi (below) is still Phase 1.
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: hermes-dev:local
+    working_dir: /app/frontend
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py dev_seed_users &&
+             python -m uvicorn hermes_frontend.asgi:application --host 0.0.0.0 --port 8000 --reload"
+    ports:
+      - "8010:8000"
+    environment:
+      BACKEND_URI: backend
+      BACKEND_PORT: "8000"
+      HERMES_INTERNAL_KEY: dev-shared-internal-key
+      DJANGO_SECRET_KEY: dev-only-insecure-secret
+      DJANGO_DEBUG: "true"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,frontend
+    depends_on:
+      - backend
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  frontend_fastapi:
+    # The in-progress FastAPI+Jinja2 rewrite -- Phase 1 (accounts) only so
+    # far. Run alongside frontend/ above so this branch's actual new work
+    # can be reviewed directly, not just read.
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: hermes-dev:local
+    working_dir: /app
+    command: >
+      sh -c "python -m frontend_fastapi.scripts.dev_seed &&
+             python -m uvicorn frontend_fastapi.main:app --host 0.0.0.0 --port 8000 --reload"
+    ports:
+      - "8020:8000"
+    environment:
+      BACKEND_URI: backend
+      BACKEND_PORT: "8000"
+      HERMES_INTERNAL_KEY: dev-shared-internal-key
+      HERMES_FRONTEND_SECRET_KEY: dev-only-insecure-secret
+      HERMES_FRONTEND_DEBUG: "true"
+      HERMES_FRONTEND_ALLOWED_HOSTS: localhost,127.0.0.1,frontend_fastapi
+    depends_on:
+      - backend
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  hermes_db_data:
+  anon_db_data:
+  pinnacle_stub:

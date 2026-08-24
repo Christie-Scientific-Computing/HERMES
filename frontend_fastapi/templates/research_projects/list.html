@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "research_projects/_macros.html" import project_card %}
+{% block title %}Projects — HERMES{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-1">
+  <h1 class="text-xl font-semibold text-gray-900">{% if user.is_staff %}Projects{% else %}My Projects{% endif %}</h1>
+  <div class="flex items-center gap-3">
+    {% if user.is_staff %}
+    <form method="get" class="flex items-center gap-2">
+      <select name="status" onchange="this.form.submit()" class="text-sm">
+        <option value="" {% if not status %}selected{% endif %}>All statuses</option>
+        <option value="draft" {% if status == "draft" %}selected{% endif %}>Draft</option>
+        <option value="submitted" {% if status == "submitted" %}selected{% endif %}>Submitted</option>
+        <option value="approved" {% if status == "approved" %}selected{% endif %}>Approved</option>
+        <option value="rejected" {% if status == "rejected" %}selected{% endif %}>Rejected</option>
+        <option value="revoked" {% if status == "revoked" %}selected{% endif %}>Revoked</option>
+      </select>
+    </form>
+    {% endif %}
+    <a href="/projects/new" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800 whitespace-nowrap">
+      New project
+    </a>
+  </div>
+</div>
+<p class="text-sm text-gray-500 mb-4">
+  {% if user.is_staff %}Every project in the system, regardless of status or membership.{% else %}Projects you belong to.{% endif %}
+</p>
+
+{% if backend_error %}
+<div class="rounded-md p-4 bg-red-50 text-red-800 border border-red-200 text-sm mb-4">{{ backend_error }}</div>
+{% endif %}
+
+{% if expiring_soon %}
+<div class="rounded-md p-4 bg-yellow-50 text-yellow-800 border border-yellow-200 text-sm mb-4 space-y-1">
+  {% for p in expiring_soon %}
+  <p>
+    Your project <a class="underline font-medium" href="/projects/{{ p.project_id }}">{{ p.title }}</a>
+    expires {% if p.days_remaining == 0 %}today{% else %}in {{ p.days_remaining }} day{{ "s" if p.days_remaining != 1 else "" }}{% endif %}.
+  </p>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if projects %}
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for project in projects %}
+    {{ project_card(project) }}
+  {% endfor %}
+</div>
+{% else %}
+<div class="text-center py-16 text-gray-400">
+  <p>{% if user.is_staff %}No projects match this filter.{% else %}You're not part of any project yet.{% endif %}</p>
+  {% if not user.is_staff %}<a href="/projects/new" class="text-hermes-700 underline">Request one</a> to get started.{% endif %}
+</div>
+{% endif %}
+{% endblock %}

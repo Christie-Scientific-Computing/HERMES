@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "research_projects/_macros.html" import project_card %}
+{% block title %}Review Queue — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-4">Projects awaiting review</h1>
+{% if backend_error %}
+<div class="rounded-md p-4 bg-red-50 text-red-800 border border-red-200 text-sm mb-4">{{ backend_error }}</div>
+{% endif %}
+{% if projects %}
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for project in projects %}
+    {{ project_card(project) }}
+  {% endfor %}
+</div>
+{% else %}
+<p class="text-gray-400 text-center py-16">Nothing waiting for review.</p>
+{% endif %}
+{% endblock %}

@@ -33,9 +33,13 @@ The proxy requires `HERMES_URL` (pointing at the backend) — it exits immediate
 
 The original Streamlit UI's `pages/` directory (and the entire `gateway/` service, including its own Streamlit `ui/`) were deleted in a 2026-07-30 cleanup. `Home.py` still exists at the repo root but is now orphaned — a multi-page Streamlit entrypoint with no pages under it.
 
-### `frontend/` — the production Django frontend
+### `frontend/` — the production Django frontend (being replaced, see `frontend_fastapi/` below)
 
 A Django (ASGI) app: local-account auth (admin-invited only, no public self-registration), an ethics/research-project approval workflow (draft → submitted → approved/rejected/expired/revoked, gating all import/export behind active project membership), and live-progress import/export/results pages. It is the **sole caller** of the backend — every backend call, including SSE batch-job streams, is issued server-side from this project, authenticated by its own session (`request.user`), never by a value the browser supplied. See `frontend/hermes_frontend/backend_client.py` for that boundary and `jobs/views.py`'s `job_stream` for the SSE relay (re-frames the backend's `data: {...}` events with named `event: <type>` lines so the browser's `EventSource` can dispatch per type).
+
+### `frontend_fastapi/` — the FastAPI + Jinja2 rewrite of `frontend/` (in progress)
+
+Per `docs/frontend-rewrite-implementation-plan.md`: a phased replacement for `frontend/`, built in parallel rather than in place, cut over once (Phase 5) and `frontend/` decommissioned after (Phase 6). **Until that cutover, "sole caller of the backend" is temporarily two frontends, not one** — `frontend_fastapi/` calls the backend itself (`frontend_fastapi/backend_client.py`, same `X-Hermes-Internal-Key`-attached, session-authenticated boundary `frontend/`'s own client enforces) as its routers are built out phase by phase. Phase 0 (scaffolding: sessions, CSRF, auth gates, flash messages, migrations — no user-facing routers yet) is the only phase built so far. Anyone reasoning about the backend's threat model or `HERMES_INTERNAL_KEY`'s blast radius during this migration window should account for both frontends, not just `frontend/`.
 
 Run it with:
 
@@ -98,7 +102,8 @@ That's the proxy's entire configuration surface — it has no database and no ot
 One FastAPI backend holds every feature (import, export, results, studies). A thin reverse proxy (`proxy/`) can optionally sit in front of it on a separate (DMZ) machine for external access — it carries zero business logic, existing purely to relay HTTP/SSE without exposing the backend's internal network directly. Real patient IDs never cross that boundary: when anonymisation is configured, the backend itself resolves anon ⇄ real IDs at its own API edge (inbound requests, outbound responses/SSE events), so the proxy — and any future external-facing frontend — only ever sees anon IDs.
 
 ```
-frontend/ (Django, ASGI)       ← the production frontend; SOLE caller of the backend, incl. SSE (see below)
+frontend/ (Django, ASGI)       ← the production frontend; SOLE caller of the backend, incl. SSE (see below) -- being replaced by frontend_fastapi/, see above
+frontend_fastapi/ (FastAPI, Jinja2) ← the in-progress rewrite of frontend/; Phase 0 only so far, no user-facing routers yet
 webui/ (Django, test-only)     ← throwaway dev tool, also talks directly to the backend; import/export now 422 (ethics gate)
     │  (HTTP + SSE, + X-Hermes-Internal-Key if HERMES_INTERNAL_KEY is set)
     ▼

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% from "_form_field.html" import form_field %}
+{% block title %}Activate account — HERMES{% endblock %}
+{% block content %}
+<div class="max-w-sm mx-auto mt-16 bg-white shadow-sm border border-gray-200 rounded-lg p-8">
+  <h1 class="text-lg font-semibold text-gray-900 mb-1">Set your password</h1>
+  <p class="text-xs text-gray-500 mb-6">Choose a password to activate your HERMES account.</p>
+  <form method="post" class="space-y-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for field in form %}{{ form_field(field) }}{% endfor %}
+    <button type="submit" class="w-full rounded-md bg-hermes-700 text-white py-2 text-sm font-medium hover:bg-hermes-800">
+      Activate account
+    </button>
+  </form>
+</div>
+{% endblock %}

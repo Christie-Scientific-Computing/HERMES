@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Sign in — HERMES{% endblock %}
+{% block content %}
+<div class="max-w-sm mx-auto mt-16 bg-white shadow-sm border border-gray-200 rounded-lg p-8">
+  <div class="flex flex-col items-center mb-6">
+    <img src="/static/img/hermes-logo.svg" alt="HERMES" class="h-16 w-32 mb-2">
+    <h1 class="text-lg font-semibold text-gray-900">Sign in to HERMES</h1>
+    <p class="text-xs text-gray-500 mt-1">Accounts are admin-invited only.</p>
+  </div>
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    {% if error %}
+      <div class="mb-4 rounded-md bg-red-50 border border-red-200 p-3 text-sm text-red-700">{{ error }}</div>
+    {% endif %}
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700">{{ form.username.label }}</label>
+        {{ form.username() }}
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700">{{ form.password.label }}</label>
+        {{ form.password() }}
+      </div>
+      <label class="flex items-center gap-2 text-sm text-gray-600">
+        {{ form.remember_me() }}
+        Remember me
+      </label>
+    </div>
+    <button type="submit" class="mt-6 w-full rounded-md bg-hermes-700 text-white py-2 text-sm font-medium hover:bg-hermes-800">
+      Sign in
+    </button>
+  </form>
+</div>
+{% endblock %}
