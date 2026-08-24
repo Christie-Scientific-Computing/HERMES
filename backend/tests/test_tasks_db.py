@@ -405,6 +405,20 @@ def test_job_progress_returns_every_task_with_current_state(tasks_db, job_id):
     assert rows_after[task["task_id"]]["details"] == {"imported": True}
 
 
+def test_job_progress_includes_stage_and_kind(tasks_db, job_id):
+    """
+    results/endpoints.py's observer stream tags progress/success/error
+    events by stage (import vs export) -- job_progress must return it, along
+    with kind, for every row.
+    """
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    tasks_db.enqueue(job_id, _items(1), kind="dicom_move", stage="export", params={})
+
+    rows = tasks_db.job_progress(job_id)
+    stages_by_kind = {r["kind"]: r["stage"] for r in rows}
+    assert stages_by_kind == {"import": "retrieve", "dicom_move": "export"}
+
+
 def _event_row(job_id: str) -> dict:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(

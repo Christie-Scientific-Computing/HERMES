@@ -74,3 +74,122 @@ def test_batch_import_file_enqueues(client, active_project):
     # immediately, regardless of whether/when a worker claims the task.
     _, submitted_count = StatusDB().count_imported_patients(job_id)
     assert submitted_count == 1
+
+
+# --- Combined import->export: export_kind/destination/collection/message_id ---
+
+def test_batch_import_file_with_export_kind_dicom_move_sets_chain_export(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "import_level": "Planning data", "export_kind": "dicom_move", "destination": "SOME_AE",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    task = TasksDB().claim("integration-test-worker")
+    assert task["params"] == {
+        "import_level": "Planning data", "project_id": project_id, "username": username,
+        "chain_export": {"kind": "dicom_move", "destination": "SOME_AE"},
+    }
+
+
+def test_batch_import_file_with_export_kind_dicom_move_and_message_id(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "export_kind": "dicom_move", "destination": "TRIAL_AE", "message_id": "51966",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    task = TasksDB().claim("integration-test-worker")
+    assert task["params"]["chain_export"] == {"kind": "dicom_move", "destination": "TRIAL_AE", "message_id": 51966}
+
+
+def test_batch_import_file_with_export_kind_proknow_upload_sets_chain_export(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "export_kind": "proknow_upload", "collection": "SomeCollection",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    task = TasksDB().claim("integration-test-worker")
+    assert task["params"]["chain_export"] == {"kind": "proknow_upload", "collection": "SomeCollection"}
+
+
+def test_batch_import_file_export_kind_dicom_move_without_destination_returns_422(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={"job_id": job_id, "project_id": project_id, "username": username, "export_kind": "dicom_move"},
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 422
+    # nothing should have been enqueued or created for a request rejected before create_job
+    assert TasksDB().count_tasks(job_id) == 0
+
+
+def test_batch_import_file_export_kind_proknow_upload_without_collection_returns_422(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={"job_id": job_id, "project_id": project_id, "username": username, "export_kind": "proknow_upload"},
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 422
+    assert TasksDB().count_tasks(job_id) == 0
+
+
+def test_batch_import_file_unknown_export_kind_returns_422(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "export_kind": "carrier_pigeon", "destination": "SOME_AE",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 422
+    assert TasksDB().count_tasks(job_id) == 0
+
+
+def test_batch_import_file_without_export_kind_has_no_chain_export_key(client, active_project):
+    """Backward compatibility: a plain import (no export_kind) must produce
+    the exact same params shape as before this feature existed."""
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={"job_id": job_id, "project_id": project_id, "username": username},
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    task = TasksDB().claim("integration-test-worker")
+    assert "chain_export" not in task["params"]

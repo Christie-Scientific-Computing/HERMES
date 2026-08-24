@@ -148,9 +148,10 @@ class StatusDB:
             )
             return {row["mrn"]: (row["details"] or {}) for row in cur.fetchall()}
 
-    def get_latest_event_per_patient(self, job_id: str) -> dict[str, dict]:
+    def get_latest_event_per_patient(self, job_id: str, stage: Optional[str] = None) -> dict[str, dict]:
         """
-        Most recent event per patient in a job, whatever its stage or type.
+        Most recent event per patient in a job, whatever its type -- or, when
+        `stage` is given, the most recent event of that stage specifically.
 
         Deliberately broader than get_latest_retrieve_details, which only looks
         at successful retrieve events and therefore cannot see a patient that
@@ -158,19 +159,36 @@ class StatusDB:
         for. Use this for a patient's outcome and latest error; use the other
         for source-system presence.
 
+        The optional `stage` filter backs a combined import->export job's
+        per-stage outcome (job_patients_summary's import_outcome/export_outcome):
+        without it, a patient whose export ran after a successful import would
+        only ever show the export's outcome, silently losing the import result
+        the same query would otherwise report for an import-only job.
+
         `id DESC` breaks ties: two events written in the same transaction can
         share a `ts`, and without it the "latest" would be arbitrary.
         """
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT ON (mrn) mrn, stage, event_type, ts, error_message
-                FROM events
-                WHERE job_id = %s
-                ORDER BY mrn, ts DESC, id DESC
-                """,
-                (job_id,),
-            )
+            if stage is not None:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (mrn) mrn, stage, event_type, ts, error_message
+                    FROM events
+                    WHERE job_id = %s AND stage = %s
+                    ORDER BY mrn, ts DESC, id DESC
+                    """,
+                    (job_id, stage),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (mrn) mrn, stage, event_type, ts, error_message
+                    FROM events
+                    WHERE job_id = %s
+                    ORDER BY mrn, ts DESC, id DESC
+                    """,
+                    (job_id,),
+                )
             return {row["mrn"]: dict(row) for row in cur.fetchall()}
 
     def count_imported_patients(self, job_id: str) -> tuple[int, int]:
@@ -208,3 +226,33 @@ class StatusDB:
             submitted_count = cur.fetchone()[0]
 
             return imported_count, submitted_count
+
+    def count_exported_patients(self, job_id: str) -> tuple[int, int]:
+        """
+        The export-side counterpart to count_imported_patients: (exported_count,
+        export_attempted_count).
+
+        Unlike submitted_count above (fixed at job submission, from the
+        `patients` table), export_attempted_count counts distinct patients
+        with ANY export-stage event -- for a combined import->export job,
+        export tasks are chained in one at a time as imports succeed
+        (backend/worker.py's _maybe_chain_export), so this denominator grows
+        over the job's lifetime rather than being knowable upfront. For a
+        plain export-only job it simply converges to the same number
+        submitted_count would report once every task has run at least once.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(DISTINCT mrn) FROM events "
+                "WHERE job_id = %s AND stage = 'export' AND event_type = 'success'",
+                (job_id,),
+            )
+            exported_count = cur.fetchone()[0]
+
+            cur.execute(
+                "SELECT COUNT(DISTINCT mrn) FROM events WHERE job_id = %s AND stage = 'export'",
+                (job_id,),
+            )
+            export_attempted_count = cur.fetchone()[0]
+
+            return exported_count, export_attempted_count

@@ -170,6 +170,66 @@ async def test_observe_job_full_success_and_failure_sequence(tasks_db, job_id):
     assert "R1" not in raw
     assert "R2" not in raw
 
+    # every progress/success/error event carries the task's own stage
+    assert all(e["stage"] == "retrieve" for e in parsed if e["type"] in ("progress", "success", "error"))
+
+
+@pytest.mark.asyncio
+async def test_observe_job_reports_export_stage_on_events(tasks_db, job_id):
+    """A plain export-stage task's events must be tagged stage='export', not
+    left over from whatever the default happened to be for import."""
+    items = [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")]
+    tasks_db.enqueue(job_id, items, kind="dicom_move", stage="export", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    tasks_db.mark_succeeded(task["task_id"], "worker-1", details={})
+
+    events = [chunk async for chunk in results_endpoints._observe_job(job_id)]
+    parsed = _parse_events(events)
+    success_event = next(e for e in parsed if e["type"] == "success")
+    assert success_event["stage"] == "export"
+
+
+@pytest.mark.asyncio
+async def test_observe_job_emits_total_event_when_task_count_grows(tasks_db, job_id):
+    """
+    Simulates a combined import->export job: a second task (the chained
+    export, from backend/worker.py's _maybe_chain_export) is enqueued onto
+    the same job_id mid-stream. The observer's initial `total` only ever
+    covers what existed when the stream opened -- a new `total` event must
+    fire once the second task shows up, and it must fire exactly once (not
+    once per poll tick) for the one actual change in count.
+    """
+    items = [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")]
+    tasks_db.enqueue(job_id, items, kind="import", stage="retrieve", params={})
+
+    events: list[str] = []
+    collector = asyncio.create_task(_collect_into(job_id, events))
+    await asyncio.sleep(0.05)  # let a couple of ticks pass with just 1 task
+
+    # simulate the chained export task appearing mid-stream
+    tasks_db.enqueue(
+        job_id, [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")],
+        kind="dicom_move", stage="export", params={},
+    )
+    await asyncio.sleep(0.05)  # let several more ticks pass with 2 tasks, unchanged
+
+    t1 = tasks_db.claim("worker-1")
+    tasks_db.mark_running(t1["task_id"], "worker-1")
+    tasks_db.mark_succeeded(t1["task_id"], "worker-1", details={})
+    t2 = tasks_db.claim("worker-1")
+    tasks_db.mark_running(t2["task_id"], "worker-1")
+    tasks_db.mark_succeeded(t2["task_id"], "worker-1", details={})
+    await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(collector, timeout=5)
+
+    parsed = _parse_events(events)
+    total_events = [e for e in parsed if e["type"] == "total"]
+    assert [e["total"] for e in total_events] == [2]  # exactly one change, 1 -> 2
+    assert parsed[0]["type"] == "start"
+    assert parsed[0]["total"] == 1  # only the import task existed when the stream opened
+
 
 @pytest.mark.asyncio
 async def test_observe_job_scrubs_real_mrn_from_error_and_details(tasks_db, job_id):

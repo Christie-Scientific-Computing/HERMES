@@ -273,7 +273,7 @@ class TasksDB:
         """
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT task_id, state, real_id, display_id, details, error_message "
+                "SELECT task_id, state, real_id, display_id, details, error_message, stage, kind "
                 "FROM tasks WHERE job_id = %s ORDER BY task_id",
                 (job_id,),
             )
