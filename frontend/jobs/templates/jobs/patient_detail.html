@@ -31,8 +31,7 @@
     </div>
   {% elif not plans_available %}
     <div class="rounded-md bg-yellow-50 border border-yellow-200 p-4 text-sm text-yellow-800">
-      Plan records aren't available — the Pinnacle export database isn't set up for this deployment yet.
-      This is not the same as this patient having no plans.
+      Plan records aren't available for this deployment — this doesn't mean the patient has no plans.
     </div>
   {% else %}
     {% if status_pills|length > 1 %}

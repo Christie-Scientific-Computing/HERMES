@@ -1,11 +1,13 @@
 <c-vars job_id="" />
-{# Two-stage progress for a combined import->export job (jobs:import_export_data)
-   -- not a reuse of c-job-progress, which is single-stage by design. Listens to
-   the same SSE vocabulary (backend/src/results/endpoints.py's _observe_job), just
-   routes progress/success/error events into an Import or Export bar by their
-   "stage" field, and tracks a growing export total via the "total" event
-   (chained export tasks are enqueued one at a time as imports succeed, so the
-   export total isn't known upfront the way the import total is). #}
+{% comment %}
+Two-stage progress for a combined import->export job (jobs:submit_job)
+-- not a reuse of c-job-progress, which is single-stage by design. Listens to
+the same SSE vocabulary (backend/src/results/endpoints.py's _observe_job), just
+routes progress/success/error events into an Import or Export bar by their
+"stage" field, and tracks a growing export total via the "total" event
+(chained export tasks are enqueued one at a time as imports succeed, so the
+export total isn't known upfront the way the import total is).
+{% endcomment %}
 <div class="bg-white border border-gray-200 rounded-lg p-6">
   <div class="flex items-center justify-between mb-4">
     <span id="status-label-{{ job_id }}" class="text-sm font-medium text-gray-700">Starting&hellip;</span>

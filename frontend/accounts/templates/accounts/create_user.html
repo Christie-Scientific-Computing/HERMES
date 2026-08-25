@@ -3,7 +3,7 @@
 {% block content %}
 <div class="max-w-lg">
   <h1 class="text-xl font-semibold text-gray-900 mb-1">Create a user directly</h1>
-  <p class="text-sm text-gray-500 mb-6">Sets a password immediately — no email, no activation link. The account is usable right away.</p>
+  <p class="text-sm text-gray-500 mb-6">Sets a password immediately — no email or activation link needed.</p>
   <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
     {% csrf_token %}
     {% for field in form %}

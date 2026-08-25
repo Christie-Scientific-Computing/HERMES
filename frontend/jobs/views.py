@@ -11,7 +11,7 @@ request or from session.
 
 Every batch job (single/batch import, DICOM export, ProKnow export) is
 enqueued directly onto the backend's task queue (docs/worker-queue-design.md):
-the submitting POST view (collect_data/retrieve_data) calls straight through
+the submitting POST view (submit_job) calls straight through
 to the matching backend_client.*_file function, which returns a job_id the
 moment the backend has finished enqueueing every row -- nothing is staged to
 local disk or session first. job_watch/job_stream both re-check live
@@ -49,11 +49,7 @@ from django.http import Http404, StreamingHttpResponse
 from django.shortcuts import redirect, render
 
 from hermes_frontend import backend_client
-from jobs.forms import (
-    BatchImportForm, CombinedBatchDicomForm, CombinedBatchProKnowForm, CombinedSingleDicomForm,
-    CombinedSingleProKnowForm, DicomExportForm, JobLookupForm, PatientLookupForm,
-    ProKnowExportForm, SingleImportForm,
-)
+from jobs.forms import JobLookupForm, JobSubmissionForm, PatientLookupForm
 
 
 def _project_choices_for(user) -> list[dict]:
@@ -95,10 +91,11 @@ def _enqueue_batch_job(post_fn, content: bytes, filename: str, project_id: str, 
     """
     Mint a job_id and hand it, along with the upload's raw bytes, straight
     to one of backend_client's *_file functions (batch_import_file/
-    dicom_move_file/proknow_upload_file) -- shared by collect_data and
-    retrieve_data below, since all three enqueue calls have the same shape
-    and differ only in which backend endpoint and which kind-specific field
-    (import_level/destination/collection) they carry. Nothing is written to
+    dicom_move_file/proknow_upload_file/combined_import_export_file) --
+    shared by every branch of submit_job below, since all these enqueue
+    calls have the same shape and differ only in which backend endpoint and
+    which kind-specific field (import_level/destination/collection) they
+    carry. Nothing is written to
     local disk or session: the backend already has everything it needs to
     run this job once this call returns, so job_watch/job_stream only need
     the job_id to watch, not how to submit it.
@@ -109,137 +106,17 @@ def _enqueue_batch_job(post_fn, content: bytes, filename: str, project_id: str, 
 
 
 @login_required
-def collect_data(request):
-    """Single-patient and batch (CSV) import, combined on one page as two
-    tabs -- purely a presentation merge, each mode's submission logic is
-    unchanged from when they were separate pages."""
-    projects = _project_choices_for(request.user)
-    single_form = SingleImportForm()
-    batch_form = BatchImportForm()
-    single_form.set_project_choices(projects)
-    batch_form.set_project_choices(projects)
-    job_id = None
-    active_tab = request.POST.get("mode", "single")
-
-    if request.method == "POST":
-        mode = request.POST.get("mode")
-        if mode == "single":
-            single_form = SingleImportForm(request.POST)
-            single_form.set_project_choices(projects)
-            if single_form.is_valid():
-                csv_bytes = f"patient_id\n{single_form.cleaned_data['mrn']}\n".encode()
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.batch_import_file, csv_bytes, "single_patient.csv",
-                        single_form.cleaned_data["project_id"], request.user.username,
-                        import_level=single_form.cleaned_data["import_level"],
-                    )
-                    single_form = SingleImportForm()  # fresh form, ready for another entry
-                    single_form.set_project_choices(projects)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start import: {e.detail}")
-        elif mode == "batch":
-            batch_form = BatchImportForm(request.POST, request.FILES)
-            batch_form.set_project_choices(projects)
-            if batch_form.is_valid():
-                uploaded = batch_form.cleaned_data["file"]
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.batch_import_file, uploaded.read(), uploaded.name,
-                        batch_form.cleaned_data["project_id"], request.user.username,
-                        import_level=batch_form.cleaned_data["import_level"],
-                    )
-                    return redirect("jobs:job_watch", job_id=job_id)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start import: {e.detail}")
-
-    return render(request, "jobs/collect_data.html", {
-        "single_form": single_form, "batch_form": batch_form, "job_id": job_id,
-        "has_projects": bool(projects), "active_tab": active_tab,
-    })
-
-
-@login_required
-def retrieve_data(request):
-    """DICOM (C-MOVE) and ProKnow export, combined on one page as two tabs --
-    same presentation-merge approach as collect_data. Destination/collection
-    are real dropdowns, populated live from the backend (empty + an inline
-    warning if Orthanc/ProKnow can't be reached, rather than blocking the
-    whole page)."""
-    projects = _project_choices_for(request.user)
-
-    modalities, modalities_error = [], None
-    collections, collections_error = [], None
-    if projects:
-        try:
-            modalities = backend_client.get_orthanc_modalities(request.user.username)
-        except backend_client.BackendError as e:
-            modalities_error = e.detail
-        try:
-            collections = backend_client.get_proknow_collections(request.user.username)
-        except backend_client.BackendError as e:
-            collections_error = e.detail
-
-    dicom_form = DicomExportForm()
-    proknow_form = ProKnowExportForm()
-    dicom_form.set_project_choices(projects)
-    dicom_form.set_destination_choices(modalities)
-    proknow_form.set_project_choices(projects)
-    proknow_form.set_collection_choices(collections)
-    active_tab = request.POST.get("mode", "dicom")
-
-    if request.method == "POST":
-        mode = request.POST.get("mode")
-        if mode == "dicom":
-            dicom_form = DicomExportForm(request.POST, request.FILES)
-            dicom_form.set_project_choices(projects)
-            dicom_form.set_destination_choices(modalities)
-            if dicom_form.is_valid():
-                uploaded = dicom_form.cleaned_data["file"]
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.dicom_move_file, uploaded.read(), uploaded.name,
-                        dicom_form.cleaned_data["project_id"], request.user.username,
-                        destination=dicom_form.cleaned_data["destination"],
-                        message_id=dicom_form.cleaned_data["message_id"],
-                    )
-                    return redirect("jobs:job_watch", job_id=job_id)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start export: {e.detail}")
-        elif mode == "proknow":
-            proknow_form = ProKnowExportForm(request.POST, request.FILES)
-            proknow_form.set_project_choices(projects)
-            proknow_form.set_collection_choices(collections)
-            if proknow_form.is_valid():
-                uploaded = proknow_form.cleaned_data["file"]
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.proknow_upload_file, uploaded.read(), uploaded.name,
-                        proknow_form.cleaned_data["project_id"], request.user.username,
-                        collection=proknow_form.cleaned_data["collection"],
-                    )
-                    return redirect("jobs:job_watch", job_id=job_id)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start export: {e.detail}")
-
-    return render(request, "jobs/retrieve_data.html", {
-        "dicom_form": dicom_form, "proknow_form": proknow_form,
-        "has_projects": bool(projects), "active_tab": active_tab,
-        "modalities_error": modalities_error, "collections_error": collections_error,
-    })
-
-
-@login_required
-def import_export_data(request):
+def submit_job(request):
     """
-    The one-stop-shop job: import, then automatically chain a matching
-    export for each patient once its own import succeeds
-    (backend/worker.py's _maybe_chain_export) -- no second visit required
-    once the import finishes. Four tabs (single/batch x dicom/proknow),
-    mirroring collect_data's single/batch split and retrieve_data's
-    dicom/proknow split combined onto one page. Unlike collect_data/
-    retrieve_data, this is additive: those two pages are unchanged and
-    still work exactly as before for a plain import-only or export-only job.
+    The one job-submission page: single patient or batch (CSV), import
+    and/or export (DICOM or ProKnow). Replaces the old collect_data/
+    retrieve_data/import_export_data three-page, eight-tab split -- those
+    tabs were the same handful of fields (project_id/import_level/
+    destination/collection/message_id) copy-pasted per combination.
+    JobSubmissionForm.clean() enforces which fields are actually required
+    given what was chosen; this view only needs to branch on
+    (do_import, do_export) to pick the matching backend_client call, since
+    all four already exist unchanged from the old three pages.
     """
     projects = _project_choices_for(request.user)
 
@@ -255,101 +132,67 @@ def import_export_data(request):
         except backend_client.BackendError as e:
             collections_error = e.detail
 
-    single_dicom_form = CombinedSingleDicomForm()
-    single_proknow_form = CombinedSingleProKnowForm()
-    batch_dicom_form = CombinedBatchDicomForm()
-    batch_proknow_form = CombinedBatchProKnowForm()
-    for form in (single_dicom_form, batch_dicom_form):
+    def _fresh_form(data=None, files=None) -> JobSubmissionForm:
+        form = JobSubmissionForm(data, files)
         form.set_project_choices(projects)
         form.set_destination_choices(modalities)
-    for form in (single_proknow_form, batch_proknow_form):
-        form.set_project_choices(projects)
         form.set_collection_choices(collections)
+        return form
 
+    form = _fresh_form(request.POST or None, request.FILES or None)
     job_id = None
-    active_tab = request.POST.get("mode", "single_dicom")
+    is_combined = False
 
-    if request.method == "POST":
-        mode = request.POST.get("mode")
-        if mode == "single_dicom":
-            single_dicom_form = CombinedSingleDicomForm(request.POST)
-            single_dicom_form.set_project_choices(projects)
-            single_dicom_form.set_destination_choices(modalities)
-            if single_dicom_form.is_valid():
-                csv_bytes = f"patient_id\n{single_dicom_form.cleaned_data['mrn']}\n".encode()
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.combined_import_export_file, csv_bytes, "single_patient.csv",
-                        single_dicom_form.cleaned_data["project_id"], request.user.username,
-                        import_level=single_dicom_form.cleaned_data["import_level"],
-                        export_kind="dicom_move",
-                        destination_or_collection=single_dicom_form.cleaned_data["destination"],
-                        message_id=single_dicom_form.cleaned_data["message_id"],
-                    )
-                    single_dicom_form = CombinedSingleDicomForm()  # fresh form, ready for another entry
-                    single_dicom_form.set_project_choices(projects)
-                    single_dicom_form.set_destination_choices(modalities)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start job: {e.detail}")
-        elif mode == "single_proknow":
-            single_proknow_form = CombinedSingleProKnowForm(request.POST)
-            single_proknow_form.set_project_choices(projects)
-            single_proknow_form.set_collection_choices(collections)
-            if single_proknow_form.is_valid():
-                csv_bytes = f"patient_id\n{single_proknow_form.cleaned_data['mrn']}\n".encode()
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.combined_import_export_file, csv_bytes, "single_patient.csv",
-                        single_proknow_form.cleaned_data["project_id"], request.user.username,
-                        import_level=single_proknow_form.cleaned_data["import_level"],
-                        export_kind="proknow_upload",
-                        destination_or_collection=single_proknow_form.cleaned_data["collection"],
-                    )
-                    single_proknow_form = CombinedSingleProKnowForm()
-                    single_proknow_form.set_project_choices(projects)
-                    single_proknow_form.set_collection_choices(collections)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start job: {e.detail}")
-        elif mode == "batch_dicom":
-            batch_dicom_form = CombinedBatchDicomForm(request.POST, request.FILES)
-            batch_dicom_form.set_project_choices(projects)
-            batch_dicom_form.set_destination_choices(modalities)
-            if batch_dicom_form.is_valid():
-                uploaded = batch_dicom_form.cleaned_data["file"]
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.combined_import_export_file, uploaded.read(), uploaded.name,
-                        batch_dicom_form.cleaned_data["project_id"], request.user.username,
-                        import_level=batch_dicom_form.cleaned_data["import_level"],
-                        export_kind="dicom_move",
-                        destination_or_collection=batch_dicom_form.cleaned_data["destination"],
-                        message_id=batch_dicom_form.cleaned_data["message_id"],
-                    )
-                    return redirect("jobs:job_watch", job_id=job_id)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start job: {e.detail}")
-        elif mode == "batch_proknow":
-            batch_proknow_form = CombinedBatchProKnowForm(request.POST, request.FILES)
-            batch_proknow_form.set_project_choices(projects)
-            batch_proknow_form.set_collection_choices(collections)
-            if batch_proknow_form.is_valid():
-                uploaded = batch_proknow_form.cleaned_data["file"]
-                try:
-                    job_id = _enqueue_batch_job(
-                        backend_client.combined_import_export_file, uploaded.read(), uploaded.name,
-                        batch_proknow_form.cleaned_data["project_id"], request.user.username,
-                        import_level=batch_proknow_form.cleaned_data["import_level"],
-                        export_kind="proknow_upload",
-                        destination_or_collection=batch_proknow_form.cleaned_data["collection"],
-                    )
-                    return redirect("jobs:job_watch", job_id=job_id)
-                except backend_client.BackendError as e:
-                    messages.error(request, f"Could not start job: {e.detail}")
+    if request.method == "POST" and form.is_valid():
+        cd = form.cleaned_data
+        do_import, do_export = cd["do_import"], cd["do_export"]
+        is_combined = do_import and do_export
 
-    return render(request, "jobs/import_export_data.html", {
-        "single_dicom_form": single_dicom_form, "single_proknow_form": single_proknow_form,
-        "batch_dicom_form": batch_dicom_form, "batch_proknow_form": batch_proknow_form,
-        "job_id": job_id, "has_projects": bool(projects), "active_tab": active_tab,
+        if cd["scope"] == "single":
+            content, filename = f"patient_id\n{cd['mrn']}\n".encode(), "single_patient.csv"
+        else:
+            uploaded = cd["file"]
+            content, filename = uploaded.read(), uploaded.name
+
+        try:
+            if is_combined:
+                job_id = _enqueue_batch_job(
+                    backend_client.combined_import_export_file, content, filename,
+                    cd["project_id"], request.user.username,
+                    import_level=cd["import_level"], export_kind=cd["export_kind"],
+                    destination_or_collection=(
+                        cd["destination"] if cd["export_kind"] == "dicom_move" else cd["collection"]
+                    ),
+                    message_id=cd["message_id"] if cd["export_kind"] == "dicom_move" else None,
+                )
+            elif do_import:
+                job_id = _enqueue_batch_job(
+                    backend_client.batch_import_file, content, filename,
+                    cd["project_id"], request.user.username, import_level=cd["import_level"],
+                )
+            elif cd["export_kind"] == "dicom_move":
+                job_id = _enqueue_batch_job(
+                    backend_client.dicom_move_file, content, filename,
+                    cd["project_id"], request.user.username,
+                    destination=cd["destination"], message_id=cd["message_id"],
+                )
+            else:
+                job_id = _enqueue_batch_job(
+                    backend_client.proknow_upload_file, content, filename,
+                    cd["project_id"], request.user.username, collection=cd["collection"],
+                )
+        except backend_client.BackendError as e:
+            messages.error(request, f"Could not start job: {e.detail}")
+            job_id = None
+
+        if job_id:
+            if cd["scope"] == "batch":
+                return redirect("jobs:job_watch", job_id=job_id)
+            form = _fresh_form()  # ready for another entry
+
+    return render(request, "jobs/submit_job.html", {
+        "form": form, "job_id": job_id, "is_combined": is_combined,
+        "has_projects": bool(projects),
         "modalities_error": modalities_error, "collections_error": collections_error,
     })
 

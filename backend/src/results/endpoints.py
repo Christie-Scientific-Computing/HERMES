@@ -226,6 +226,23 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
     # TasksDB.job_progress's docstring for why this can't be filtered at
     # the SQL layer) only ever produces one event per actual transition.
     last_state: dict[int, str] = {}
+    # Separate from last_state: TasksDB.reap_stale_claims can put a
+    # currently-running task back to 'queued' (its worker hasn't died, just
+    # taking longer than HERMES_TASK_STALE_SECONDS) and a second worker then
+    # reclaims and re-runs it, so the SAME task_id can pass through
+    # 'running' twice. Reacting to every 'running' sighting as its own
+    # transition would emit a second "progress" event for that task_id
+    # without ever resolving the first one -- job_progress.html's event log
+    # is append-only by design (a running total, not a per-task widget), so
+    # that orphaned first line would sit there reading "Importing X…"
+    # forever even once the job finishes. Tracking "has this task_id ever
+    # reported progress" instead of "did its state just change to running"
+    # keeps the log to one progress line and one resolving success/error
+    # line per task_id, however many times it was actually reaped and
+    # reclaimed underneath. (If per-task retries are ever enabled --
+    # max_attempts is 1 today, see CLAUDE.md -- a deliberate retry would
+    # also be suppressed here the same way; revisit then.)
+    progress_reported: set[int] = set()
     cancelled_reported = False
 
     while True:
@@ -276,7 +293,9 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
             real_id, display_id, stage = row["real_id"], row["display_id"], row["stage"]
 
             if state == "running":
-                yield format_sse({"type": "progress", "current": display_id, "stage": stage})
+                if task_id not in progress_reported:
+                    progress_reported.add(task_id)
+                    yield format_sse({"type": "progress", "current": display_id, "stage": stage})
             elif state == "succeeded":
                 details = _scrub_json(row["details"], real_id, display_id) or {}
                 yield format_sse({"type": "success", "mrn": display_id, "stage": stage, **details})

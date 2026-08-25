@@ -383,6 +383,55 @@ async def test_observe_job_only_emits_each_transition_once(tasks_db, job_id):
     assert len(success_events) == 1
 
 
+@pytest.mark.asyncio
+async def test_observe_job_reap_and_reclaim_does_not_orphan_a_progress_line(tasks_db, job_id):
+    """
+    Regression test: TasksDB.reap_stale_claims can put a task that's
+    genuinely still running (just slower than HERMES_TASK_STALE_SECONDS,
+    not a dead worker) back to 'queued', where a second worker reclaims and
+    re-runs it -- the same task_id passes through 'running' twice. Before
+    this fix, _observe_job treated each transition into 'running' as its
+    own event, so the frontend's (append-only) event log would gain a
+    second "Importing X…" line while the first one -- from the reaped
+    attempt -- never got a matching success/error and sat there looking
+    stuck even once the job finished. Exactly one task_id must still
+    produce exactly one progress line and exactly one resolving line.
+    """
+    items = [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")]
+    tasks_db.enqueue(job_id, items, kind="import", stage="retrieve", params={})
+
+    events: list[str] = []
+    collector = asyncio.create_task(_collect_into(job_id, events))
+    await asyncio.sleep(0.03)
+
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    await asyncio.sleep(0.03)  # let the observer see it running once
+
+    # Simulate the reap: worker-1 is still genuinely working on it, but
+    # reap_stale_claims(0) treats it as stale regardless (mirrors a task
+    # that simply outran HERMES_TASK_STALE_SECONDS).
+    reaped = tasks_db.reap_stale_claims(0)
+    assert reaped == 1
+    await asyncio.sleep(0.03)  # observer sees the row back to 'queued'
+
+    # A second worker reclaims and re-runs the SAME task_id.
+    reclaimed = tasks_db.claim("worker-2")
+    assert reclaimed["task_id"] == task["task_id"]
+    tasks_db.mark_running(reclaimed["task_id"], "worker-2")
+    await asyncio.sleep(0.03)  # observer sees it running again
+
+    tasks_db.mark_succeeded(reclaimed["task_id"], "worker-2", details={})
+    await asyncio.wait_for(collector, timeout=5)
+
+    parsed = _parse_events(events)
+    progress_events = [e for e in parsed if e["type"] == "progress"]
+    success_events = [e for e in parsed if e["type"] == "success"]
+    assert len(progress_events) == 1  # not once per running-phase
+    assert len(success_events) == 1
+    assert parsed[-1]["type"] == "done"
+
+
 def test_job_stream_endpoint_streams_event_stream_content(job_id):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

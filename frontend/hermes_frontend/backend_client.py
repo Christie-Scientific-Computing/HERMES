@@ -218,7 +218,7 @@ def _post_batch_file(path: str, job_id: str, filename: str, content: bytes,
 
     Unlike stream_sse, this is a single request/response, not a stream:
     these endpoints enqueue and return immediately -- the caller (jobs/
-    views.py's collect_data/retrieve_data) already has the job_id up front
+    views.py's submit_job) already has the job_id up front
     and can redirect straight to job_watch. Takes raw bytes rather than a
     file path since nothing here stages the upload to local disk.
     """

@@ -1,5 +1,7 @@
-{# base_query carries any other query params the host page needs to keep
-   (results_lookup's lookup=/job_id=), already ending in '&' when non-empty. #}
+{% comment %}
+base_query carries any other query params the host page needs to keep
+(results_lookup's lookup=/job_id=), already ending in '&' when non-empty.
+{% endcomment %}
 <c-vars rows="" pills="" job_id="" total="0" base_query="" />
 {% if pills %}
 <div class="flex flex-wrap gap-2 mb-4">
