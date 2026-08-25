@@ -148,6 +148,52 @@ _HANDLERS = {
 }
 
 
+def _maybe_chain_export(tasks_db: TasksDB, status_db: StatusDB, task: dict, details: dict) -> None:
+    """
+    After a successful import task, enqueue a chained export task if the
+    caller asked for one (task["params"]["chain_export"], set by
+    retrieve/endpoints.py's batch_import_file when export_kind is given) and
+    the patient was actually found (details["imported"] -- Importer's own
+    ground-truth flag, not just "the operation ran without raising": a
+    not-found patient still gets a success event today, see CLAUDE.md's
+    anonymisation-boundary note on this exact point). Also skips chaining
+    once the job has been cancelled, so a cancel doesn't leave new export
+    work trickling in from imports that happened to already be in flight.
+
+    Must be called BEFORE tasks_db.mark_succeeded for this import task, not
+    after -- see _handle_one below. Enqueueing first means the export task
+    row already exists (state='queued') at the instant the import task's own
+    row commits to 'succeeded', so results/endpoints.py's _observe_job (which
+    decides the stream is `done` once a poll finds nothing queued/claimed/
+    running for the job) can never observe a moment where the import just
+    finished and the export doesn't exist yet. Reversing the order would
+    open exactly that window: a poll landing in it would see zero pending
+    tasks, emit `done`, and close the stream while the export is about to
+    start running with nobody watching.
+    """
+    chain = task["params"].get("chain_export")
+    if not chain or not details.get("imported"):
+        return
+    if status_db.is_cancelled(task["job_id"]):
+        return
+    kind = chain["kind"]
+    param_key = "destination" if kind == "dicom_move" else "collection"
+    export_params = {
+        param_key: chain[param_key],
+        "project_id": task["params"]["project_id"],
+        "username": task["params"]["username"],
+    }
+    if kind == "dicom_move" and chain.get("message_id") is not None:
+        export_params["message_id"] = chain["message_id"]
+    item = BatchItem(real_id=task["real_id"], display_id=task["display_id"], status_mrn=task["status_mrn"])
+    # chained_from_task_id backs the DB-level dedup guard (see the migration
+    # adding it and TasksDB.enqueue's docstring) -- without it, a task
+    # reaped and reclaimed while this import was still running would chain
+    # the same patient's export twice, once per worker that completed it.
+    tasks_db.enqueue(task["job_id"], [item], kind=kind, stage="export", params=export_params,
+                      chained_from_task_id=task["task_id"])
+
+
 def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
     job_id, task_id, stage = task["job_id"], task["task_id"], task["stage"]
     status_mrn, display_id = task["status_mrn"], task["display_id"]
@@ -198,6 +244,25 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
                 error_message=str(e), attempt=attempt, task_id=task_id,
             )
         return
+
+    if task["kind"] == "import":
+        try:
+            _maybe_chain_export(tasks_db, status_db, task, details)
+        except Exception:
+            # A failure here is a lost chained-export opportunity, not an
+            # import failure -- the import genuinely succeeded, so it still
+            # gets marked succeeded below. Recorded as its own export-stage
+            # failure event so the gap is visible on the results page rather
+            # than a patient silently never getting exported with no trace.
+            logger.exception(
+                "Task %s (job %s, display_id=%s): failed to enqueue chained export",
+                task_id, job_id, display_id,
+            )
+            status_db.add_event(
+                job_id, status_mrn, stage="export", event_type="failure",
+                error_message="failed to enqueue export task after successful import",
+                attempt=1, task_id=None,
+            )
 
     if tasks_db.mark_succeeded(task_id, worker_id, details):
         status_db.add_event(

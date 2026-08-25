@@ -218,7 +218,7 @@ def _post_batch_file(path: str, job_id: str, filename: str, content: bytes,
 
     Unlike stream_sse, this is a single request/response, not a stream:
     these endpoints enqueue and return immediately -- the caller (jobs/
-    views.py's collect_data/retrieve_data) already has the job_id up front
+    views.py's submit_job) already has the job_id up front
     and can redirect straight to job_watch. Takes raw bytes rather than a
     file path since nothing here stages the upload to local disk.
     """
@@ -236,6 +236,30 @@ def batch_import_file(job_id: str, filename: str, content: bytes, project_id: st
                        username: str, import_level: str) -> dict:
     return _post_batch_file("/import/batch_import_file", job_id, filename, content,
                              project_id, username, import_level=import_level)
+
+
+def combined_import_export_file(job_id: str, filename: str, content: bytes, project_id: str,
+                                  username: str, import_level: str, export_kind: str,
+                                  destination_or_collection: str, message_id: Optional[int] = None) -> dict:
+    """
+    Import, then chain a matching export for each patient once its import
+    succeeds (backend/worker.py's _maybe_chain_export) -- the combined
+    import->export job. Hits the same /import/batch_import_file endpoint as
+    batch_import_file, just with the extra export_kind/destination-or-
+    collection/message_id fields that opt a job into chaining; see that
+    endpoint's docstring for why this isn't a separate backend endpoint.
+    """
+    extra = {"import_level": import_level, "export_kind": export_kind}
+    if export_kind == "dicom_move":
+        extra["destination"] = destination_or_collection
+        if message_id is not None:
+            extra["message_id"] = message_id
+    elif export_kind == "proknow_upload":
+        extra["collection"] = destination_or_collection
+    else:
+        raise ValueError(f"Unknown export_kind: {export_kind}")
+    return _post_batch_file("/import/batch_import_file", job_id, filename, content,
+                             project_id, username, **extra)
 
 
 # ---- Export reference data (jobs/ app) ----

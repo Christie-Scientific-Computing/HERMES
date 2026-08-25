@@ -206,6 +206,14 @@ async def batch_import_file(
     project_id: str = Form(...),
     username: str = Form(...),
     import_level: str = Form("Planning data"),
+    export_kind: str | None = Form(
+        None, description="Optional: 'dicom_move' or 'proknow_upload'. When given, each "
+                           "patient's import task chains a matching export task on success "
+                           "(backend/worker.py's _maybe_chain_export) -- the combined "
+                           "import->export flow. Omit for a plain import job."),
+    destination: str | None = Form(None, description="Orthanc modality AE title; required when export_kind='dicom_move'"),
+    collection: str | None = Form(None, description="ProKnow collection name; required when export_kind='proknow_upload'"),
+    message_id: int | None = Form(None, ge=0, le=65535, description="Optional DICOM Message ID, dicom_move only"),
 ):
     """
     Accept a CSV file upload and enqueue it onto the tasks table for
@@ -216,8 +224,31 @@ async def batch_import_file(
     silently-failed queued job. Used by the frontend; the JSON-bodied
     /import/batch_import (no file upload) is a separate, unconverted
     endpoint -- see its own docstring.
+
+    `export_kind`/`destination`/`collection`/`message_id` are optional and
+    additive: omitting export_kind reproduces today's exact plain-import
+    behavior. Deliberately not a separate endpoint -- the CSV-parsing/
+    anon-resolution/create_job/add_patient/enqueue sequence below is
+    identical either way; the only difference is one extra "chain_export"
+    key denormalised onto each task's params, which backend/worker.py reads
+    after a successful import.
     """
     enforcement.require_project_member(project_id, username)
+
+    chain_export = None
+    if export_kind == "dicom_move":
+        if not destination:
+            raise HTTPException(status_code=422, detail="destination is required when export_kind is dicom_move")
+        chain_export = {"kind": "dicom_move", "destination": destination}
+        if message_id is not None:
+            chain_export["message_id"] = message_id
+    elif export_kind == "proknow_upload":
+        if not collection:
+            raise HTTPException(status_code=422, detail="collection is required when export_kind is proknow_upload")
+        chain_export = {"kind": "proknow_upload", "collection": collection}
+    elif export_kind is not None:
+        raise HTTPException(status_code=422, detail=f"Unknown export_kind: {export_kind}")
+
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(exist_ok=True)
     tmp_path = tmp_dir / f"{job_id}_{file.filename}"
@@ -243,13 +274,13 @@ async def batch_import_file(
     # left dangling: visible, with patients registered, but no tasks and no
     # way to cancel/complete it. Marking it cancelled on any failure here
     # puts it into a well-defined terminal state instead of limbo.
+    params = {"import_level": import_level, "project_id": project_id, "username": username}
+    if chain_export:
+        params["chain_export"] = chain_export
     try:
         for item in items:
             status_db.add_patient(job_id, item.status_mrn, input_path=item.input_path)
-        tasks_db.enqueue(
-            job_id, items, kind="import", stage="retrieve",
-            params={"import_level": import_level, "project_id": project_id, "username": username},
-        )
+        tasks_db.enqueue(job_id, items, kind="import", stage="retrieve", params=params)
     except Exception:
         status_db.cancel_job(job_id)
         raise

@@ -189,7 +189,7 @@ class PatientDetailTests(_StubbedBackend):
         self.backend.patient_plans.return_value = {"available": False, "plans": []}
         resp = self._get()
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "isn't set up for this deployment yet")
+        self.assertContains(resp, "aren't available for this deployment")
         self.assertContains(resp, "boom")  # timeline still rendered
 
     def test_plans_failure_does_not_blank_the_timeline(self):
@@ -213,22 +213,32 @@ class PatientDetailTests(_StubbedBackend):
         self.assertRedirects(resp, reverse("jobs:dashboard"), fetch_redirect_response=False)
 
 
-class CollectDataQueueTests(_StubbedBackend):
+class SubmitJobQueueTests(_StubbedBackend):
     """
-    collect_data posts straight to backend_client.batch_import_file
-    (docs/worker-queue-design.md) -- for both the single-patient and batch
-    (CSV upload) modes. No more session staging: every submission is fully
-    handed off to the backend before this view returns.
+    jobs:submit_job -- the single form for every import/export combination
+    (single/batch x import-only/export-only/import+export x dicom/proknow),
+    replacing the old collect_data/retrieve_data/import_export_data three-
+    page split. do_import/do_export pick which of batch_import_file/
+    dicom_move_file/proknow_upload_file/combined_import_export_file the view
+    calls; scope picks single-patient-as-1-row-CSV vs a real upload. Same
+    enqueue-then-redirect(batch)/stay-on-page(single) pattern the old views
+    used.
     """
 
     def setUp(self):
         super().setUp()
         self.backend.list_user_active_projects.return_value = [{"project_id": PROJECT_ID, "title": "P"}]
-        self.backend.batch_import_file.return_value = {"job_id": "enqueued-job-id", "total": 1}
+        self.backend.get_orthanc_modalities.return_value = ["AE1"]
+        self.backend.get_proknow_collections.return_value = ["Collection1"]
+        self.backend.batch_import_file.return_value = {"job_id": "enqueued-import-job", "total": 1}
+        self.backend.dicom_move_file.return_value = {"job_id": "enqueued-dicom-job", "total": 1}
+        self.backend.proknow_upload_file.return_value = {"job_id": "enqueued-proknow-job", "total": 1}
+        self.backend.combined_import_export_file.return_value = {"job_id": "enqueued-combined-job", "total": 1}
 
-    def test_single_mode_enqueues_and_stays_on_page(self):
-        resp = self.client.post(reverse("jobs:collect_data"), {
-            "mode": "single", "mrn": "1001", "import_level": "Planning data", "project_id": PROJECT_ID,
+    def test_single_import_only_enqueues_and_stays_on_page(self):
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "single", "mrn": "1001",
+            "do_import": "on", "import_level": "Planning data",
         })
         self.assertEqual(resp.status_code, 200)  # single mode re-renders inline, doesn't redirect
 
@@ -240,15 +250,12 @@ class CollectDataQueueTests(_StubbedBackend):
         self.assertEqual(kwargs["username"], self.username)
         self.assertEqual(kwargs["import_level"], "Planning data")
 
-        # nothing staged -- there's no session dance to check anymore
-        self.assertEqual([k for k in self.client.session.keys() if k.startswith("pending_job:")], [])
-
-    def test_batch_mode_enqueues_and_redirects_to_watch(self):
+    def test_batch_import_only_enqueues_and_redirects_to_watch(self):
         csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n1002\n", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:collect_data"), {
-            "mode": "batch", "file": csv_file, "import_level": "Planning data", "project_id": PROJECT_ID,
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "batch", "file": csv_file,
+            "do_import": "on", "import_level": "Planning data",
         })
-
         kwargs = self.backend.batch_import_file.call_args.kwargs
         self.assertEqual(kwargs["filename"], "patients.csv")
         self.assertEqual(kwargs["content"], b"patient_id\n1001\n1002\n")
@@ -259,85 +266,110 @@ class CollectDataQueueTests(_StubbedBackend):
         self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
                               fetch_redirect_response=False)
 
-    def test_batch_mode_backend_error_shows_message_not_redirect(self):
+    def test_batch_import_backend_error_shows_message_not_redirect(self):
         self.backend.batch_import_file.side_effect = _FakeBackendError("Could not read CSV")
         csv_file = SimpleUploadedFile("patients.csv", b"garbage", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:collect_data"), {
-            "mode": "batch", "file": csv_file, "import_level": "Planning data", "project_id": PROJECT_ID,
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "batch", "file": csv_file,
+            "do_import": "on", "import_level": "Planning data",
         })
         self.assertEqual(resp.status_code, 200)  # re-renders the form, no redirect
         self.assertContains(resp, "Could not read CSV")
 
-
-class RetrieveDataQueueTests(_StubbedBackend):
-    """retrieve_data's DICOM/ProKnow export tabs, converted the same way
-    collect_data's import tab was -- see CollectDataQueueTests."""
-
-    def setUp(self):
-        super().setUp()
-        self.backend.list_user_active_projects.return_value = [{"project_id": PROJECT_ID, "title": "P"}]
-        self.backend.get_orthanc_modalities.return_value = ["AE1"]
-        self.backend.get_proknow_collections.return_value = ["Collection1"]
-        self.backend.dicom_move_file.return_value = {"job_id": "enqueued-dicom-job", "total": 1}
-        self.backend.proknow_upload_file.return_value = {"job_id": "enqueued-proknow-job", "total": 1}
-
-    def test_dicom_mode_enqueues_and_redirects_to_watch(self):
+    def test_batch_export_only_dicom_enqueues_and_redirects_to_watch(self):
         csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:retrieve_data"), {
-            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "batch", "file": csv_file,
+            "do_export": "on", "export_kind": "dicom_move", "destination": "AE1",
         })
         kwargs = self.backend.dicom_move_file.call_args.kwargs
         self.assertEqual(kwargs["filename"], "patients.csv")
-        self.assertEqual(kwargs["content"], b"patient_id\n1001\n")
         self.assertEqual(kwargs["destination"], "AE1")
-        self.assertEqual(kwargs["username"], self.username)
         # Left blank -- must reach backend_client as None, not "" or missing.
         self.assertIsNone(kwargs["message_id"])
         self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
                               fetch_redirect_response=False)
 
-    def test_dicom_mode_with_message_id_passes_it_through(self):
+    def test_batch_export_only_dicom_with_message_id_passes_it_through(self):
         """Clinical-trial export path: a message_id in the form must reach
         backend_client.dicom_move_file as a real int (docs on
         Exporter.dicom_c_move -- forwarded to Orthanc as MoveOriginatorID)."""
         csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:retrieve_data"), {
-            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "batch", "file": csv_file,
+            "do_export": "on", "export_kind": "dicom_move", "destination": "AE1",
             "message_id": "51966",
         })
         kwargs = self.backend.dicom_move_file.call_args.kwargs
         self.assertEqual(kwargs["message_id"], 51966)
-        self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
-                              fetch_redirect_response=False)
 
-    def test_dicom_mode_rejects_message_id_outside_dicom_us_range(self):
+    def test_export_message_id_outside_dicom_us_range_rejected(self):
         csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:retrieve_data"), {
-            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "batch", "file": csv_file,
+            "do_export": "on", "export_kind": "dicom_move", "destination": "AE1",
             "message_id": "70000",
         })
         self.assertEqual(resp.status_code, 200)  # re-renders the form, no redirect
         self.backend.dicom_move_file.assert_not_called()
 
-    def test_proknow_mode_enqueues_and_redirects_to_watch(self):
-        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:retrieve_data"), {
-            "mode": "proknow", "file": csv_file, "collection": "Collection1", "project_id": PROJECT_ID,
+    def test_single_export_only_proknow_wraps_mrn_as_csv(self):
+        """Single-patient export-only reuses the same wrap-as-1-row-CSV
+        trick single-patient import already used -- no new backend call
+        needed, just proknow_upload_file handed a synthetic CSV."""
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "single", "mrn": "1001",
+            "do_export": "on", "export_kind": "proknow_upload", "collection": "Collection1",
         })
+        self.assertEqual(resp.status_code, 200)
         kwargs = self.backend.proknow_upload_file.call_args.kwargs
-        self.assertEqual(kwargs["filename"], "patients.csv")
+        self.assertEqual(kwargs["filename"], "single_patient.csv")
+        self.assertEqual(kwargs["content"], b"patient_id\n1001\n")
         self.assertEqual(kwargs["collection"], "Collection1")
+
+    def test_single_combined_enqueues_and_stays_on_page(self):
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "single", "mrn": "1001",
+            "do_import": "on", "import_level": "Planning data",
+            "do_export": "on", "export_kind": "dicom_move", "destination": "AE1",
+        })
+        self.assertEqual(resp.status_code, 200)
+        kwargs = self.backend.combined_import_export_file.call_args.kwargs
+        self.assertEqual(kwargs["filename"], "single_patient.csv")
+        self.assertEqual(kwargs["content"], b"patient_id\n1001\n")
+        self.assertEqual(kwargs["import_level"], "Planning data")
+        self.assertEqual(kwargs["export_kind"], "dicom_move")
+        self.assertEqual(kwargs["destination_or_collection"], "AE1")
+        self.assertIsNone(kwargs["message_id"])
+        self.assertEqual(kwargs["username"], self.username)
+
+    def test_batch_combined_proknow_enqueues_and_redirects_to_watch(self):
+        csv_file = SimpleUploadedFile("patients.csv", b"patient_id\n1001\n", content_type="text/csv")
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "batch", "file": csv_file,
+            "do_import": "on", "import_level": "Planning data",
+            "do_export": "on", "export_kind": "proknow_upload", "collection": "Collection1",
+        })
+        kwargs = self.backend.combined_import_export_file.call_args.kwargs
+        self.assertEqual(kwargs["export_kind"], "proknow_upload")
+        self.assertEqual(kwargs["destination_or_collection"], "Collection1")
         self.assertRedirects(resp, reverse("jobs:job_watch", args=[kwargs["job_id"]]),
                               fetch_redirect_response=False)
 
-    def test_dicom_mode_backend_error_shows_message_not_redirect(self):
-        self.backend.dicom_move_file.side_effect = _FakeBackendError("Could not read CSV")
-        csv_file = SimpleUploadedFile("patients.csv", b"garbage", content_type="text/csv")
-        resp = self.client.post(reverse("jobs:retrieve_data"), {
-            "mode": "dicom", "file": csv_file, "destination": "AE1", "project_id": PROJECT_ID,
+    def test_neither_import_nor_export_checked_is_rejected(self):
+        resp = self.client.post(reverse("jobs:submit_job"), {
+            "project_id": PROJECT_ID, "scope": "single", "mrn": "1001",
         })
-        self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "Could not read CSV")
+        self.assertEqual(resp.status_code, 200)  # re-renders the form, no redirect
+        self.backend.batch_import_file.assert_not_called()
+        self.backend.dicom_move_file.assert_not_called()
+        self.backend.proknow_upload_file.assert_not_called()
+        self.backend.combined_import_export_file.assert_not_called()
+        self.assertContains(resp, "Choose to import, export, or both.")
+
+    def test_dashboard_links_to_submit_job(self):
+        resp = self.client.get(reverse("jobs:dashboard"))
+        self.assertContains(resp, reverse("jobs:submit_job"))
 
 
 class JobWatchTests(_StubbedBackend):
@@ -362,6 +394,37 @@ class JobWatchTests(_StubbedBackend):
         self.backend.list_projects.return_value = [{"project_id": PROJECT_ID, "title": "P"}]
         resp = self.client.get(reverse("jobs:job_watch", args=["someone-elses-job-id"]))
         self.assertEqual(resp.status_code, 404)
+
+    def test_combined_job_renders_two_stage_progress_component(self):
+        """job_summary's is_combined picks c-combined-job-progress (two
+        bars) over the single-stage c-job-progress."""
+        self.backend.job_summary.return_value = {
+            "summary": [], "project_id": PROJECT_ID, "is_combined": True,
+        }
+        resp = self.client.get(reverse("jobs:job_watch", args=["combined-job-id"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="import-bar-combined-job-id"')
+        # is_combined is read off the same job_summary call the visibility
+        # check already made -- must not be a second round trip.
+        self.backend.job_summary.assert_called_once()
+        self.assertContains(resp, 'id="export-bar-combined-job-id"')
+
+    def test_plain_job_renders_single_stage_progress_component(self):
+        self.backend.job_summary.return_value = {
+            "summary": [], "project_id": PROJECT_ID, "is_combined": False,
+        }
+        resp = self.client.get(reverse("jobs:job_watch", args=["plain-job-id"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="progress-bar-plain-job-id"')
+        self.assertNotContains(resp, 'id="import-bar-plain-job-id"')
+
+    def test_job_summary_missing_is_combined_key_defaults_to_plain(self):
+        """Backward compatibility: an older/stubbed job_summary response
+        with no is_combined key at all must not crash job_watch."""
+        self.backend.job_summary.return_value = {"summary": [], "project_id": PROJECT_ID}
+        resp = self.client.get(reverse("jobs:job_watch", args=["queued-job-id"]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="progress-bar-queued-job-id"')
 
 
 class JobStreamObserverTests(_StubbedBackend):

@@ -122,7 +122,9 @@ def test_job_patients_summary_includes_source_presence_and_anon_id(client, job_i
     body = resp.json()
     assert body["patients"] == [{
         "mrn": ANON_MRN, "in_mosaiq": True, "in_pinnacle": False, "in_proknow": True, "status": "imported",
-        "outcome": "success", "error_message": None,
+        "imported": None, "outcome": "success", "error_message": None,
+        "import_outcome": "success", "import_error_message": None,
+        "export_outcome": None, "export_error_message": None,
         "mosaiq_reason": None, "pinnacle_reason": None, "proknow_reason": None,
     }]
     assert REAL_MRN not in resp.text
@@ -203,6 +205,105 @@ def test_job_patients_summary_null_for_export_only_patient(client, job_id):
     assert patient["in_mosaiq"] is None
     assert patient["in_pinnacle"] is None
     assert patient["in_proknow"] is None
+
+
+def test_job_summary_includes_exported_counts(client, job_id):
+    """The export-side counterpart of test_job_summary_includes_imported_and_submitted_counts."""
+    status_db.create_job(job_id)
+    status_db.add_event(job_id, "MRN1", stage="export", event_type="success", details={"status": "exported"})
+    status_db.add_event(job_id, "MRN2", stage="export", event_type="failure", error_message="boom")
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["exported_count"] == 1
+    assert body["export_attempted_count"] == 2
+
+
+def test_job_summary_is_combined_true_when_chain_export_submitted(client, job_id):
+    from backend.src.status.tasks_db import TasksDB
+    from backend.src.common.sse import BatchItem
+
+    status_db.create_job(job_id)
+    TasksDB().enqueue(
+        job_id, [BatchItem(real_id=REAL_MRN, display_id=ANON_MRN, status_mrn=REAL_MRN)],
+        kind="import", stage="retrieve",
+        params={"chain_export": {"kind": "dicom_move", "destination": "AE1"}},
+    )
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    assert resp.json()["is_combined"] is True
+
+
+def test_job_summary_is_combined_false_for_plain_import(client, job_id):
+    status_db.create_job(job_id)
+    status_db.add_event(job_id, REAL_MRN, stage="retrieve", event_type="success", details={"imported": True})
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    assert resp.json()["is_combined"] is False
+
+
+def test_job_summary_export_counts_are_zero_for_import_only_job(client, job_id):
+    status_db.create_job(job_id)
+    status_db.add_event(job_id, REAL_MRN, stage="retrieve", event_type="success", details={"imported": True})
+
+    resp = client.get(f"/results/job/{job_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["exported_count"] == 0
+    assert body["export_attempted_count"] == 0
+
+
+def test_job_patients_summary_distinguishes_import_and_export_outcome(client, job_id):
+    """
+    A combined import->export job: this patient's import succeeded but its
+    chained export failed. The stage-agnostic outcome/error_message (latest
+    event of either stage) would only ever show the export's failure --
+    import_outcome/export_outcome must each report their own stage's result
+    so the import success isn't shadowed.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="retrieve", event_type="success",
+        details={"imported": True, "in_mosaiq": True},
+    )
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="failure",
+        error_message=f"C-MOVE failed for {REAL_MRN}",
+    )
+
+    resp = client.get(f"/results/job/{job_id}/patients/summary")
+    assert resp.status_code == 200
+    patient = resp.json()["patients"][0]
+
+    assert patient["imported"] is True
+    assert patient["import_outcome"] == "success"
+    assert patient["import_error_message"] is None
+    assert patient["export_outcome"] == "failure"
+    assert patient["export_error_message"] == f"C-MOVE failed for {ANON_MRN}"
+    # stage-agnostic fields still reflect the latest event overall (export)
+    assert patient["outcome"] == "failure"
+    assert REAL_MRN not in resp.text
+
+
+def test_job_patients_summary_export_outcome_null_when_no_export_ran(client, job_id):
+    """A patient not found on import (imported=False) never gets a chained
+    export task -- export_outcome must be null, not a stuck 'running'."""
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="retrieve", event_type="success",
+        details={"imported": False, "status": "not found"},
+    )
+
+    resp = client.get(f"/results/job/{job_id}/patients/summary")
+    assert resp.status_code == 200
+    patient = resp.json()["patients"][0]
+    assert patient["imported"] is False
+    assert patient["import_outcome"] == "success"
+    assert patient["export_outcome"] is None
+    assert patient["export_error_message"] is None
 
 
 def test_patient_timeline_translates_inbound_and_outbound(client, job_id):

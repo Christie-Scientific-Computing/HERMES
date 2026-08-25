@@ -238,3 +238,64 @@ def test_count_imported_patients_mixed_true_and_false_events_for_same_patient(db
 
 def test_count_imported_patients_unknown_job_returns_zeroes(db):
     assert db.count_imported_patients(f"nonexistent-{uuid.uuid4()}") == (0, 0)
+
+
+def test_get_latest_event_per_patient_stage_filter_isolates_stages(db, job_id):
+    """
+    A combined import->export job: this patient's import succeeded and its
+    chained export later failed. Without the stage filter, the unqualified
+    query (test_get_latest_event_per_patient_picks_the_newest_across_stages
+    above) would report only the export's failure -- the stage-scoped
+    queries must each report their own stage's own outcome instead.
+    """
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success")
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="failure", error_message="c-move refused")
+
+    import_latest = db.get_latest_event_per_patient(job_id, stage="retrieve")
+    export_latest = db.get_latest_event_per_patient(job_id, stage="export")
+
+    assert import_latest["MRN1"]["event_type"] == "success"
+    assert export_latest["MRN1"]["event_type"] == "failure"
+    assert export_latest["MRN1"]["error_message"] == "c-move refused"
+
+
+def test_get_latest_event_per_patient_stage_filter_empty_when_stage_never_ran(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success")
+
+    assert db.get_latest_event_per_patient(job_id, stage="export") == {}
+
+
+def test_count_exported_patients_zero_for_import_only_job(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+
+    assert db.count_exported_patients(job_id) == (0, 0)
+
+
+def test_count_exported_patients_some_exported(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success", details={"status": "exported"})
+    db.add_event(job_id, mrn="MRN2", stage="export", event_type="failure", error_message="boom")
+
+    assert db.count_exported_patients(job_id) == (1, 2)
+
+
+def test_count_exported_patients_counts_distinct_mrn_once(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success")
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success")
+
+    assert db.count_exported_patients(job_id) == (1, 1)
+
+
+def test_count_exported_patients_ignores_retrieve_stage(db, job_id):
+    db.create_job(job_id)
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+
+    assert db.count_exported_patients(job_id) == (0, 0)
+
+
+def test_count_exported_patients_unknown_job_returns_zeroes(db):
+    assert db.count_exported_patients(f"nonexistent-{uuid.uuid4()}") == (0, 0)

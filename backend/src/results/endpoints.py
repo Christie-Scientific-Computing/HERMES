@@ -117,15 +117,29 @@ async def job_summary(job_id: str):
     without raising), so counting those would overstate how many patients
     actually got data. No real ids involved here (just counts), so no
     scrubbing needed.
+
+    `exported_count`/`export_attempted_count` are the same idea for the
+    export stage (StatusDB.count_exported_patients) -- additive fields for
+    a combined import->export job (backend/worker.py's _maybe_chain_export),
+    both simply 0 for a job with no export-stage events at all.
+
+    `is_combined` (TasksDB.job_has_chain_export) tells a caller whether this
+    job was submitted with export chaining at all -- checked on submission-
+    time params, so it's accurate immediately, before any task has actually
+    chained anything. frontend/jobs/views.py's job_watch uses it to pick the
+    two-stage progress component instead of the single-stage one.
     """
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
     try:
         summary = status_db.summarize_job(job_id)
         imported_count, submitted_count = status_db.count_imported_patients(job_id)
+        exported_count, export_attempted_count = status_db.count_exported_patients(job_id)
         response = {
             "job_id": job_id, "summary": summary,
             "imported_count": imported_count, "submitted_count": submitted_count,
+            "exported_count": exported_count, "export_attempted_count": export_attempted_count,
+            "is_combined": tasks_db.job_has_chain_export(job_id),
         }
         job = status_db.get_job(job_id)
         if job:
@@ -150,6 +164,10 @@ _OBSERVER_POLL_INTERVAL = float(os.getenv("HERMES_OBSERVER_POLL_INTERVAL", "1"))
 
 
 _PENDING_TASK_STATES = ("queued", "claimed", "running")
+# Once cancellation has been observed, a 'queued' task can never be claimed
+# (TasksDB.claim excludes cancelled jobs) -- only these two states still
+# count as pending. See the cancelled_reported branch below.
+_PENDING_TASK_STATES_AFTER_CANCEL = ("claimed", "running")
 
 
 async def _observe_job(job_id: str) -> AsyncIterator[str]:
@@ -186,13 +204,45 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
     calls in asyncio.to_thread to avoid, worse here since this stream is
     long-lived by design rather than one call per batch item.
     """
-    total = await asyncio.to_thread(tasks_db.count_tasks, job_id)
-    yield format_sse({"type": "start", "total": total})
+    def _totals(rows: list[dict]) -> tuple[int, int, int]:
+        # A combined import->export job (backend/worker.py's
+        # _maybe_chain_export) grows its export task count over the job's
+        # lifetime -- export tasks are chained in one at a time as imports
+        # succeed. Splitting by stage (present on every row) rather than
+        # inferring "export total = grand total - import total" client-side
+        # keeps both denominators authoritative even across a reconnect,
+        # when the client has no reliable memory of what the import-only
+        # total was at the moment the stream first opened.
+        import_total = sum(1 for r in rows if r["stage"] == "retrieve")
+        export_total = sum(1 for r in rows if r["stage"] == "export")
+        return len(rows), import_total, export_total
+
+    rows = await asyncio.to_thread(tasks_db.job_progress, job_id)
+    total, import_total, export_total = _totals(rows)
+    yield format_sse({"type": "start", "total": total, "import_total": import_total, "export_total": export_total})
+    last_totals = (total, import_total, export_total)
 
     # Tracks each task's last-reported state so a re-read (see
     # TasksDB.job_progress's docstring for why this can't be filtered at
     # the SQL layer) only ever produces one event per actual transition.
     last_state: dict[int, str] = {}
+    # Separate from last_state: TasksDB.reap_stale_claims can put a
+    # currently-running task back to 'queued' (its worker hasn't died, just
+    # taking longer than HERMES_TASK_STALE_SECONDS) and a second worker then
+    # reclaims and re-runs it, so the SAME task_id can pass through
+    # 'running' twice. Reacting to every 'running' sighting as its own
+    # transition would emit a second "progress" event for that task_id
+    # without ever resolving the first one -- job_progress.html's event log
+    # is append-only by design (a running total, not a per-task widget), so
+    # that orphaned first line would sit there reading "Importing X…"
+    # forever even once the job finishes. Tracking "has this task_id ever
+    # reported progress" instead of "did its state just change to running"
+    # keeps the log to one progress line and one resolving success/error
+    # line per task_id, however many times it was actually reaped and
+    # reclaimed underneath. (If per-task retries are ever enabled --
+    # max_attempts is 1 today, see CLAUDE.md -- a deliberate retry would
+    # also be suppressed here the same way; revisit then.)
+    progress_reported: set[int] = set()
     cancelled_reported = False
 
     while True:
@@ -209,21 +259,46 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
             # of the stream silently going quiet on it.
 
         rows = await asyncio.to_thread(tasks_db.job_progress, job_id)
+
+        totals = _totals(rows)
+        if totals != last_totals:
+            last_totals = totals
+            total, import_total, export_total = totals
+            yield format_sse({"type": "total", "total": total,
+                               "import_total": import_total, "export_total": export_total})
+
         has_pending = False
         for row in rows:
             task_id, state = row["task_id"], row["state"]
-            if state in _PENDING_TASK_STATES:
+            # Once cancellation has been observed, a still-'queued' row can
+            # never be claimed (TasksDB.claim excludes cancelled jobs) --
+            # it's permanently inert, not pending. Before that point,
+            # 'queued' counts as pending exactly as it always has.
+            #
+            # This matters specifically for a chained export enqueued in the
+            # narrow window between _maybe_chain_export's own is_cancelled
+            # check and cancel_queued's sweep (backend/worker.py): that row
+            # lands 'queued' *after* the sweep already ran, so it's never
+            # caught by cancel_queued and would otherwise sit 'queued'
+            # forever -- without this check, has_pending would never go
+            # false and this generator would poll indefinitely, never
+            # emitting `done`.
+            pending_states = _PENDING_TASK_STATES_AFTER_CANCEL if cancelled_reported else _PENDING_TASK_STATES
+            still_pending = state in pending_states
+            if still_pending:
                 has_pending = True
             if last_state.get(task_id) == state:
                 continue
             last_state[task_id] = state
-            real_id, display_id = row["real_id"], row["display_id"]
+            real_id, display_id, stage = row["real_id"], row["display_id"], row["stage"]
 
             if state == "running":
-                yield format_sse({"type": "progress", "current": display_id})
+                if task_id not in progress_reported:
+                    progress_reported.add(task_id)
+                    yield format_sse({"type": "progress", "current": display_id, "stage": stage})
             elif state == "succeeded":
                 details = _scrub_json(row["details"], real_id, display_id) or {}
-                yield format_sse({"type": "success", "mrn": display_id, **details})
+                yield format_sse({"type": "success", "mrn": display_id, "stage": stage, **details})
             elif state == "failed" or (state == "cancelled" and row["error_message"]):
                 # 'cancelled' is two different things, distinguished by
                 # error_message: TasksDB.cancel_task (backend/worker.py's
@@ -235,7 +310,7 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
                 # run_batch_job silently stops on the remaining items of a
                 # cancelled job without emitting anything for them.
                 error = _scrub(row["error_message"], real_id, display_id) or "Task did not complete"
-                yield format_sse({"type": "error", "mrn": display_id, "error": error})
+                yield format_sse({"type": "error", "mrn": display_id, "stage": stage, "error": error})
             # "queued"/"claimed" -> no distinct SSE event; "progress" fires
             # once a task actually starts running, matching the vocabulary
             # table in docs/worker-queue-design.md.
@@ -294,6 +369,17 @@ async def job_patients_summary(job_id: str):
     diagnostic strings from Importer.find_patient (backend/src/retrieve/logic.py)
     -- explicitly scrubbed the same way `error_message` is, since they
     routinely quote the real MRN.
+
+    Also carries `imported` (details_by_mrn's own ground-truth flag,
+    surfaced directly rather than left for a caller to infer from
+    in_mosaiq/in_pinnacle/in_proknow) and, for a combined import->export job
+    (backend/worker.py's _maybe_chain_export), stage-specific
+    `import_outcome`/`import_error_message` and `export_outcome`/
+    `export_error_message` -- unlike the stage-agnostic `outcome`/
+    `error_message` above (latest event of either stage), these let a
+    caller distinguish "import failed" from "import succeeded, export
+    failed" instead of the export's outcome silently shadowing the
+    import's. Both simply null for a job that never had that stage.
     """
     if not status_db:
         raise HTTPException(status_code=503, detail="Status DB not configured")
@@ -301,6 +387,8 @@ async def job_patients_summary(job_id: str):
         real_mrns = status_db.list_job_patients(job_id)
         details_by_mrn = status_db.get_latest_retrieve_details(job_id)
         latest_by_mrn = status_db.get_latest_event_per_patient(job_id)
+        import_by_mrn = status_db.get_latest_event_per_patient(job_id, stage="retrieve")
+        export_by_mrn = status_db.get_latest_event_per_patient(job_id, stage="export")
         display_map = anon.to_display_ids(real_mrns)
         patients = [
             {
@@ -309,11 +397,28 @@ async def job_patients_summary(job_id: str):
                 "in_pinnacle": details_by_mrn.get(real_mrn, {}).get("in_pinnacle"),
                 "in_proknow": details_by_mrn.get(real_mrn, {}).get("in_proknow"),
                 "status": details_by_mrn.get(real_mrn, {}).get("status"),
+                "imported": details_by_mrn.get(real_mrn, {}).get("imported"),
                 "outcome": _OUTCOME_BY_EVENT_TYPE.get(
                     latest_by_mrn.get(real_mrn, {}).get("event_type")
                 ),
                 "error_message": _scrub(
                     latest_by_mrn.get(real_mrn, {}).get("error_message"),
+                    real_mrn,
+                    display_map[real_mrn],
+                ),
+                "import_outcome": _OUTCOME_BY_EVENT_TYPE.get(
+                    import_by_mrn.get(real_mrn, {}).get("event_type")
+                ),
+                "import_error_message": _scrub(
+                    import_by_mrn.get(real_mrn, {}).get("error_message"),
+                    real_mrn,
+                    display_map[real_mrn],
+                ),
+                "export_outcome": _OUTCOME_BY_EVENT_TYPE.get(
+                    export_by_mrn.get(real_mrn, {}).get("event_type")
+                ),
+                "export_error_message": _scrub(
+                    export_by_mrn.get(real_mrn, {}).get("error_message"),
                     real_mrn,
                     display_map[real_mrn],
                 ),

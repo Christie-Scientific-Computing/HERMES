@@ -24,14 +24,31 @@ from backend.src.common.sse import BatchItem
 
 
 class TasksDB:
-    def enqueue(self, job_id: str, items: list[BatchItem], kind: str, stage: str, params: dict) -> int:
+    def enqueue(self, job_id: str, items: list[BatchItem], kind: str, stage: str, params: dict,
+                chained_from_task_id: Optional[int] = None) -> int:
         """
         Bulk-insert one task row per BatchItem, in a single round trip (not
-        N inserts) via execute_values. Returns the number of rows inserted.
+        N inserts) via execute_values. Returns the number of items submitted
+        (not necessarily the number of rows actually inserted -- see
+        chained_from_task_id below).
 
         `params` is denormalised onto every row so a claim needs no join
         back to `jobs` (e.g. import_level, destination/collection,
         project_id, username for the claim-time ethics re-check).
+
+        `chained_from_task_id` marks a task as enqueued by
+        backend/worker.py's _maybe_chain_export (the import task_id it was
+        chained from) rather than submitted directly by a batch endpoint --
+        NULL for every ordinary import/export/uid-move submission. The
+        migration adding this column also adds a partial unique index on
+        (job_id, kind, status_mrn) WHERE chained_from_task_id IS NOT NULL,
+        so ON CONFLICT DO NOTHING here makes a second chain attempt for the
+        same import a no-op at the database level -- closing a real race
+        where a task reaped from a slow worker and reclaimed by another
+        would otherwise get its export chained twice (two independent
+        _maybe_chain_export calls, each completing the same import
+        successfully). Never triggers for a plain call (chained_from_task_id
+        None on every row), so ordinary batch submissions are unaffected.
         """
         if not items:
             return 0
@@ -39,7 +56,7 @@ class TasksDB:
         rows = [
             (
                 job_id, kind, stage, item.real_id, item.display_id, item.status_mrn,
-                item.input_path, Json(item.extra or {}), Json(params or {}), now,
+                item.input_path, Json(item.extra or {}), Json(params or {}), now, chained_from_task_id,
             )
             for item in items
         ]
@@ -48,8 +65,9 @@ class TasksDB:
                 cur,
                 """
                 INSERT INTO tasks(job_id, kind, stage, real_id, display_id, status_mrn,
-                                   input_path, extra, params, created_at)
+                                   input_path, extra, params, created_at, chained_from_task_id)
                 VALUES %s
+                ON CONFLICT (job_id, kind, status_mrn) WHERE chained_from_task_id IS NOT NULL DO NOTHING
                 """,
                 rows,
             )
@@ -240,6 +258,26 @@ class TasksDB:
             )
             return cur.rowcount
 
+    def job_has_chain_export(self, job_id: str) -> bool:
+        """
+        Whether any task in this job was submitted with a chain_export block
+        (backend/src/retrieve/endpoints.py's batch_import_file, export_kind
+        param) -- i.e. whether this is a combined import->export job.
+
+        Checked on `params` (set at enqueue time, before anything runs)
+        rather than chained_from_task_id (only set once a chained export
+        task actually exists) so this is accurate from the moment a
+        combined job is submitted, not only once its first import succeeds
+        -- frontend/jobs/views.py's job_watch needs this immediately, to
+        pick the two-stage progress component before any progress exists.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE job_id = %s AND params ? 'chain_export')",
+                (job_id,),
+            )
+            return bool(cur.fetchone()[0])
+
     def get_task(self, task_id: int) -> Optional[dict]:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM tasks WHERE task_id=%s", (task_id,))
@@ -273,7 +311,7 @@ class TasksDB:
         """
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT task_id, state, real_id, display_id, details, error_message "
+                "SELECT task_id, state, real_id, display_id, details, error_message, stage, kind "
                 "FROM tasks WHERE job_id = %s ORDER BY task_id",
                 (job_id,),
             )

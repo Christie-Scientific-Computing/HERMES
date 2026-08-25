@@ -88,7 +88,7 @@
   {% if user.is_authenticated and not user.is_superuser and not nav_active_projects %}
   <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 mt-4">
     <div class="rounded-md p-4 bg-yellow-50 text-yellow-800 border border-yellow-200 text-sm">
-      You don't belong to any approved ethics project yet. You can still browse the import/export pages, but you'll need a project to actually submit anything.
+      You don't belong to an approved project yet — you can browse, but not submit a job.
       <a href="{% url 'research_projects:create' %}" class="underline font-medium">Request a new project</a>
       to get started.
     </div>
