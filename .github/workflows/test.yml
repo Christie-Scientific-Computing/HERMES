@@ -1,0 +1,111 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    services:
+      # HermesDB -- fully HERMES-owned, migrated via Alembic below.
+      # Host port matches backend/tests/conftest.py's TEST_DATABASE_URL
+      # default exactly, so DATABASE_URL doesn't need overriding per step.
+      hermesdb:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: hermes_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # Stands in for the anon-mapping DB (backend/src/identity/anon.py) --
+      # an existing, externally-owned database in production; HERMES only
+      # ever SELECTs against it. Host port matches every
+      # test_*_anon_boundary.py file's hardcoded ANON_DB_PORT=55433 exactly.
+      anon_test:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: anon_test
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:test@localhost:55432/hermes_test
+      ANON_DB_HOST: localhost
+      ANON_DB_PORT: "55433"
+      ANON_DB_NAME: anon_test
+      ANON_DB_USER: postgres
+      ANON_DB_PASS: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # No submodules here -- PinnacleExport is fetched as a separate,
+        # explicitly non-fatal step below, matching the Dockerfile's own
+        # approach (a plain `git clone` with a PAT, not `git submodule
+        # update`) rather than actions/checkout's built-in submodules
+        # option, which would fail this whole step (and so the job) if the
+        # PINNACLE_EXPORT_PAT secret is absent/lacks access -- see that
+        # step's own comment for why this must degrade gracefully instead.
+
+      - name: Fetch PinnacleExport submodule (best-effort)
+        # backend/src/retrieve/PinnacleExport is a private submodule
+        # (Dockerfile's own comment: "Requires a PINNACLE_EXPORT_PAT build
+        # secret with read access to the repo"); the same secret is reused
+        # here. retrieve/logic.py (and anything importing it) needs this
+        # checked out, but a handful of test files depend on retrieve/logic.py
+        # transitively and already handle its absence via
+        # `pytest.importorskip("backend.src.retrieve.PinnacleExport", ...)`
+        # -- so this step's own failure (private/inaccessible/secret unset)
+        # must not fail the job, only shrink what pytest below can run.
+        # docs/plans/pii-boundary-test-suite.md §E flagged this as an open
+        # question rather than an assumption: whether this CI runner
+        # actually has access isn't determinable from inside this repo.
+        env:
+          PINNACLE_EXPORT_PAT: ${{ secrets.PINNACLE_EXPORT_PAT }}
+        run: |
+          rm -rf backend/src/retrieve/PinnacleExport
+          if [ -z "$PINNACLE_EXPORT_PAT" ]; then
+            echo "PINNACLE_EXPORT_PAT not set; skipping. Tests needing PinnacleExport will skip via pytest.importorskip."
+          elif git clone "https://x-access-token:${PINNACLE_EXPORT_PAT}@github.com/Christie-Scientific-Computing/PinnacleExport.git" backend/src/retrieve/PinnacleExport; then
+            echo "PinnacleExport checked out."
+          else
+            echo "PinnacleExport checkout failed; continuing without it. Tests needing it will skip via pytest.importorskip."
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run HermesDB migrations (alembic upgrade head)
+        # Tests don't run this themselves (only backend/main.py's own
+        # startup, via backend/src/database.py's setup_status_db, does) --
+        # see backend/tests/conftest.py, which just points DATABASE_URL at
+        # an already-migrated database and assumes that's already true.
+        run: alembic -c backend/alembic.ini upgrade head
+
+      - name: Seed the anon-test DB
+        run: python -m backend.scripts.seed_anon_test_db
+
+      - name: Run pytest
+        run: python -m pytest backend/tests/ -v
