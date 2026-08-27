@@ -84,7 +84,7 @@ below, which now makes the "every outbound edge" claim accurate again.
 
 ### The final mechanism (current state, all risk-register rows closed)
 
-Three layers, applied together rather than any one being a complete fix on
+Five layers, applied together rather than any one being a complete fix on
 its own:
 
 1. **A general pattern class, not a single known value**
@@ -130,8 +130,11 @@ detection catches *shapes*, not arbitrary prose.
 
 ## §2 — Risk register
 
-All 10 rows below are now **fixed** (row 7, this document's own accuracy, by
-this note itself). Original finding/location/severity columns are kept
+All 10 rows below are now closed (row 7, this document's own accuracy, by
+this note itself) — most **fixed** outright, row 8 fixed with one residual
+manual step for a repo admin, and row 10 addressed structurally rather than
+independently "fixed" (see each row's own Resolution for the exact wording,
+not flattened here). Original finding/location/severity columns are kept
 verbatim for the historical record; the **Resolution** column is new.
 
 | # | Finding | Location | Live UI path today? | Severity | Resolution |
@@ -265,10 +268,16 @@ primary control.
 - **Definition of an incident.** Any real MRN, date, DICOM UID, or server
   filesystem path appearing in a response body the proxy relays to a browser.
 - **Pre-deployment checklist:**
-  1. The CI boundary suite (§4) is green. — **Done** once PRs #51/#53/#54
-     (still open as of this writing, alongside this doc-update PR) are
-     merged; each was independently verified green on its own branch before
-     being opened (see each PR's description).
+  1. The CI boundary suite (§4) is green. — **Pending #53 merging into #54**:
+     #51 and #53 (still open as of this writing, alongside this doc-update
+     PR) were each independently verified green on their own branch before
+     being opened. #54 (the CI workflow itself) was not — its own branch's
+     first real CI runs show 20 failing tests, the pre-existing regression
+     #53 fixes (#54 branched from `main` before #53 existed, so it inherits
+     the gap; see #54's own description for the full run history, including
+     two other CI-specific issues found and fixed from real runs). This
+     checklist item completes once #53 merges and #54's workflow is re-run
+     against the result — not yet done as of this writing.
   2. Every row in the risk register (§2) has been explicitly marked
      **fixed**, **accepted risk** (with a one-line reason, mirroring
      `docs/known-issues.md`'s existing accepted-limitations tier), or
