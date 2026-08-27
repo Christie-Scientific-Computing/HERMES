@@ -330,6 +330,16 @@ def redact_dict(details: Optional[dict], *, real_id=None, display_id=None) -> di
     Response.model_dump()), not a JSONB blob read back from the DB;
     results/endpoints.py's _scrub_json already handles that separate,
     genuinely-nested case.
+
+    Deliberately does NOT strip UID-shaped list/dict fields either --
+    export/import Response.study_uids (a list[str] of real StudyInstanceUIDs)
+    and Response.checksums (a dict[SOPInstanceUID, hash]) are real DICOM UID
+    leaks in their own right, but that reshape is a separate, complementary
+    fix (backend/src/common/sse.py's to_public_details, plan step 3 --
+    strips study_uids/series_uids entirely and re-keys checksums to a plain
+    list[str]) applied at the SAME call sites this function is. Both must
+    run for a success payload to be fully clean; this function only ever
+    owns the free-text-real-id-in-prose half of that.
     """
     if not details:
         return details or {}

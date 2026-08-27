@@ -394,6 +394,36 @@ def test_timeline_scrubs_the_real_mrn_out_of_error_message_and_details(client, j
     assert event["error_message"] == f"no studies found for {ANON_MRN}"
     assert event["details"]["searched"] == [f"mosaiq:{ANON_MRN}"]
     assert event["details"]["nested"]["id"] == ANON_MRN
+
+
+def test_timeline_preserves_multiple_distinct_checksums_entries(client, job_id):
+    """
+    _scrub_json walks string LEAVES only, never dict keys -- an earlier
+    implementation serialized `details` to a JSON string, ran a substring
+    replace, and re-parsed it, which also touched dict KEYS.
+    `checksums` (dict[SOPInstanceUID, hash]) has UID-shaped keys by
+    construction: pii_patterns.redact()'s generic UID-pattern floor turns
+    every UID-shaped key into the same placeholder string, so re-parsing
+    that text silently collapsed multiple checksum entries into one via a
+    dict-key collision. Two genuinely distinct SOPInstanceUIDs here must
+    both survive.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="success",
+        details={
+            "checksums": {
+                "1.2.840.10008.5.1.4.1.1.481.1": "aaa111",
+                "1.2.840.10008.5.1.4.1.1.481.2": "bbb222",
+            },
+        },
+    )
+
+    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    event = resp.json()["events"][0]
+    assert len(event["details"]["checksums"]) == 2
+    assert set(event["details"]["checksums"].values()) == {"aaa111", "bbb222"}
     assert REAL_MRN not in resp.text
 
 

@@ -295,7 +295,11 @@ async def proknow_upload_patient(body: Request):
                 logger.warning("Status DB write failed: %s", e)
 
         # response.model_dump() keeps full fidelity in the add_event call
-        # above -- only this outbound return goes through redact_dict.
+        # above -- only this outbound return goes through redact_dict, which
+        # only handles free text. It does NOT strip response's own
+        # study_uids/series_uids/checksums (real DICOM UIDs) -- that's
+        # to_public_details' job (plan step 3), which this same response
+        # should also go through once that lands.
         return {
             'type': 'success', 'execution_time': np.round(time.time() - start, 2),
             **pii_patterns.redact_dict(response.model_dump(), real_id=real_mrn, display_id=display_mrn),

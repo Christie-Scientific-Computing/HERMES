@@ -170,6 +170,11 @@ async def run_batch_job(
             # anonymisation-boundary note) are redacted before crossing the
             # boundary via redact_dict; the add_event call above already
             # wrote the raw, full-fidelity res to StatusDB.
+            #
+            # redact_dict only ever handles free text -- it does NOT strip
+            # UID-shaped fields (study_uids/series_uids/checksums), a
+            # separate concern this same res should also go through
+            # to_public_details for (plan step 3) once that lands.
             yield format_sse({
                 "type": "success",
                 "execution_time": round(time.time() - start, 2),

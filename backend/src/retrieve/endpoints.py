@@ -165,7 +165,10 @@ async def single_import(body: Request):
         # above -- only this outbound return goes through redact_dict,
         # which scrubs free-text fields (mosaiq_reason/pinnacle_reason/
         # proknow_reason routinely quote the real MRN) with the real id in
-        # scope here.
+        # scope here. redact_dict does NOT strip response's own study_uids
+        # (a real StudyInstanceUID list) -- that's to_public_details' job
+        # (plan step 3), which this same response should also go through
+        # once that lands.
         display_mrn = response.mrn
         return {
             'type': 'success', 'execution_time': np.round(time.time() - start, 2),

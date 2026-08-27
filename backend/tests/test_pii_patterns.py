@@ -308,3 +308,18 @@ class TestRedactDict:
         original = {"reason": "failed for 500123"}
         pii_patterns.redact_dict(original, real_id="500123", display_id="1001")
         assert original == {"reason": "failed for 500123"}
+
+    def test_does_not_strip_uid_list_or_checksums_dict_by_design(self):
+        # Documents a deliberate boundary, not a gap in THIS function:
+        # study_uids (list[str] of real StudyInstanceUIDs) and checksums
+        # (dict[SOPInstanceUID, hash]) are real UID leaks, but stripping
+        # them is common/sse.py's to_public_details' job (plan step 3), a
+        # separate, complementary transformation applied at the same call
+        # sites -- redact_dict only ever owns the free-text-real-id-in-prose
+        # half. A caller must run both for a fully clean payload.
+        result = pii_patterns.redact_dict({
+            "study_uids": ["1.2.840.study.1"],
+            "checksums": {"1.2.840.sop.1": "abc123"},
+        })
+        assert result["study_uids"] == ["1.2.840.study.1"]  # untouched here
+        assert result["checksums"] == {"1.2.840.sop.1": "abc123"}  # untouched here
