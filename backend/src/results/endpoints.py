@@ -128,7 +128,12 @@ def _scrub_json(value, real_mrn: str, display_mrn: str):
         if isinstance(v, dict):
             return {k: _walk(item, key=k) for k, item in v.items()}
         if isinstance(v, list):
-            return [_walk(item) for item in v]
+            # Propagate the parent key rather than dropping it: every
+            # current Response field is typed str | None, never a list of
+            # scalars, so this is dormant today -- but a protected field
+            # (e.g. "destination") shaped as a list of strings would
+            # otherwise lose its exclusion the moment it's inside a list.
+            return [_walk(item, key=key) for item in v]
         return v
 
     try:

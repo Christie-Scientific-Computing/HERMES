@@ -452,6 +452,26 @@ def test_timeline_preserves_date_shaped_destination_field(client, job_id):
     assert event["details"]["destination_type"] == "proknow_collection"
 
 
+def test_timeline_preserves_date_shaped_destination_nested_in_a_list(client, job_id):
+    """
+    _scrub_json's recursive walk must propagate the parent key into list
+    items, not just dict items -- otherwise a protected field shaped as a
+    list of strings would lose its exclusion the moment it's inside a
+    list. No current Response field is actually typed this way, but the
+    walk shouldn't rely on that.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="success",
+        details={"destination": ["Trial_2024-01-15_Cohort", "Other_2024-02-01_Cohort"]},
+    )
+
+    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    event = resp.json()["events"][0]
+    assert event["details"]["destination"] == ["Trial_2024-01-15_Cohort", "Other_2024-02-01_Cohort"]
+
+
 def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_schema):
     """
     Plan rows have no patient-id column, so nothing gets *translated* here --
