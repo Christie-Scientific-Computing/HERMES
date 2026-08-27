@@ -337,9 +337,15 @@ def get_date_perturbations(real_ids: list[str]) -> dict[str, int]:
     mapping = {str(row[0]): row[1] for row in rows}
     missing = [rid for rid in unique if mapping.get(rid) is None]
     if missing:
+        # Deliberately does NOT embed the real ids themselves in the
+        # message (unlike lookup_real_ids' equivalent, which is safe to
+        # name the ANON ids it couldn't resolve) -- these are REAL ids, and
+        # a bare digit MRN isn't reliably caught by pii_patterns.py's
+        # generic pattern floor. shift_date only ever logs this as a
+        # static string, never str(exc), but a future direct caller of
+        # this function shouldn't have to remember that to stay safe.
         raise AnonLookupError(
-            f"No date_perturbation on record for real id{'s' if len(missing) > 1 else ''}: "
-            + ", ".join(missing)
+            f"No date_perturbation on record for {len(missing)} real id{'s' if len(missing) > 1 else ''}"
         )
     return {rid: int(mapping[rid]) for rid in unique}
 
@@ -396,4 +402,12 @@ def shift_date(real_id: str, date_str: Optional[str]) -> Optional[str]:
         logger.warning("Could not determine date perturbation for real id; redacting date")
         return None
 
-    return (parsed + timedelta(days=offset_days)).strftime(fmt)
+    try:
+        return (parsed + timedelta(days=offset_days)).strftime(fmt)
+    except OverflowError:
+        # datetime.date is bounded (year 1..9999) -- a date near either
+        # edge shifted past it would otherwise raise uncaught, contradicting
+        # this function's "None on failure, never raises" contract. Still
+        # fail-safe: None, never the unshifted raw date.
+        logger.warning("Date shift overflowed datetime.date's representable range; redacting")
+        return None

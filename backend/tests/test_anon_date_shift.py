@@ -118,6 +118,14 @@ class TestGetDatePerturbations:
     def test_empty_list_returns_empty_dict(self):
         assert anon.get_date_perturbations([]) == {}
 
+    def test_missing_row_error_does_not_embed_the_real_id(self):
+        # Unlike lookup_real_ids (safe to name the missing ANON ids), this
+        # function is keyed by REAL ids -- the exception text must not
+        # become a new leak path for a real MRN.
+        with pytest.raises(anon.AnonLookupError) as exc_info:
+            anon.get_date_perturbation("424242")
+        assert "424242" not in str(exc_info.value)
+
     def test_unconfigured_returns_zero_for_every_id(self, monkeypatch):
         monkeypatch.setattr(anon, "ANON_DB_HOST", None)
         assert anon.get_date_perturbations([REAL_MRN, REAL_MRN_2]) == {REAL_MRN: 0, REAL_MRN_2: 0}
@@ -194,3 +202,12 @@ class TestShiftDate:
     def test_passthrough_when_anon_not_configured(self, monkeypatch):
         monkeypatch.setattr(anon, "ANON_DB_HOST", None)
         assert anon.shift_date(REAL_MRN, "20260101") == "20260101"  # 0-day shift
+
+    def test_none_on_overflow_past_max_representable_date(self):
+        # datetime.date is bounded (year 1..9999) -- shifting a date near
+        # that edge forward must redact (None), not raise uncaught.
+        _set_perturbation(REAL_MRN, 10)
+        try:
+            assert anon.shift_date(REAL_MRN, "99991231") is None
+        finally:
+            _set_perturbation(REAL_MRN, None)
