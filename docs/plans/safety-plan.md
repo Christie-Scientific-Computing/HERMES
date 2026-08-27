@@ -6,7 +6,10 @@ Follows the architecture review (repo memory, not checked in) and the author's
 scoping decisions in response to it. This plan does **not** cover DICOM-level
 de-identification (handled by a separate, pre-existing node downstream of
 central Orthanc) and does not treat pseudonymisation as a defect — both are
-explicitly out of scope, per the author.
+explicitly out of scope, per the author. See `docs/pii-boundary-safety.md`
+for the dedicated risk register and testing design around data crossing the
+DMZ proxy specifically, including the error-path gaps §E's fix here was one
+instance of.
 
 ## What this plan is responding to
 

@@ -4,47 +4,53 @@ Quick-skim summary of everything surfaced during the export-governance review
 and the follow-up planning discussion. Each item links to where it's tracked
 in more detail. Status reflects the author's decisions, not just severity.
 
-## Being actively addressed — see `docs/safety-plan.md`
+## Being actively addressed — see `docs/plans/safety-plan.md`
 
 - **No way to restrict which destinations a user may export to.** Any active
   project member can target any registered Orthanc modality or ProKnow
-  collection. → building a per-user allow-list (`docs/safety-plan.md` §A).
-- **Backend→`anon_db` link crosses into the DMZ unhardened.** The mapping
-  table lives on the proxy's machine; the backend reaches out to it with no
-  TLS or lookup-volume monitoring today. → TLS opt-in + app-side monitoring
-  within HERMES's control now; a restricted DB role and (optionally) a CA
-  cert are tracked as an external request to the table's owning team, not a
-  HERMES deliverable (`docs/safety-plan.md` §B).
-- **Project approval doesn't say what it authorises.** Approving a project is
-  an unqualified yes/no on tool access — no cohort or volume bound, and
-  reviewers aren't told that plainly. → approval-page banner + `CLAUDE.md`
-  note, copy already agreed (`docs/safety-plan.md` §C).
-- **Audit trail doesn't record what actually left, and can be edited with no
-  trace.** A successful export's own record is typically just
-  `{'status': 'Success'}`; `events`/`project_audit_log` are ordinary,
-  editable Postgres rows. → hash-chained `events` + a real per-export
-  manifest (counts, checksums, destination) (`docs/safety-plan.md` §D).
-- **`event_type='success'` on import doesn't mean the patient was actually
-  found anywhere.** `Importer.handle_patient` returns success whenever it
-  completes without raising, including when all three sources come back
-  empty — any "how many patients actually imported" figure needs a ground-truth
-  check against Orthanc, not the event count. → post-import Orthanc
-  verification + a "N/M patients imported" UI stat (`docs/safety-plan.md` §D3/§E).
-- **No per-source reason when a patient isn't found.** `find_patient` returns
-  bare `True`/`False` per source; a source query error and a genuine "not
-  found" look identical today. → per-source reason strings (Mosaiq:
-  "Incomplete planning data" / not found / source-query error; Pinnacle:
-  reconstruction failure via `pinnacle_export.status`/`errors`; ProKnow:
-  "Patient not found on ProKnow"), surfaced on the job and patient pages
-  (`docs/safety-plan.md` §E).
+  collection. → building a per-user allow-list (`docs/plans/safety-plan.md` §A).
+  Still the only item in this section not yet built — no `AccessDB`/
+  `user_export_destinations` exists in the codebase as of this update.
+
+## Resolved — shipped since the original review
+
+- **Backend→`anon_db` link crossed into the DMZ unhardened.** TLS opt-in
+  (`ANON_DB_SSLMODE`/`ANON_DB_SSLROOTCERT`) and app-side lookup-volume
+  monitoring are both live in `backend/src/identity/anon.py`
+  (`docs/plans/safety-plan.md` §B1). A restricted DB role and CA cert for that
+  table remain an external request to the table's owning team, not
+  something HERMES's own code can complete (§B2) — the app-side half is
+  done, the infra-side half is still pending on their end.
+- **Project approval didn't say what it authorises.** The agreed banner
+  copy ("Approving this project lets its members export pseudo-anonymised
+  data for any patient, in any volume, for as long as the approval is
+  active. There is currently no way to limit exports to a specific
+  cohort — membership is the only control in place.") is live on the
+  project detail page (`docs/plans/safety-plan.md` §C).
+- **Audit trail didn't record what actually left, and could be edited with
+  no trace.** `events` is now a hash chain (`prev_hash`/`row_hash`,
+  `backend/src/status/hash_chain.py`), and exports carry a real per-export
+  manifest (study/series UIDs, per-instance checksums, destination) instead
+  of a bare `{'status': 'Success'}` (`docs/plans/safety-plan.md` §D0-§D2).
+- **`event_type='success'` on import didn't mean the patient was actually
+  found anywhere.** `Importer.verify_on_orthanc` now does a ground-truth
+  post-import check, and `StatusDB.count_imported_patients` computes the
+  "N/M imported" figure off `details->>'imported'`, not off `event_type`
+  alone (`docs/plans/safety-plan.md` §D3/§E).
+- **No per-source reason when a patient isn't found.** `job_patients_summary`
+  now surfaces `mosaiq_reason`/`pinnacle_reason`/`proknow_reason` per patient
+  (`backend/src/results/endpoints.py`), scrubbed of the real MRN before
+  leaving the boundary (`docs/plans/safety-plan.md` §E).
 
 ## Documented limitations — accepted, no code change planned this iteration
 
 - **No pre-flight review before a combined import+export job.** Can't
   confirm what's about to be sent until import has actually finished
   finding it, and pausing a multi-hour/day job to wait for a human is worse
-  than not pausing at all. No design proposed; revisit once import-outcome
-  data (§D3/§E above) exists, if this becomes worth solving.
+  than not pausing at all. No design proposed. The precondition for
+  revisiting this (§D3/§E's import-outcome data) now exists in the
+  codebase — still not built, but worth reconsidering now that the
+  ground-truth "was this patient actually found" data is available.
 - **Admin/superuser access isn't restricted at the code level.** A Django
   superuser is auto-enrolled in a permanently-approved bypass project with no
   ethics review, and can use it for export today. Accepted as an operational
@@ -75,7 +81,7 @@ in more detail. Status reflects the author's decisions, not just severity.
   downstream of central Orthanc. HERMES's responsibility is access control,
   routing, and audit around that pipeline — not touching image content.
 
-## Separately tracked — see `docs/frontend-migration.md`
+## Separately tracked — see `docs/plans/frontend-migration.md`
 
 - **Whether to migrate `frontend/` off Django.** Under consideration
   (Django feels heavy for what's mostly a thin client). The migration plan's
@@ -91,6 +97,8 @@ in more detail. Status reflects the author's decisions, not just severity.
 
 - The anon/real ID split and free-text scrubbing at every outbound API edge
   (`backend/src/identity/anon.py`, `results/endpoints.py`'s `_scrub`/`_scrub_json`).
+  See `docs/pii-boundary-safety.md` for where this coverage claim currently
+  overstates reality and the concrete gaps found.
 - Fail-closed authorization discipline in `backend/src/projects/enforcement.py`
   (a DB error denies, never silently allows).
 - The two-phase, session-gated SSE job pattern in `frontend/jobs/views.py` —
