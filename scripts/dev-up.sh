@@ -120,21 +120,37 @@ done
 # proxy instead, once it's up. HERMES_URL/proxy's own .env, if present, are
 # overridden here rather than relied on, so this works the same regardless
 # of what's (or isn't) configured in proxy/.env.
+#
+# FRONTEND_BACKEND_PORT is explicitly $BACKEND_PORT (this script's own
+# resolved value, from HERMES_DEV_BACKEND_PORT or its 8000 default -- see
+# above) rather than leaving the frontend to inherit .env's own BACKEND_PORT
+# unmodified the way it did before this variable existed. Those two can
+# already differ today (this script's backend always binds to $BACKEND_PORT
+# regardless of what .env's own BACKEND_PORT says), so this incidentally
+# fixes a pre-existing case where HERMES_DEV_BACKEND_PORT moved the backend
+# but the frontend kept pointing at .env's stale value -- not a behavior
+# change for the common case (.env's BACKEND_PORT matching the 8000 default).
 FRONTEND_BACKEND_URI="localhost"
 FRONTEND_BACKEND_PORT="$BACKEND_PORT"
 
 if [ "$USE_PROXY" = "1" ]; then
   (cd proxy && HERMES_URL="http://localhost:$BACKEND_PORT" python -m uvicorn main:app --reload --port "$PROXY_PORT" 2>&1 | sed -u "s/^/[proxy]     /") &
 
-  # The proxy is a pure forwarder with no routes of its own -- GET /docs
-  # isn't handled locally, it's relayed straight through to the backend's
-  # own /docs, so this doubles as "is the proxy AND the backend both up
-  # and actually connected to each other" rather than just "is the proxy
-  # process listening."
+  # Deliberately NOT /docs here: proxy/main.py's own FastAPI() app
+  # auto-registers /docs, /redoc and /openapi.json at construction time,
+  # *before* the catch-all @app.api_route("/{path:path}") route is added --
+  # Starlette matches in registration order, so those three specific paths
+  # are served by the proxy's OWN docs page, never forwarded (confirmed:
+  # they still return 200 even with the backend down). Every other path
+  # does hit the catch-all and gets forwarded, so /results/job/{job_id}
+  # (a real, side-effect-free, fast backend route -- an empty summary for
+  # an id with no rows, no external Mosaiq/Pinnacle/ProKnow/Orthanc call)
+  # is what actually proves "the proxy is up AND can reach the backend,"
+  # not just "the proxy process is listening."
   echo -n "Waiting for proxy to come up"
   proxy_ready=false
   for _ in $(seq 1 30); do
-    if curl -sf "http://localhost:$PROXY_PORT/docs" -o /dev/null 2>/dev/null; then
+    if curl -sf "http://localhost:$PROXY_PORT/results/job/__hermes_dev_up_gateway_readiness_check__" -o /dev/null 2>/dev/null; then
       proxy_ready=true
       break
     fi
