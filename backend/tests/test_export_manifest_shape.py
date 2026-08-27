@@ -219,3 +219,88 @@ def test_single_import_strips_study_uids_but_db_keeps_them(import_client, active
     history = retrieve_endpoints.status_db.get_patient_history(job_id, REAL_MRN)
     details = next(e for e in history if e["event_type"] == "success")["details"]
     assert details["study_uids"] == ["1.2.840.study.import"]
+
+
+# ---------------------------------------------------------------------------
+# Patient timeline (_anonymize_events, results/endpoints.py): a fifth
+# emission point found in review -- reads events.details straight from the
+# DB and previously only ran it through _scrub_json (real-MRN substring
+# substitution), which never touches a DICOM UID.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def results_client():
+    app = FastAPI()
+    app.include_router(results_endpoints.router)
+    return TestClient(app)
+
+
+def _seed_export_success_event(job_id: str) -> None:
+    status_db = StatusDB()
+    status_db.create_job(job_id)
+    status_db.add_patient(job_id, REAL_MRN)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="success",
+        details={
+            "status": "Success", "series_count": 1, "instance_count": 1,
+            "study_uids": ["1.2.840.study.timeline"], "series_uids": ["1.2.840.series.timeline"],
+            "checksums": {"1.2.840.sop.timeline": "0ddba11"},
+        },
+    )
+
+
+def test_patient_timeline_strips_uids_from_details_but_db_keeps_them(results_client):
+    job_id = f"timeline-shape-{uuid.uuid4()}"
+    _seed_export_success_event(job_id)
+
+    resp = results_client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    body = resp.json()
+    success_event = next(e for e in body["events"] if e.get("event_type") == "success")
+    assert "study_uids" not in success_event["details"]
+    assert "series_uids" not in success_event["details"]
+    assert success_event["details"]["checksums"] == ["0ddba11"]
+    assert REAL_MRN not in resp.text
+    assert "1.2.840.study.timeline" not in resp.text
+    assert "1.2.840.series.timeline" not in resp.text
+    assert "1.2.840.sop.timeline" not in resp.text
+
+    status_db = StatusDB()
+    db_events = status_db.get_patient_history(job_id, REAL_MRN)
+    db_details = next(e for e in db_events if e["event_type"] == "success")["details"]
+    assert db_details["study_uids"] == ["1.2.840.study.timeline"]
+    assert db_details["series_uids"] == ["1.2.840.series.timeline"]
+    assert db_details["checksums"] == {"1.2.840.sop.timeline": "0ddba11"}
+
+
+def test_patient_timeline_all_jobs_strips_uids(results_client):
+    # REAL_MRN is a fixed id shared across many test files, and this
+    # endpoint aggregates across every job for that mrn -- filter to this
+    # test's own job_id rather than assuming the first "success" event is
+    # the one just seeded.
+    job_id = f"timeline-all-shape-{uuid.uuid4()}"
+    _seed_export_success_event(job_id)
+
+    resp = results_client.get(f"/results/patient/timeline/{ANON_MRN}/all")
+    assert resp.status_code == 200
+    body = resp.json()
+    success_event = next(
+        e for e in body["events"] if e.get("event_type") == "success" and e.get("job_id") == job_id
+    )
+    assert "study_uids" not in success_event["details"]
+    assert "series_uids" not in success_event["details"]
+    assert success_event["details"]["checksums"] == ["0ddba11"]
+
+
+def test_patient_timeline_preserves_none_details_as_none(results_client):
+    # A 'start' event has no details at all -- must stay None, not become
+    # {} as a side effect of the UID-stripping fix.
+    job_id = f"timeline-none-{uuid.uuid4()}"
+    status_db = StatusDB()
+    status_db.create_job(job_id)
+    status_db.add_event(job_id, REAL_MRN, stage="retrieve", event_type="start")
+
+    resp = results_client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    event = resp.json()["events"][0]
+    assert event["details"] is None
