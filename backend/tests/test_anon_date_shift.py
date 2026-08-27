@@ -211,3 +211,24 @@ class TestShiftDate:
             assert anon.shift_date(REAL_MRN, "99991231") is None
         finally:
             _set_perturbation(REAL_MRN, None)
+
+    def test_none_on_overflow_before_min_representable_date(self):
+        # Same failure mode, opposite direction: a date near year 1 shifted
+        # backward past the representable minimum.
+        _set_perturbation(REAL_MRN, -10)
+        try:
+            assert anon.shift_date(REAL_MRN, "00010105") is None
+        finally:
+            _set_perturbation(REAL_MRN, None)
+
+    def test_none_on_timedelta_overflow_from_huge_perturbation(self):
+        # A date_perturbation value large enough to overflow timedelta's
+        # own internal range (999,999,999 days max -- not just
+        # datetime.date's) -- e.g. a corrupted row -- must still redact
+        # rather than raise. 2 billion fits Postgres INT (~2.1B max) but
+        # exceeds timedelta.max.days.
+        _set_perturbation(REAL_MRN, 2_000_000_000)
+        try:
+            assert anon.shift_date(REAL_MRN, "20260101") is None
+        finally:
+            _set_perturbation(REAL_MRN, None)
