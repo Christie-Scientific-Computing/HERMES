@@ -62,6 +62,43 @@ def format_sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
+def to_public_details(details: Optional[dict]) -> dict:
+    """
+    Strip real DICOM UIDs from a worker's result dict before it crosses the
+    API boundary -- an SSE success event's spread fields, or
+    {"type": "success", **response} for a single-item endpoint.
+
+    `study_uids`/`series_uids` (export/endpoints.py's and
+    retrieve/endpoints.py's Response models, and the audit manifest built
+    for a DICOM C-MOVE/UID-move export) are dropped entirely -- unlike a
+    clinical date, there's no legitimate "shifted UID" to return instead
+    (docs/plans/pii-boundary-test-suite.md decision 6: DICOM UIDs forbidden
+    everywhere, no exceptions). `checksums` -- dict[SOPInstanceUID, hash],
+    a real UID on every key -- is re-keyed to a plain list[str] of hash
+    values only, keeping the count/values without the identifiers.
+
+    Applied here, at each outbound emission point, NOT on the Response
+    model itself and NOT on what StatusDB.add_event/TasksDB.mark_succeeded
+    store -- events.details/tasks.details keep full real-UID fidelity for
+    audit (docs/plans/safety-plan.md §D2); only what actually crosses the
+    HTTP/SSE boundary is reshaped.
+
+    A plain dict in, a plain dict out (never a Response instance) -- this
+    runs on both the import Response (study_uids/study_count) and every
+    export Response (study_uids/series_uids/checksums) shape, and is a
+    no-op passthrough for a dict with neither key, so it's safe to call
+    unconditionally at every success-emission site rather than needing each
+    caller to know which worker kind actually produces UIDs.
+    """
+    if not details:
+        return details or {}
+    public = {k: v for k, v in details.items() if k not in ("study_uids", "series_uids")}
+    checksums = public.get("checksums")
+    if isinstance(checksums, dict):
+        public["checksums"] = list(checksums.values())
+    return public
+
+
 def build_patient_id_batch(rows: list[dict], input_path: Optional[str] = None) -> list[BatchItem]:
     """
     Turn CSV rows with a `patient_id` column into BatchItems, resolving every
