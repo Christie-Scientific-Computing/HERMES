@@ -103,6 +103,23 @@ async def test_success_event_redacts_free_text_fields_but_db_keeps_them_raw(db, 
 
 
 @pytest.mark.asyncio
+async def test_success_event_preserves_date_shaped_destination_field(db, job_id):
+    # destination/destination_type/submitted_by (present on export worker
+    # results) are operational config, not patient data -- redact_dict's
+    # generic floor must not mangle a destination name that happens to
+    # contain a date-shaped substring.
+    items = [BatchItem(real_id="500123", display_id="1001", status_mrn="500123")]
+
+    def worker(item: BatchItem) -> dict:
+        return {"status": "Success", "destination": "Trial_2024-01-15_Cohort", "destination_type": "proknow_collection"}
+
+    chunks = await _collect(run_batch_job(job_id, items, stage="export", worker=worker, status_db=db))
+    events = _parse_events(chunks)
+    success_event = next(e for e in events if e["type"] == "success")
+    assert success_event["destination"] == "Trial_2024-01-15_Cohort"
+
+
+@pytest.mark.asyncio
 async def test_worker_cannot_override_display_id_via_res(db, job_id):
     items = [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")]
 

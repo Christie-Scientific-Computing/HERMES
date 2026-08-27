@@ -323,3 +323,28 @@ class TestRedactDict:
         })
         assert result["study_uids"] == ["1.2.840.study.1"]  # untouched here
         assert result["checksums"] == {"1.2.840.sop.1": "abc123"}  # untouched here
+
+    def test_exclude_protects_a_date_shaped_mrn_from_the_generic_floor(self):
+        # A real bug this guards against: without exclude=("mrn",), an anon
+        # id that happens to be 8 digits parsing as a valid calendar date
+        # (the anon-id scheme is an externally-owned table HERMES doesn't
+        # control the format of) got silently overwritten with the
+        # redaction placeholder instead of the real display id.
+        result = pii_patterns.redact_dict(
+            {"mrn": "20260115", "status": "success"},
+            real_id="500123", display_id="20260115", exclude=("mrn",),
+        )
+        assert result["mrn"] == "20260115"
+
+    def test_exclude_protects_a_date_shaped_collection_name(self):
+        result = pii_patterns.redact_dict(
+            {"destination": "Trial_2024-01-15_Cohort", "status": "ok"},
+            exclude=("destination",),
+        )
+        assert result["destination"] == "Trial_2024-01-15_Cohort"
+
+    def test_without_exclude_a_date_shaped_field_is_still_mangled(self):
+        # Confirms the exclude tests above are actually exercising the
+        # protection, not just describing a non-issue.
+        result = pii_patterns.redact_dict({"destination": "Trial_2024-01-15_Cohort"})
+        assert result["destination"] != "Trial_2024-01-15_Cohort"

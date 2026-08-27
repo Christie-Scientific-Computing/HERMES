@@ -310,7 +310,7 @@ def redact(text, *, real_id=None, display_id=None) -> str:
     return "".join(pieces)
 
 
-def redact_dict(details: Optional[dict], *, real_id=None, display_id=None) -> dict:
+def redact_dict(details: Optional[dict], *, real_id=None, display_id=None, exclude: tuple = ()) -> dict:
     """
     Apply redact() to every string value in a flat dict, leaving non-string
     values (bools, ints, lists, nested dicts) untouched.
@@ -324,6 +324,19 @@ def redact_dict(details: Optional[dict], *, real_id=None, display_id=None) -> di
     applying redact() uniformly across every string value, rather than an
     explicit per-field allow-list, means a field nobody thought to name
     specifically still gets the same protection.
+
+    `exclude` names fields to pass through completely untouched -- for
+    known-structural values where redact()'s generic pattern floor has
+    nothing to protect and only something to accidentally break: "mrn"
+    itself (already the display id -- an anon id that happens to be 8
+    digits parsing as a valid calendar date would otherwise get silently
+    overwritten with the redaction placeholder instead of the real display
+    id, since the anon-id scheme is an externally-owned table HERMES
+    doesn't control the format of), or "destination"/"destination_type"/
+    "submitted_by" (an Orthanc AE title, a ProKnow collection name, a
+    username -- operational config, never patient data, but a collection
+    literally named e.g. "Trial_2024-01-15_Cohort" would otherwise get
+    mangled by the date-pattern floor same as any other string).
 
     Does NOT recurse into nested dicts/lists -- every direct caller of this
     function passes a worker's raw, freshly-returned dict (a flat pydantic
@@ -344,6 +357,6 @@ def redact_dict(details: Optional[dict], *, real_id=None, display_id=None) -> di
     if not details:
         return details or {}
     return {
-        k: redact(v, real_id=real_id, display_id=display_id) if isinstance(v, str) else v
+        k: (v if (k in exclude or not isinstance(v, str)) else redact(v, real_id=real_id, display_id=display_id))
         for k, v in details.items()
     }

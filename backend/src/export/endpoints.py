@@ -307,13 +307,15 @@ async def proknow_upload_patient(body: Request):
         # to be 8 digits that parse as a valid calendar date (the anon-id
         # scheme is an externally-owned table HERMES doesn't control the
         # format of) would otherwise get silently overwritten with the
-        # redaction placeholder instead of the real display id.
-        dumped = response.model_dump()
-        dumped.pop("mrn", None)
+        # redaction placeholder instead of the real display id. Same
+        # reasoning excludes destination/destination_type/submitted_by --
+        # see redact_dict's docstring.
         return {
             'type': 'success', 'execution_time': np.round(time.time() - start, 2),
-            **pii_patterns.redact_dict(dumped, real_id=real_mrn, display_id=display_mrn),
-            'mrn': display_mrn,
+            **pii_patterns.redact_dict(
+                response.model_dump(), real_id=real_mrn, display_id=display_mrn,
+                exclude=("mrn", "destination", "destination_type", "submitted_by"),
+            ),
         }
 
     except Exception as e:

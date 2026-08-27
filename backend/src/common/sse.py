@@ -164,12 +164,18 @@ async def run_batch_job(
                     logger.warning("Status DB write failed: %s", e)
 
             # "mrn" is set last, after spreading res, so nothing worker
-            # returns can ever override it with a real id. res's free-text
-            # fields (e.g. mosaiq_reason/pinnacle_reason/proknow_reason,
-            # which routinely quote the real MRN -- see CLAUDE.md's
-            # anonymisation-boundary note) are redacted before crossing the
-            # boundary via redact_dict; the add_event call above already
-            # wrote the raw, full-fidelity res to StatusDB.
+            # returns can ever override it with a real id -- res never
+            # actually contains an "mrn" key (every worker factory dumps
+            # its Response with exclude={"mrn"}), so this is belt-and-braces,
+            # not load-bearing for redact_dict's own mrn-exclusion concern.
+            # res's free-text fields (e.g. mosaiq_reason/pinnacle_reason/
+            # proknow_reason, which routinely quote the real MRN -- see
+            # CLAUDE.md's anonymisation-boundary note) are redacted before
+            # crossing the boundary via redact_dict; the add_event call
+            # above already wrote the raw, full-fidelity res to StatusDB.
+            # destination/destination_type/submitted_by (present for export
+            # workers, absent for import ones) are excluded from redaction
+            # -- see redact_dict's docstring for why.
             #
             # redact_dict only ever handles free text -- it does NOT strip
             # UID-shaped fields (study_uids/series_uids/checksums), a
@@ -178,7 +184,10 @@ async def run_batch_job(
             yield format_sse({
                 "type": "success",
                 "execution_time": round(time.time() - start, 2),
-                **pii_patterns.redact_dict(res, real_id=item.real_id, display_id=item.display_id),
+                **pii_patterns.redact_dict(
+                    res, real_id=item.real_id, display_id=item.display_id,
+                    exclude=("destination", "destination_type", "submitted_by"),
+                ),
                 "mrn": item.display_id,
             })
 

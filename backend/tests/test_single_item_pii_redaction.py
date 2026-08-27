@@ -201,6 +201,25 @@ def test_proknow_upload_patient_mrn_survives_when_display_id_looks_date_shaped(e
     assert resp.json()["mrn"] == "20260115"  # not "[redacted]"
 
 
+def test_proknow_upload_patient_collection_name_survives_when_date_shaped(export_client, active_project):
+    # Same class of bug as the mrn one above, for a different field:
+    # destination (the ProKnow collection name here) is operational config,
+    # never patient data -- redact_dict's generic floor must not mangle it
+    # just because it happens to contain a date-shaped substring.
+    client, export_endpoints = export_client
+    project_id, username = active_project
+    job_id = f"pk-single-collection-{uuid.uuid4()}"
+
+    export_endpoints.Exporter.upload_to_proknow = lambda self, patient_id: {"status": "Success"}
+
+    resp = client.post("/export/proknow_upload_patient", json={
+        "job_id": job_id, "mrn": ANON_MRN, "collection": "Trial_2024-01-15_Cohort",
+        "project_id": project_id, "username": username,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["destination"] == "Trial_2024-01-15_Cohort"
+
+
 def test_proknow_upload_patient_error_redacts_exception_message(export_client, active_project):
     client, export_endpoints = export_client
     project_id, username = active_project
