@@ -20,10 +20,15 @@ instead of -- the precise real_id/display_id substitution every call site
 that already knows its own real id continues to do.
 
 Both `fastapi.HTTPException` and `starlette.exceptions.HTTPException` are
-registered explicitly: they're distinct classes (fastapi's subclasses
-starlette's), and `app.add_exception_handler` keys on the exact class
-passed, not resolved via MRO at registration time -- registering only one
-would leave exceptions raised as the other type unhandled by this fix.
+registered explicitly. Starlette's own *lookup* at dispatch time does walk
+the raised exception's MRO, so registering only the starlette base class
+would already catch every `fastapi.HTTPException` raised across this
+codebase's ~57 call sites (fastapi's subclasses starlette's). The reason
+both still need registering is Starlette's own routing internals
+(starlette/routing.py), which raise a *plain* `starlette.exceptions.
+HTTPException` directly -- never via `fastapi.HTTPException` -- for a 404
+(no route match) or 405 (method not allowed); that path only reaches our
+handler because the base class is registered too.
 """
 import logging
 
