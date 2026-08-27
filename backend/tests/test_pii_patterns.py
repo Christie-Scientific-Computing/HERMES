@@ -345,6 +345,23 @@ class TestRedactDict:
 
     def test_without_exclude_a_date_shaped_field_is_still_mangled(self):
         # Confirms the exclude tests above are actually exercising the
-        # protection, not just describing a non-issue.
-        result = pii_patterns.redact_dict({"destination": "Trial_2024-01-15_Cohort"})
+        # protection, not just describing a non-issue -- exclude=() opts
+        # back into redact_dict's now-default-safe NON_PII_STRUCTURAL_FIELDS
+        # exclusion, to prove the underlying redact() call really would
+        # mangle this field if nothing were protecting it.
+        result = pii_patterns.redact_dict({"destination": "Trial_2024-01-15_Cohort"}, exclude=())
         assert result["destination"] != "Trial_2024-01-15_Cohort"
+
+    def test_exclude_defaults_to_non_pii_structural_fields(self):
+        # redact_dict is safe by default -- a caller that forgets to pass
+        # `exclude=` explicitly (the exact mistake three review rounds on
+        # this codebase found repeatedly) still doesn't mangle mrn or
+        # destination.
+        result = pii_patterns.redact_dict({
+            "mrn": "20260115", "destination": "Trial_2024-01-15_Cohort",
+            "destination_type": "proknow_collection", "submitted_by": "alice",
+        })
+        assert result["mrn"] == "20260115"
+        assert result["destination"] == "Trial_2024-01-15_Cohort"
+        assert result["destination_type"] == "proknow_collection"
+        assert result["submitted_by"] == "alice"

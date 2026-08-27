@@ -359,6 +359,38 @@ async def test_observe_job_scrubs_real_mrn_from_success_details(tasks_db, job_id
 
 
 @pytest.mark.asyncio
+async def test_observe_job_preserves_date_shaped_destination_in_success_details(tasks_db, job_id):
+    """
+    This is the LIVE production path (backend/worker.py -> tasks.details ->
+    _observe_job -> the SSE stream frontend/'s job_stream relays for every
+    real CSV-upload export job) -- destination/destination_type/
+    submitted_by are operational config (an Orthanc AE title, a ProKnow
+    collection name, a username), never patient data, so _scrub_json must
+    not let the generic date/UID pattern floor mangle one that happens to
+    look date-shaped, the same protection redact_dict's default `exclude`
+    gives the synchronous run_batch_job path.
+    """
+    items = [BatchItem(real_id=REAL_MRN, display_id=ANON_MRN, status_mrn=REAL_MRN)]
+    tasks_db.enqueue(job_id, items, kind="proknow_upload", stage="export", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    tasks_db.mark_succeeded(
+        task["task_id"], "worker-1",
+        details={
+            "status": "Success", "destination": "Trial_2024-01-15_Cohort",
+            "destination_type": "proknow_collection", "submitted_by": "alice",
+        },
+    )
+
+    events = [chunk async for chunk in results_endpoints._observe_job(job_id)]
+    parsed = _parse_events(events)
+    success_event = next(e for e in parsed if e["type"] == "success")
+    assert success_event["destination"] == "Trial_2024-01-15_Cohort"
+    assert success_event["destination_type"] == "proknow_collection"
+    assert success_event["submitted_by"] == "alice"
+
+
+@pytest.mark.asyncio
 async def test_observe_job_only_emits_each_transition_once(tasks_db, job_id):
     """A state that hasn't changed since the last tick must not be re-emitted."""
     items = [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")]

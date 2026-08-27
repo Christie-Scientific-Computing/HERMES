@@ -168,12 +168,12 @@ async def single_import(body: Request):
         # scope here. redact_dict does NOT strip response's own study_uids
         # (a real StudyInstanceUID list) -- that's to_public_details' job
         # (plan step 3), which this same response should also go through
-        # once that lands. "mrn" is excluded from redaction (see
-        # redact_dict's docstring for why).
+        # once that lands. redact_dict's default `exclude` covers "mrn" --
+        # see its docstring for why.
         display_mrn = response.mrn
         return {
             'type': 'success', 'execution_time': np.round(time.time() - start, 2),
-            **pii_patterns.redact_dict(response.model_dump(), real_id=real_mrn, display_id=display_mrn, exclude=("mrn",)),
+            **pii_patterns.redact_dict(response.model_dump(), real_id=real_mrn, display_id=display_mrn),
         }
 
     except Exception as e:

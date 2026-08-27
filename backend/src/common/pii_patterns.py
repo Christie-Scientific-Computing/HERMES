@@ -129,6 +129,21 @@ SECRET_LIKE_PATTERNS = (_CONNSTRING_RE, _HOSTPORT_RE)
 # particular id, since results collapse into a set.
 _ZERO_PAD_WIDTHS = (5, 6, 7, 8, 9, 10)
 
+# Structured/operational fields that show up in a worker Response payload
+# but are never patient data: "mrn" is already the display id (an anon id
+# that happens to be 8 digits parsing as a valid calendar date would
+# otherwise get silently overwritten with the redaction placeholder instead
+# of the real display id -- the anon-id scheme is an externally-owned table
+# HERMES doesn't control the format of); "destination"/"destination_type"/
+# "submitted_by" are an Orthanc AE title, a ProKnow collection name, and a
+# username -- config values that were never patient data to begin with, but
+# a collection literally named e.g. "Trial_2024-01-15_Cohort" would
+# otherwise get mangled by the same generic pattern floor as any other
+# string. Shared by redact_dict's callers and results/endpoints.py's
+# _scrub_json so every caller stays in sync as new structural fields turn up
+# rather than each maintaining its own copy of this list.
+NON_PII_STRUCTURAL_FIELDS = ("mrn", "destination", "destination_type", "submitted_by")
+
 
 def _valid_ymd(y: str, m: str, d: str) -> bool:
     try:
@@ -310,7 +325,9 @@ def redact(text, *, real_id=None, display_id=None) -> str:
     return "".join(pieces)
 
 
-def redact_dict(details: Optional[dict], *, real_id=None, display_id=None, exclude: tuple = ()) -> dict:
+def redact_dict(
+    details: Optional[dict], *, real_id=None, display_id=None, exclude: tuple = NON_PII_STRUCTURAL_FIELDS
+) -> dict:
     """
     Apply redact() to every string value in a flat dict, leaving non-string
     values (bools, ints, lists, nested dicts) untouched.
@@ -327,16 +344,15 @@ def redact_dict(details: Optional[dict], *, real_id=None, display_id=None, exclu
 
     `exclude` names fields to pass through completely untouched -- for
     known-structural values where redact()'s generic pattern floor has
-    nothing to protect and only something to accidentally break: "mrn"
-    itself (already the display id -- an anon id that happens to be 8
-    digits parsing as a valid calendar date would otherwise get silently
-    overwritten with the redaction placeholder instead of the real display
-    id, since the anon-id scheme is an externally-owned table HERMES
-    doesn't control the format of), or "destination"/"destination_type"/
-    "submitted_by" (an Orthanc AE title, a ProKnow collection name, a
-    username -- operational config, never patient data, but a collection
-    literally named e.g. "Trial_2024-01-15_Cohort" would otherwise get
-    mangled by the date-pattern floor same as any other string).
+    nothing to protect and only something to accidentally break (see
+    NON_PII_STRUCTURAL_FIELDS above, this parameter's default). Overriding
+    it to `()` opts back into scrubbing those fields too, if a future
+    caller genuinely needs that; every caller today wants the default.
+    Defaulting to NON_PII_STRUCTURAL_FIELDS rather than `()` is deliberate:
+    three separate review rounds on this codebase found a caller that
+    forgot to pass `exclude=` explicitly and silently mangled "mrn" or
+    "destination" as a result -- safe-by-default closes that whole class,
+    rather than relying on every call site remembering.
 
     Does NOT recurse into nested dicts/lists -- every direct caller of this
     function passes a worker's raw, freshly-returned dict (a flat pydantic

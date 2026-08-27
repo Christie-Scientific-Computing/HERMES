@@ -106,15 +106,27 @@ def _scrub_json(value, real_mrn: str, display_mrn: str):
     checksum entries into one via a dict-key collision on re-parse.
     Walking structurally instead of textually never touches a key, so this
     can't happen.
+
+    A dict value whose key is in pii_patterns.NON_PII_STRUCTURAL_FIELDS
+    (destination/destination_type/submitted_by -- an Orthanc AE title, a
+    ProKnow collection name, a username) is passed through unredacted, the
+    same protection redact_dict's default `exclude` gives the flat
+    success-payload path -- this is the JSONB/events.details path (also
+    backs the live `_observe_job` observer stream every real CSV-upload
+    export job uses), and without it a collection literally named e.g.
+    "Trial_2024-01-15_Cohort" would get silently mangled by the
+    date-pattern floor purely because it looked date-shaped.
     """
     if value is None or not anon.is_configured():
         return value
 
-    def _walk(v):
+    def _walk(v, key=None):
         if isinstance(v, str):
+            if key in pii_patterns.NON_PII_STRUCTURAL_FIELDS:
+                return v
             return pii_patterns.redact(v, real_id=real_mrn, display_id=display_mrn)
         if isinstance(v, dict):
-            return {k: _walk(item) for k, item in v.items()}
+            return {k: _walk(item, key=k) for k, item in v.items()}
         if isinstance(v, list):
             return [_walk(item) for item in v]
         return v

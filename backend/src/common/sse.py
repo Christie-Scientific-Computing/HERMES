@@ -173,9 +173,9 @@ async def run_batch_job(
             # CLAUDE.md's anonymisation-boundary note) are redacted before
             # crossing the boundary via redact_dict; the add_event call
             # above already wrote the raw, full-fidelity res to StatusDB.
+            # redact_dict's default `exclude` already covers
             # destination/destination_type/submitted_by (present for export
-            # workers, absent for import ones) are excluded from redaction
-            # -- see redact_dict's docstring for why.
+            # workers, absent for import ones) -- see its docstring.
             #
             # redact_dict only ever handles free text -- it does NOT strip
             # UID-shaped fields (study_uids/series_uids/checksums), a
@@ -184,10 +184,7 @@ async def run_batch_job(
             yield format_sse({
                 "type": "success",
                 "execution_time": round(time.time() - start, 2),
-                **pii_patterns.redact_dict(
-                    res, real_id=item.real_id, display_id=item.display_id,
-                    exclude=("destination", "destination_type", "submitted_by"),
-                ),
+                **pii_patterns.redact_dict(res, real_id=item.real_id, display_id=item.display_id),
                 "mrn": item.display_id,
             })
 

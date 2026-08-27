@@ -430,6 +430,28 @@ def test_timeline_preserves_multiple_distinct_checksums_entries(client, job_id):
     assert REAL_MRN not in resp.text
 
 
+def test_timeline_preserves_date_shaped_destination_field(client, job_id):
+    """
+    destination/destination_type/submitted_by (an Orthanc AE title, a
+    ProKnow collection name, a username) are operational config, never
+    patient data -- _scrub_json must not let the generic date/UID pattern
+    floor mangle one that happens to look date-shaped, the same protection
+    redact_dict's default `exclude` gives the synchronous run_batch_job
+    path. This is the timeline endpoint's own copy of that same fix.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="success",
+        details={"destination": "Trial_2024-01-15_Cohort", "destination_type": "proknow_collection"},
+    )
+
+    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    event = resp.json()["events"][0]
+    assert event["details"]["destination"] == "Trial_2024-01-15_Cohort"
+    assert event["details"]["destination_type"] == "proknow_collection"
+
+
 def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_schema):
     """
     Plan rows have no patient-id column, so nothing gets *translated* here --

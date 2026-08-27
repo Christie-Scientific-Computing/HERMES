@@ -299,23 +299,12 @@ async def proknow_upload_patient(body: Request):
         # only handles free text. It does NOT strip response's own
         # study_uids/series_uids/checksums (real DICOM UIDs) -- that's
         # to_public_details' job (plan step 3), which this same response
-        # should also go through once that lands.
-        #
-        # "mrn" is excluded from the dict handed to redact_dict and set
-        # explicitly last: redact_dict's generic pattern floor runs over
-        # EVERY string value, including mrn itself -- an anon id happening
-        # to be 8 digits that parse as a valid calendar date (the anon-id
-        # scheme is an externally-owned table HERMES doesn't control the
-        # format of) would otherwise get silently overwritten with the
-        # redaction placeholder instead of the real display id. Same
-        # reasoning excludes destination/destination_type/submitted_by --
-        # see redact_dict's docstring.
+        # should also go through once that lands. redact_dict's default
+        # `exclude` covers mrn/destination/destination_type/submitted_by --
+        # see its docstring.
         return {
             'type': 'success', 'execution_time': np.round(time.time() - start, 2),
-            **pii_patterns.redact_dict(
-                response.model_dump(), real_id=real_mrn, display_id=display_mrn,
-                exclude=("mrn", "destination", "destination_type", "submitted_by"),
-            ),
+            **pii_patterns.redact_dict(response.model_dump(), real_id=real_mrn, display_id=display_mrn),
         }
 
     except Exception as e:
