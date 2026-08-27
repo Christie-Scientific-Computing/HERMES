@@ -49,6 +49,17 @@ class TestFindUids:
     def test_matches_at_six_segment_boundary(self):
         assert pii_patterns.find_uids("1.2.3.4.5.6") == ["1.2.3.4.5.6"]
 
+    def test_is_not_quadratic_on_adversarial_input(self):
+        # A long dot-less digit run with no valid UID shape anywhere forces
+        # the engine to retry the match at every digit position; unbounded
+        # segment-length/repetition-count quantifiers made this O(n^2)
+        # (14.6s on 40k digits before bounding).
+        import time
+
+        start = time.monotonic()
+        pii_patterns.find_uids("9" * 100_000)
+        assert time.monotonic() - start < 2.0
+
 
 class TestFindPaths:
     def test_finds_unix_absolute_path(self):
@@ -155,6 +166,16 @@ class TestFindSecrets:
     def test_does_not_match_time_of_day(self):
         assert pii_patterns.find_secrets("started at 12:30") == []
 
+    def test_hostport_is_not_quadratic_on_adversarial_input(self):
+        # A long dotted run with no port anywhere forces the engine to
+        # retry at every label boundary; unbounded label length/count
+        # quantifiers made this O(n^2) (5.8s on 16k chars before bounding).
+        import time
+
+        start = time.monotonic()
+        pii_patterns.find_secrets("a." * 100_000)
+        assert time.monotonic() - start < 2.0
+
 
 class TestRealIdVariants:
     def test_includes_exact_string(self):
@@ -196,17 +217,42 @@ class TestRedact:
     def test_redacts_date_with_no_real_id_in_scope(self):
         result = pii_patterns.redact("scan performed 20260115")
         assert "20260115" not in result
-        assert "[redacted-date]" in result
+        assert "[redacted]" in result
 
     def test_redacts_uid_with_no_real_id_in_scope(self):
         result = pii_patterns.redact("uid 1.2.840.10008.5.1.4.1.1.481.3 failed")
         assert "1.2.840.10008.5.1.4.1.1.481.3" not in result
-        assert "[redacted-uid]" in result
+        assert "[redacted]" in result
 
     def test_redacts_path_with_no_real_id_in_scope(self):
         result = pii_patterns.redact("Could not read CSV: ./tmp/job1_patients.csv")
         assert "./tmp/job1_patients.csv" not in result
-        assert "[redacted-path]" in result
+        assert "[redacted]" in result
+
+    def test_cross_category_overlap_does_not_leak(self):
+        # A UID immediately followed by an MRN inside a path used to leak
+        # the MRN: redacting the UID first (via a sequential category pass)
+        # left "_MRN500123_" un-redacted because the UID's placeholder broke
+        # up what would otherwise have been one longer path match on the
+        # original text. Spans from every category must be computed against
+        # the SAME pristine text and merged together, not chained.
+        result = pii_patterns.redact(
+            "/tmp/scan_1.2.840.10008.5.1.4.1.1.481.3_MRN500123_results.csv"
+        )
+        assert "500123" not in result
+
+    def test_bare_digits_adjacent_to_a_uid_with_no_path_or_real_id_are_not_caught(self):
+        # NOT a regression -- documents a real, accepted boundary of the
+        # generic floor. Without a path/date/secret shape around it and
+        # with no real_id passed, a bare digit run has no structural
+        # signature distinguishing it from any other number (a count, a
+        # job id, ...): redact()'s generic patterns can only catch
+        # dates/UIDs/paths/secrets, never an arbitrary embedded id in free
+        # prose. A caller who knows the specific real id in play must pass
+        # real_id=/display_id= for that precise substitution -- this is the
+        # same documented blind spot the plan names for names/prose dates.
+        result = pii_patterns.redact("error for 1.2.840.10008.5.1.4.1.1.481.3_MRN500123 during export")
+        assert "500123" in result  # unredacted, as expected, not a leak fix target
 
     def test_redacts_connection_string(self):
         result = pii_patterns.redact("db error: postgres://hermes:hunter2@db.internal:5432/hermesdb")

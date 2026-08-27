@@ -31,8 +31,16 @@ from datetime import date as _date
 # 6+ dot-separated numeric segments -- long enough that a short version
 # string (e.g. plans.pinnacle_version = "16.2") never false-positives, but
 # still catches any real DICOM UID shape (SOPInstanceUID, StudyInstanceUID,
-# etc. are always much longer than that in practice).
-UID_PATTERN = re.compile(r"\d+(?:\.\d+){5,}")
+# etc. are always much longer than that in practice). Segment length and
+# repetition count are bounded ({1,20} digits/segment, up to 50 segments --
+# a real DICOM UID is nowhere near either limit, the DICOM standard itself
+# caps a UID at 64 chars total) for the same time-complexity reason
+# _BARE_RELATIVE_PATH_RE below is bounded: an unbounded `\d+(?:\.\d+){5,}`
+# against a long all-digit string with no dots anywhere forces the engine
+# to retry a failing match at every digit position, going O(n^2) --
+# confirmed via a 40k-digit adversarial input (14.6s unbounded, <0.05s
+# bounded, identical matches on every realistic UID shape).
+UID_PATTERN = re.compile(r"\d{1,20}(?:\.\d{1,20}){5,50}")
 
 # DICOM DA (YYYYMMDD), ISO (YYYY-MM-DD), and slash-separated forms. Matched
 # structurally, then validated as an actual calendar date (see _valid_ymd)
@@ -64,18 +72,20 @@ _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\(?:[\w.\-]+\\)*[\w.\-]+")
 # over-redaction as the safe failure mode and under-redaction as the unsafe
 # one -- see test_bare_relative_pattern_over_redacts_ordinary_prose_by_design.
 #
-# Every quantifier here is bounded ({1,120} per segment, {1,20} segments) --
-# NOT for correctness (an unbounded `+` would match the same realistic
-# paths) but for time complexity: this is meant to run on arbitrary free
-# text, including (per later steps of this plan) a global exception handler
-# fed attacker-influenced strings, and a string with no valid extension
+# Every quantifier here is bounded ({1,255} per segment -- 255 is the
+# actual max filename length on most filesystems -- {1,32} segments) -- NOT
+# for correctness (an unbounded `+` would match the same realistic paths)
+# but for time complexity: this is meant to run on arbitrary free text,
+# including (per later steps of this plan) a global exception handler fed
+# attacker-influenced strings, and a string with no valid extension
 # anywhere forces the engine to retry the match at every "\b" position with
 # no early exit. Unbounded segment/repetition counts made that O(n^2) --
 # confirmed via a 100k-char adversarial "a/a/a/.../a" input going from
-# several seconds to under 0.1s once bounded. A real path is never anywhere
-# near 120 chars per segment or 20 directories deep, so this loses no
-# realistic match.
-_BARE_RELATIVE_PATH_RE = re.compile(r"\b[\w\-]{1,120}(?:/[\w\-]{1,120}){1,20}\.[A-Za-z][A-Za-z0-9]{0,7}\b")
+# several seconds to under 0.15s once bounded. A single path segment or
+# filename over 255 chars, or a path over 32 directories deep, is an
+# accepted residual miss -- no realistic upload/tmp-path shape in this
+# codebase gets anywhere close to either bound.
+_BARE_RELATIVE_PATH_RE = re.compile(r"\b[\w\-]{1,255}(?:/[\w\-]{1,255}){1,32}\.[A-Za-z][A-Za-z0-9]{0,7}\b")
 # A user-uploaded filename can contain a space (e.g. "patient list.csv"),
 # which the character-class-based patterns above can't span -- but Python's
 # own OSError/FileNotFoundError repr always quotes the path
@@ -101,10 +111,14 @@ PATH_PATTERNS = (_UNIX_PATH_RE, _WINDOWS_PATH_RE, _BARE_RELATIVE_PATH_RE, _QUOTE
 # risk), cheap to add given the same mechanism. Host:port is deliberately
 # restricted to a dotted hostname, an IPv4 address, or "localhost" -- not a
 # bare `\w+:\d+`, which would false-positive on plenty of ordinary text
-# (e.g. a ratio or a time-of-day-shaped string).
+# (e.g. a ratio or a time-of-day-shaped string). The dotted-hostname
+# alternative's label length ({1,63}, the actual DNS label limit) and label
+# count ({1,10}) are bounded for the same O(n^2)-on-a-colon-less-input
+# reason UID_PATTERN above is -- confirmed via a 16k-char adversarial input
+# (5.9s unbounded, <0.02s bounded).
 _CONNSTRING_RE = re.compile(r"\b\w+://[^\s@/]+:[^\s@/]+@\S+")
 _HOSTPORT_RE = re.compile(
-    r"\b(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z0-9\-]+|localhost):\d{2,5}\b"
+    r"\b(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9\-]{1,63}\.){1,10}[a-zA-Z0-9\-]{1,63}|localhost):\d{2,5}\b"
 )
 SECRET_LIKE_PATTERNS = (_CONNSTRING_RE, _HOSTPORT_RE)
 
@@ -129,74 +143,82 @@ def _valid_ymd(y: str, m: str, d: str) -> bool:
         return False
 
 
-def find_dates(text: str) -> list[str]:
-    """Every substring of `text` that looks like a real, unshifted calendar
-    date in DICOM DA, ISO, or slash-separated form."""
-    found = []
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """
+    Collapse a list of (possibly overlapping, possibly duplicate, possibly
+    out-of-order) match spans into maximal, non-overlapping spans covering
+    the same characters.
+
+    Shared by every find_*() below and by redact() -- multiple patterns
+    (even within one category, e.g. _CONNSTRING_RE and _HOSTPORT_RE both
+    matching inside "postgres://u:p@db.internal:5432/d") routinely produce
+    overlapping matches. Deduplicating by comparing matched TEXT (an
+    earlier version of this) can incorrectly drop a genuinely distinct
+    later occurrence whose text happens to equal an earlier match; keeping
+    only fully-CONTAINED spans (a later, still-earlier version) misses a
+    span that partially -- not fully -- overlaps another, leaving its
+    non-overlapping tail unaccounted for. Merging overlapping/touching
+    spans into their union avoids both: every character any pattern matched
+    ends up inside exactly one returned span, so nothing a pattern found is
+    ever silently dropped.
+    """
+    if not spans:
+        return []
+    ordered = sorted(spans)
+    merged: list[list[int]] = [list(ordered[0])]
+    for start, end in ordered[1:]:
+        last = merged[-1]
+        if start <= last[1]:  # overlapping or directly touching
+            last[1] = max(last[1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def _date_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
     for regex in (_DA_RE, _ISO_RE):
         for m in regex.finditer(text):
             if _valid_ymd(*m.groups()):
-                found.append(m.group(0))
+                spans.append((m.start(), m.end()))
     for m in _SLASH_RE.finditer(text):
         a, b, c = m.groups()
         # Ambiguous group order (YYYY/MM/DD vs DD/MM/YYYY vs MM/DD/YYYY all
         # share this shape) -- accept whichever placement of the 4-digit
         # group produces a valid date.
         if len(a) == 4 and _valid_ymd(a, b, c):
-            found.append(m.group(0))
+            spans.append((m.start(), m.end()))
         elif len(c) == 4 and (_valid_ymd(c, b, a) or _valid_ymd(c, a, b)):
-            found.append(m.group(0))
-    return found
+            spans.append((m.start(), m.end()))
+    return spans
+
+
+def find_dates(text: str) -> list[str]:
+    """Every substring of `text` that looks like a real, unshifted calendar
+    date in DICOM DA, ISO, or slash-separated form."""
+    return [text[start:end] for start, end in _merge_spans(_date_spans(text))]
 
 
 def find_uids(text: str) -> list[str]:
-    return [m.group(0) for m in UID_PATTERN.finditer(text)]
+    spans = [(m.start(), m.end()) for m in UID_PATTERN.finditer(text)]
+    return [text[start:end] for start, end in _merge_spans(spans)]
 
 
 def find_paths(text: str) -> list[str]:
-    """
-    Every substring of `text` that looks like a filesystem path, across all
-    of PATH_PATTERNS.
-
-    Different patterns routinely fire on overlapping text (a rooted match
-    and the bare-relative pattern both matching the same tail end; a quoted
-    match wholly containing whatever structural pattern matched inside the
-    quotes) -- including PARTIAL overlap, not just one span fully containing
-    another (e.g. a rooted match ending mid-segment and a bare-relative
-    match starting a few characters earlier, both ending at different
-    points). redact() replaces each returned string via a single global
-    `str.replace`, so any character covered by one match but excluded from
-    every OTHER returned match is what actually gets redacted -- a
-    contained-spans-only dedup (an earlier version of this function) drops
-    the shorter span outright when neither fully contains the other, and
-    leaves the non-overlapping tail of the dropped span un-redacted. Merging
-    all overlapping/touching spans into their union closes that: every
-    character any pattern matched is covered by exactly one returned
-    (possibly larger) span, so nothing a pattern found is ever silently
-    dropped.
-    """
+    """Every substring of `text` that looks like a filesystem path, across
+    all of PATH_PATTERNS (see _merge_spans for why overlapping per-pattern
+    hits are merged rather than returned raw)."""
     spans: list[tuple[int, int]] = []
     for pattern in PATH_PATTERNS:
         spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
-    if not spans:
-        return []
-
-    spans.sort()
-    merged: list[list[int]] = [list(spans[0])]
-    for start, end in spans[1:]:
-        last = merged[-1]
-        if start <= last[1]:  # overlapping or directly touching
-            last[1] = max(last[1], end)
-        else:
-            merged.append([start, end])
-    return [text[start:end] for start, end in merged]
+    return [text[start:end] for start, end in _merge_spans(spans)]
 
 
 def find_secrets(text: str) -> list[str]:
-    found = []
+    spans: list[tuple[int, int]] = []
     for pattern in SECRET_LIKE_PATTERNS:
-        found.extend(m.group(0) for m in pattern.finditer(text))
-    return found
+        spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
+    return [text[start:end] for start, end in _merge_spans(spans)]
 
 
 def real_id_variants(real_id) -> set[str]:
@@ -222,6 +244,9 @@ def real_id_variants(real_id) -> set[str]:
     return variants
 
 
+_GENERIC_REDACTION_PLACEHOLDER = "[redacted]"
+
+
 def redact(text, *, real_id=None, display_id=None) -> str:
     """
     Generalizes results/endpoints.py's _scrub: precise real-id -> display-id
@@ -230,6 +255,26 @@ def redact(text, *, real_id=None, display_id=None) -> str:
     pattern-based redaction (dates/UIDs/paths/secrets) as a floor applied
     every time, even with no specific real id in scope -- what a
     request-agnostic call site (the global exception handler) uses.
+
+    The generic floor collects spans from EVERY category (secrets, UIDs,
+    dates, paths) over the same pristine text and merges them in one pass
+    (see _merge_spans) before doing a single left-to-right rebuild -- it
+    does NOT run each category sequentially via find_secrets() then
+    find_uids() then ... each doing its own `str.replace` on the previous
+    category's already-redacted output. That sequential approach had a real
+    cross-category leak: a category's placeholder (e.g. "[redacted-uid]")
+    uses bracket characters outside every other pattern's character class,
+    so redacting a UID first could truncate what would otherwise have been
+    a longer, fully-covering path/secret match on the ORIGINAL text,
+    silently leaking the rest of it (repro this was found from:
+    redact("/tmp/scan_1.2.840.10008.5.1.4.1.1.481.3_MRN500123_results.csv")
+    used to leave "_MRN500123_" unredacted). Computing every category's
+    spans against the same unmutated text and merging them all together
+    once closes that class of bug the same way find_paths() closes it
+    within the path category alone. The single merged placeholder means the
+    output no longer distinguishes which category matched -- an accepted
+    trade for correctness; nothing downstream parses redact()'s output by
+    placeholder text.
 
     No-op on an empty/falsy input, matching _scrub's existing contract.
     """
@@ -242,17 +287,23 @@ def redact(text, *, real_id=None, display_id=None) -> str:
             if variant:
                 result = result.replace(variant, str(display_id))
 
-    # Order matters: secrets/UIDs are redacted before dates so an embedded
-    # connection string or long numeric UID segment isn't left with stray
-    # 8-digit runs that then false-positive as a date once its surrounding
-    # structure (the "://", the extra "."-segments) has already been
-    # replaced by a placeholder.
-    for secret in find_secrets(result):
-        result = result.replace(secret, "[redacted]")
-    for uid in find_uids(result):
-        result = result.replace(uid, "[redacted-uid]")
-    for date_str in find_dates(result):
-        result = result.replace(date_str, "[redacted-date]")
-    for path in find_paths(result):
-        result = result.replace(path, "[redacted-path]")
-    return result
+    spans: list[tuple[int, int]] = []
+    for pattern in SECRET_LIKE_PATTERNS:
+        spans.extend((m.start(), m.end()) for m in pattern.finditer(result))
+    spans.extend((m.start(), m.end()) for m in UID_PATTERN.finditer(result))
+    spans.extend(_date_spans(result))
+    for pattern in PATH_PATTERNS:
+        spans.extend((m.start(), m.end()) for m in pattern.finditer(result))
+
+    merged = _merge_spans(spans)
+    if not merged:
+        return result
+
+    pieces = []
+    cursor = 0
+    for start, end in merged:
+        pieces.append(result[cursor:start])
+        pieces.append(_GENERIC_REDACTION_PLACEHOLDER)
+        cursor = end
+    pieces.append(result[cursor:])
+    return "".join(pieces)
