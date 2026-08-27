@@ -27,6 +27,7 @@ one, by field name rather than by re-deriving the perturbation here.
 """
 import re
 from datetime import date as _date
+from typing import Optional
 
 # 6+ dot-separated numeric segments -- long enough that a short version
 # string (e.g. plans.pinnacle_version = "16.2") never false-positives, but
@@ -127,6 +128,21 @@ SECRET_LIKE_PATTERNS = (_CONNSTRING_RE, _HOSTPORT_RE)
 # with headroom either side; harmless if a given width doesn't apply to a
 # particular id, since results collapse into a set.
 _ZERO_PAD_WIDTHS = (5, 6, 7, 8, 9, 10)
+
+# Structured/operational fields that show up in a worker Response payload
+# but are never patient data: "mrn" is already the display id (an anon id
+# that happens to be 8 digits parsing as a valid calendar date would
+# otherwise get silently overwritten with the redaction placeholder instead
+# of the real display id -- the anon-id scheme is an externally-owned table
+# HERMES doesn't control the format of); "destination"/"destination_type"/
+# "submitted_by" are an Orthanc AE title, a ProKnow collection name, and a
+# username -- config values that were never patient data to begin with, but
+# a collection literally named e.g. "Trial_2024-01-15_Cohort" would
+# otherwise get mangled by the same generic pattern floor as any other
+# string. Shared by redact_dict's callers and results/endpoints.py's
+# _scrub_json so every caller stays in sync as new structural fields turn up
+# rather than each maintaining its own copy of this list.
+NON_PII_STRUCTURAL_FIELDS = ("mrn", "destination", "destination_type", "submitted_by")
 
 
 def _valid_ymd(y: str, m: str, d: str) -> bool:
@@ -307,3 +323,56 @@ def redact(text, *, real_id=None, display_id=None) -> str:
         cursor = end
     pieces.append(result[cursor:])
     return "".join(pieces)
+
+
+def redact_dict(
+    details: Optional[dict], *, real_id=None, display_id=None, exclude: tuple = NON_PII_STRUCTURAL_FIELDS
+) -> dict:
+    """
+    Apply redact() to every string value in a flat dict, leaving non-string
+    values (bools, ints, lists, nested dicts) untouched.
+
+    Built for outbound success/error payloads that mix known-safe
+    structured fields (status, in_mosaiq, study_count, ...) with
+    worker-generated free text that routinely quotes a real id --
+    mosaiq_reason/pinnacle_reason/proknow_reason (Importer.find_patient's
+    per-source diagnostic strings, CLAUDE.md's anonymisation-boundary
+    section calls this out explicitly) are the concrete example, but
+    applying redact() uniformly across every string value, rather than an
+    explicit per-field allow-list, means a field nobody thought to name
+    specifically still gets the same protection.
+
+    `exclude` names fields to pass through completely untouched -- for
+    known-structural values where redact()'s generic pattern floor has
+    nothing to protect and only something to accidentally break (see
+    NON_PII_STRUCTURAL_FIELDS above, this parameter's default). Overriding
+    it to `()` opts back into scrubbing those fields too, if a future
+    caller genuinely needs that; every caller today wants the default.
+    Defaulting to NON_PII_STRUCTURAL_FIELDS rather than `()` is deliberate:
+    three separate review rounds on this codebase found a caller that
+    forgot to pass `exclude=` explicitly and silently mangled "mrn" or
+    "destination" as a result -- safe-by-default closes that whole class,
+    rather than relying on every call site remembering.
+
+    Does NOT recurse into nested dicts/lists -- every direct caller of this
+    function passes a worker's raw, freshly-returned dict (a flat pydantic
+    Response.model_dump()), not a JSONB blob read back from the DB;
+    results/endpoints.py's _scrub_json already handles that separate,
+    genuinely-nested case.
+
+    Deliberately does NOT strip UID-shaped list/dict fields either --
+    export/import Response.study_uids (a list[str] of real StudyInstanceUIDs)
+    and Response.checksums (a dict[SOPInstanceUID, hash]) are real DICOM UID
+    leaks in their own right, but that reshape is a separate, complementary
+    fix (backend/src/common/sse.py's to_public_details, plan step 3 --
+    strips study_uids/series_uids entirely and re-keys checksums to a plain
+    list[str]) applied at the SAME call sites this function is. Both must
+    run for a success payload to be fully clean; this function only ever
+    owns the free-text-real-id-in-prose half of that.
+    """
+    if not details:
+        return details or {}
+    return {
+        k: (v if (k in exclude or not isinstance(v, str)) else redact(v, real_id=real_id, display_id=display_id))
+        for k, v in details.items()
+    }

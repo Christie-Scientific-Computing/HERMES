@@ -8,7 +8,6 @@ id the caller submitted and are resolved anon -> real before querying
 StatusDB, which stores the real id internally.
 """
 import asyncio
-import json
 import os
 import logging
 from typing import AsyncIterator, Optional
@@ -20,7 +19,8 @@ from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 from backend.src.plans.db_client import PlansDB
 from backend.src.identity import anon
-from backend.src.common.sse import format_sse, to_public_details
+from backend.src.common.sse import format_sse
+from backend.src.common import pii_patterns
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/results', tags=['results'])
@@ -86,7 +86,12 @@ def _anonymize_events(events: list[dict]) -> list[dict]:
 
 def _scrub(text: Optional[str], real_mrn: str, display_mrn: str) -> Optional[str]:
     """
-    Replace a real MRN embedded in free text with its anon id.
+    Replace a real MRN embedded in free text with its anon id, via
+    pii_patterns.redact() rather than a bare substring replace -- catches
+    format variants (zero-padded/float-cast) a plain `.replace()` would
+    miss, plus the generic date/UID/path/secret pattern floor for anything
+    else that looks identifiable even when it isn't the specific MRN this
+    call happens to know about.
 
     Unlike a structured `mrn` column there's nothing to translate here -- the
     real id is just spliced into prose: Pinnacle paths are built from the MRN,
@@ -94,25 +99,65 @@ def _scrub(text: Optional[str], real_mrn: str, display_mrn: str) -> Optional[str
     be the one place a real id crosses the API boundary, on precisely the page
     built for reading error text.
 
-    No-op when anonymisation isn't configured (real == display anyway).
+    No-op when anonymisation isn't configured (real == display anyway, and
+    this protection only matters when there's a real external-exposure risk
+    to guard against -- identity/anon.py's own module docstring: ANON_DB_*
+    is set specifically when the backend is DMZ-reachable).
     """
     if not text or not anon.is_configured():
         return text
-    return text.replace(str(real_mrn), str(display_mrn))
+    return pii_patterns.redact(text, real_id=real_mrn, display_id=display_mrn)
 
 
 def _scrub_json(value, real_mrn: str, display_mrn: str):
     """
-    Same substitution as _scrub, applied to a JSONB value's string content.
+    Same substitution as _scrub, applied recursively to every string LEAF
+    of a JSON-shaped value (dict/list/str/other), so the id (and the
+    generic pattern floor) gets caught wherever it's nested without having
+    to know the shape a worker chose to return.
 
-    Round-tripping through JSON catches the id wherever it's nested, without
-    having to know the shape a worker chose to return.
+    Walks values only, never keys -- an earlier implementation of this
+    function serialized the whole value to a JSON string, ran a substring
+    replace, and re-parsed it, which also touched dict KEYS. `checksums`
+    (dict[SOPInstanceUID, hash]) has UID-shaped keys by construction:
+    pii_patterns.redact()'s generic UID-pattern floor would turn every key
+    into the same placeholder string, silently collapsing multiple
+    checksum entries into one via a dict-key collision on re-parse.
+    Walking structurally instead of textually never touches a key, so this
+    can't happen.
+
+    A dict value whose key is in pii_patterns.NON_PII_STRUCTURAL_FIELDS
+    (destination/destination_type/submitted_by -- an Orthanc AE title, a
+    ProKnow collection name, a username) is passed through unredacted, the
+    same protection redact_dict's default `exclude` gives the flat
+    success-payload path -- this is the JSONB/events.details path (also
+    backs the live `_observe_job` observer stream every real CSV-upload
+    export job uses), and without it a collection literally named e.g.
+    "Trial_2024-01-15_Cohort" would get silently mangled by the
+    date-pattern floor purely because it looked date-shaped.
     """
     if value is None or not anon.is_configured():
         return value
+
+    def _walk(v, key=None):
+        if isinstance(v, str):
+            if key in pii_patterns.NON_PII_STRUCTURAL_FIELDS:
+                return v
+            return pii_patterns.redact(v, real_id=real_mrn, display_id=display_mrn)
+        if isinstance(v, dict):
+            return {k: _walk(item, key=k) for k, item in v.items()}
+        if isinstance(v, list):
+            # Propagate the parent key rather than dropping it: every
+            # current Response field is typed str | None, never a list of
+            # scalars, so this is dormant today -- but a protected field
+            # (e.g. "destination") shaped as a list of strings would
+            # otherwise lose its exclusion the moment it's inside a list.
+            return [_walk(item, key=key) for item in v]
+        return v
+
     try:
-        return json.loads(json.dumps(value).replace(str(real_mrn), str(display_mrn)))
-    except (TypeError, ValueError):
+        return _walk(value)
+    except Exception:
         logger.warning("Could not scrub details payload; dropping it rather than risk a leak")
         return None
 
@@ -508,16 +553,23 @@ async def patient_plans(mrn: str):
         return {"mrn": mrn, "plans": [], "available": False}
 
     # path/comment/error_message are free text built from, or quoting, the real
-    # MRN -- scrub all three, not just the obvious one.
-    scrubbed = [
-        {
+    # MRN -- scrub all three, not just the obvious one. plan_date is shifted
+    # (not redacted outright) the same way studies/endpoints.py's
+    # study_date/series_date are -- see anon.shift_date's docstring.
+    # PlansDB returns plan_date as a psycopg2-native datetime.date (a
+    # Postgres DATE column), not a string, so it's converted to ISO form
+    # first -- shift_date's format detection only accepts a string.
+    def _to_plan(plan: dict) -> dict:
+        raw_plan_date = plan.get("plan_date")
+        return {
             **plan,
             "path": _scrub(plan.get("path"), real_mrn, mrn),
             "comment": _scrub(plan.get("comment"), real_mrn, mrn),
             "error_message": _scrub(plan.get("error_message"), real_mrn, mrn),
+            "plan_date": anon.shift_date(real_mrn, raw_plan_date.isoformat() if raw_plan_date else None),
         }
-        for plan in plans
-    ]
+
+    scrubbed = [_to_plan(plan) for plan in plans]
     return {"mrn": mrn, "plans": scrubbed, "available": True}
 
 

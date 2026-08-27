@@ -13,6 +13,7 @@ os.environ["ANON_DB_NAME"] = "anon_test"
 os.environ["ANON_DB_USER"] = "postgres"
 os.environ["ANON_DB_PASS"] = "test"
 
+import psycopg2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -24,6 +25,43 @@ from backend.src.results.endpoints import router as results_router, status_db
 
 REAL_MRN = "500123"
 ANON_MRN = "1001"
+
+
+def _anon_conn():
+    return psycopg2.connect(host="localhost", port=55433, dbname="anon_test", user="postgres", password="test")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_date_perturbation_column():
+    conn = _anon_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("ALTER TABLE key_value ADD COLUMN IF NOT EXISTS date_perturbation INT")
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def perturbation():
+    conn = _anon_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE key_value SET date_perturbation = %s WHERE key_value = %s AND key_type_id = 1",
+                (10, int(REAL_MRN)),
+            )
+    finally:
+        conn.close()
+    yield 10
+    conn = _anon_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE key_value SET date_perturbation = NULL WHERE key_value = %s AND key_type_id = 1",
+                (int(REAL_MRN),),
+            )
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -161,9 +199,12 @@ def test_job_patients_summary_scrubs_the_real_mrn_out_of_reason_fields(client, j
     patient = resp.json()["patients"][0]
 
     assert patient["mosaiq_reason"] == f"Could not query AE_ONE: connection refused for patient {ANON_MRN}"
-    assert patient["pinnacle_reason"] == (
-        f"Could not reconstruct DICOM: no RTSTRUCT for {ANON_MRN} at /pinnacle/{ANON_MRN}/Plan_1"
-    )
+    # The trailing filesystem path is ALSO redacted now, on top of the real
+    # MRN it contained -- _scrub goes through pii_patterns.redact(), whose
+    # generic pattern floor forbids a server filesystem path from crossing
+    # this boundary at all (docs/pii-boundary-safety.md §0), not just the
+    # real id embedded in it.
+    assert patient["pinnacle_reason"] == f"Could not reconstruct DICOM: no RTSTRUCT for {ANON_MRN} at [redacted]"
     assert patient["proknow_reason"] == "Patient not found on ProKnow"
 
     # The load-bearing assertion: the real MRN must not appear ANYWHERE in
@@ -353,7 +394,82 @@ def test_timeline_scrubs_the_real_mrn_out_of_error_message_and_details(client, j
     assert event["error_message"] == f"no studies found for {ANON_MRN}"
     assert event["details"]["searched"] == [f"mosaiq:{ANON_MRN}"]
     assert event["details"]["nested"]["id"] == ANON_MRN
+
+
+def test_timeline_preserves_multiple_distinct_checksums_entries(client, job_id):
+    """
+    _scrub_json walks string LEAVES only, never dict keys. This matters
+    because `checksums` (dict[SOPInstanceUID, hash]) has UID-shaped keys by
+    construction: had _scrub_json instead serialized `details` to a JSON
+    string, run it through pii_patterns.redact() (whose generic UID-pattern
+    floor would turn every UID-shaped key into the same placeholder
+    string), and re-parsed the result, multiple checksum entries would
+    silently collapse into one via a dict-key collision on re-parse -- a
+    real risk considered and rejected while choosing this implementation,
+    not something the shipped `main` version (a plain real-MRN substring
+    replace with no pattern floor) ever exhibited. This test guards the
+    structural-walk design directly: two genuinely distinct SOPInstanceUIDs
+    here must both survive.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="success",
+        details={
+            "checksums": {
+                "1.2.840.10008.5.1.4.1.1.481.1": "aaa111",
+                "1.2.840.10008.5.1.4.1.1.481.2": "bbb222",
+            },
+        },
+    )
+
+    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    event = resp.json()["events"][0]
+    assert len(event["details"]["checksums"]) == 2
+    assert set(event["details"]["checksums"].values()) == {"aaa111", "bbb222"}
     assert REAL_MRN not in resp.text
+
+
+def test_timeline_preserves_date_shaped_destination_field(client, job_id):
+    """
+    destination/destination_type/submitted_by (an Orthanc AE title, a
+    ProKnow collection name, a username) are operational config, never
+    patient data -- _scrub_json must not let the generic date/UID pattern
+    floor mangle one that happens to look date-shaped, the same protection
+    redact_dict's default `exclude` gives the synchronous run_batch_job
+    path. This is the timeline endpoint's own copy of that same fix.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="success",
+        details={"destination": "Trial_2024-01-15_Cohort", "destination_type": "proknow_collection"},
+    )
+
+    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    event = resp.json()["events"][0]
+    assert event["details"]["destination"] == "Trial_2024-01-15_Cohort"
+    assert event["details"]["destination_type"] == "proknow_collection"
+
+
+def test_timeline_preserves_date_shaped_destination_nested_in_a_list(client, job_id):
+    """
+    _scrub_json's recursive walk must propagate the parent key into list
+    items, not just dict items -- otherwise a protected field shaped as a
+    list of strings would lose its exclusion the moment it's inside a
+    list. No current Response field is actually typed this way, but the
+    walk shouldn't rely on that.
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="export", event_type="success",
+        details={"destination": ["Trial_2024-01-15_Cohort", "Other_2024-02-01_Cohort"]},
+    )
+
+    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
+    assert resp.status_code == 200
+    event = resp.json()["events"][0]
+    assert event["details"]["destination"] == ["Trial_2024-01-15_Cohort", "Other_2024-02-01_Cohort"]
 
 
 def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_schema):
@@ -362,6 +478,13 @@ def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_sc
     but `path` is built from the MRN and `comment`/`error_message` quote it.
     Those three free-text fields are the only way a real id could cross this
     boundary, on precisely the page built for reading error text.
+
+    `path` is a genuine server filesystem path -- pii_patterns.redact()'s
+    generic pattern floor (routed through here via _scrub) forbids that from
+    crossing the boundary at all, not just the real id it happened to
+    contain (docs/pii-boundary-safety.md §0 names "server filesystem paths"
+    alongside real MRNs/dates/UIDs as forbidden) -- so the whole field comes
+    back as the redaction placeholder, not a real-id-for-anon-id swap.
     """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -387,11 +510,46 @@ def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_sc
 
     assert body["available"] is True
     plan = body["plans"][0]
-    assert plan["path"] == f"/pinnacle/patients/{ANON_MRN}/Plan_1"
+    assert plan["path"] == "[redacted]"  # a real path, forbidden regardless of the id inside it
     assert plan["comment"] == f"re-run for {ANON_MRN}"
     assert plan["error_message"] == f"RTSTRUCT missing for patient {ANON_MRN}"
     assert plan["plan_name"] == "Prostate"  # untouched
     assert REAL_MRN not in resp.text
+
+
+def test_plans_shifts_plan_date(client, plans_schema, perturbation):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {PINNACLE_SCHEMA}.plans
+                (mrn, path, plan_id, plan_name, plan_date, status)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (REAL_MRN, "dev-seed/plan-1", 1, "Prostate", "2026-01-01", "complete"),
+        )
+
+    resp = client.get(f"/results/patient/{ANON_MRN}/plans")
+    assert resp.status_code == 200
+    plan = resp.json()["plans"][0]
+    assert plan["plan_date"] == "2026-01-11"  # 2026-01-01 + 10 days
+    assert "2026-01-01" not in resp.text  # the raw date never appears
+
+
+def test_plans_null_plan_date_stays_null(client, plans_schema, perturbation):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {PINNACLE_SCHEMA}.plans
+                (mrn, path, plan_id, plan_name, plan_date, status)
+            VALUES (%s, %s, %s, %s, NULL, %s)
+            """,
+            (REAL_MRN, "dev-seed/plan-2", 2, "Undated", "complete"),
+        )
+
+    resp = client.get(f"/results/patient/{ANON_MRN}/plans")
+    assert resp.status_code == 200
+    plan = resp.json()["plans"][0]
+    assert plan["plan_date"] is None
 
 
 def test_plans_unavailable_when_pinnacle_schema_absent(client):

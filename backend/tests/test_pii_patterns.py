@@ -275,3 +275,93 @@ class TestRedact:
         assert "1.2.840.10008.5.1.4.1.1.481.3" not in result
         assert "u:p@" not in result
         assert "1001" in result
+
+
+class TestRedactDict:
+    def test_redacts_string_values_only(self):
+        result = pii_patterns.redact_dict(
+            {"mosaiq_reason": "failed for 500123", "in_mosaiq": False, "study_count": 2},
+            real_id="500123", display_id="1001",
+        )
+        assert result == {"mosaiq_reason": "failed for 1001", "in_mosaiq": False, "study_count": 2}
+
+    def test_does_not_recurse_into_nested_structures(self):
+        # By design -- every direct caller passes a flat Response.model_dump(),
+        # not a JSONB blob; results/endpoints.py's _scrub_json handles the
+        # genuinely-nested case separately.
+        result = pii_patterns.redact_dict(
+            {"nested": {"id": "500123"}}, real_id="500123", display_id="1001",
+        )
+        assert result == {"nested": {"id": "500123"}}
+
+    def test_none_input_returns_empty_dict(self):
+        assert pii_patterns.redact_dict(None) == {}
+
+    def test_empty_dict_returns_empty_dict(self):
+        assert pii_patterns.redact_dict({}) == {}
+
+    def test_no_real_id_still_applies_generic_floor(self):
+        result = pii_patterns.redact_dict({"note": "scanned 20260115"})
+        assert "20260115" not in result["note"]
+
+    def test_does_not_mutate_input(self):
+        original = {"reason": "failed for 500123"}
+        pii_patterns.redact_dict(original, real_id="500123", display_id="1001")
+        assert original == {"reason": "failed for 500123"}
+
+    def test_does_not_strip_uid_list_or_checksums_dict_by_design(self):
+        # Documents a deliberate boundary, not a gap in THIS function:
+        # study_uids (list[str] of real StudyInstanceUIDs) and checksums
+        # (dict[SOPInstanceUID, hash]) are real UID leaks, but stripping
+        # them is common/sse.py's to_public_details' job (plan step 3), a
+        # separate, complementary transformation applied at the same call
+        # sites -- redact_dict only ever owns the free-text-real-id-in-prose
+        # half. A caller must run both for a fully clean payload.
+        result = pii_patterns.redact_dict({
+            "study_uids": ["1.2.840.study.1"],
+            "checksums": {"1.2.840.sop.1": "abc123"},
+        })
+        assert result["study_uids"] == ["1.2.840.study.1"]  # untouched here
+        assert result["checksums"] == {"1.2.840.sop.1": "abc123"}  # untouched here
+
+    def test_exclude_protects_a_date_shaped_mrn_from_the_generic_floor(self):
+        # A real bug this guards against: without exclude=("mrn",), an anon
+        # id that happens to be 8 digits parsing as a valid calendar date
+        # (the anon-id scheme is an externally-owned table HERMES doesn't
+        # control the format of) got silently overwritten with the
+        # redaction placeholder instead of the real display id.
+        result = pii_patterns.redact_dict(
+            {"mrn": "20260115", "status": "success"},
+            real_id="500123", display_id="20260115", exclude=("mrn",),
+        )
+        assert result["mrn"] == "20260115"
+
+    def test_exclude_protects_a_date_shaped_collection_name(self):
+        result = pii_patterns.redact_dict(
+            {"destination": "Trial_2024-01-15_Cohort", "status": "ok"},
+            exclude=("destination",),
+        )
+        assert result["destination"] == "Trial_2024-01-15_Cohort"
+
+    def test_without_exclude_a_date_shaped_field_is_still_mangled(self):
+        # Confirms the exclude tests above are actually exercising the
+        # protection, not just describing a non-issue -- exclude=() opts
+        # back into redact_dict's now-default-safe NON_PII_STRUCTURAL_FIELDS
+        # exclusion, to prove the underlying redact() call really would
+        # mangle this field if nothing were protecting it.
+        result = pii_patterns.redact_dict({"destination": "Trial_2024-01-15_Cohort"}, exclude=())
+        assert result["destination"] != "Trial_2024-01-15_Cohort"
+
+    def test_exclude_defaults_to_non_pii_structural_fields(self):
+        # redact_dict is safe by default -- a caller that forgets to pass
+        # `exclude=` explicitly (the exact mistake three review rounds on
+        # this codebase found repeatedly) still doesn't mangle mrn or
+        # destination.
+        result = pii_patterns.redact_dict({
+            "mrn": "20260115", "destination": "Trial_2024-01-15_Cohort",
+            "destination_type": "proknow_collection", "submitted_by": "alice",
+        })
+        assert result["mrn"] == "20260115"
+        assert result["destination"] == "Trial_2024-01-15_Cohort"
+        assert result["destination_type"] == "proknow_collection"
+        assert result["submitted_by"] == "alice"
