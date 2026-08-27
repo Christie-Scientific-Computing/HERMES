@@ -20,7 +20,7 @@ from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 from backend.src.plans.db_client import PlansDB
 from backend.src.identity import anon
-from backend.src.common.sse import format_sse
+from backend.src.common.sse import format_sse, to_public_details
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/results', tags=['results'])
@@ -297,7 +297,12 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
                     progress_reported.add(task_id)
                     yield format_sse({"type": "progress", "current": display_id, "stage": stage})
             elif state == "succeeded":
-                details = _scrub_json(row["details"], real_id, display_id) or {}
+                # to_public_details strips real DICOM UIDs (study_uids/
+                # series_uids/checksums' keys) -- see its docstring
+                # (backend/src/common/sse.py). row["details"] itself (the
+                # tasks.details DB column) keeps full fidelity; only this
+                # outbound yield is reshaped.
+                details = to_public_details(_scrub_json(row["details"], real_id, display_id) or {})
                 yield format_sse({"type": "success", "mrn": display_id, "stage": stage, **details})
             elif state == "failed" or (state == "cancelled" and row["error_message"]):
                 # 'cancelled' is two different things, distinguished by

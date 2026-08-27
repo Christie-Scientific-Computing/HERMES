@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPExcep
 from fastapi.responses import StreamingResponse
 from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
-from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
+from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch, to_public_details
 from backend.src.identity import anon
 from backend.src.projects import enforcement
 from backend.src.projects.enforcement import verify_internal_key
@@ -156,7 +156,16 @@ async def single_import(body: Request):
             except Exception as e:
                 logger.warning("Status DB write failed: %s", e)
 
-        return {'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()}
+        # response.model_dump() keeps full fidelity in the add_event call
+        # above -- only this outbound return goes through
+        # to_public_details, which strips the real study_uids this Response
+        # also carries (see its docstring, backend/src/common/sse.py) --
+        # the same leak class as the export manifest's UIDs, found on this
+        # side while wiring up the export fix.
+        return {
+            'type': 'success', 'execution_time': np.round(time.time() - start, 2),
+            **to_public_details(response.model_dump()),
+        }
 
     except Exception as e:
         logger.exception("single_import failed for %s", req['mrn'])
