@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPExcep
 from fastapi.responses import StreamingResponse
 from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
-from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
+from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch, to_public_details
 from backend.src.common import pii_patterns
 from backend.src.identity import anon
 from backend.src.projects import enforcement
@@ -162,18 +162,18 @@ async def single_import(body: Request):
                 logger.warning("Status DB write failed: %s", e)
 
         # response.model_dump() keeps full fidelity in the add_event call
-        # above -- only this outbound return goes through redact_dict,
-        # which scrubs free-text fields (mosaiq_reason/pinnacle_reason/
-        # proknow_reason routinely quote the real MRN) with the real id in
-        # scope here. redact_dict does NOT strip response's own study_uids
-        # (a real StudyInstanceUID list) -- that's to_public_details' job
-        # (plan step 3), which this same response should also go through
-        # once that lands. redact_dict's default `exclude` covers "mrn" --
-        # see its docstring for why.
+        # above -- only this outbound return goes through to_public_details
+        # (strips the real study_uids list, plan step 3) then redact_dict
+        # (scrubs free-text fields -- mosaiq_reason/pinnacle_reason/
+        # proknow_reason routinely quote the real MRN -- with the real id in
+        # scope here). redact_dict's default `exclude` covers "mrn" -- see
+        # its docstring for why.
         display_mrn = response.mrn
         return {
             'type': 'success', 'execution_time': np.round(time.time() - start, 2),
-            **pii_patterns.redact_dict(response.model_dump(), real_id=real_mrn, display_id=display_mrn),
+            **pii_patterns.redact_dict(
+                to_public_details(response.model_dump()), real_id=real_mrn, display_id=display_mrn
+            ),
         }
 
     except Exception as e:
