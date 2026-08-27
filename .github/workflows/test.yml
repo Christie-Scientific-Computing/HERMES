@@ -69,14 +69,20 @@ jobs:
         # (Dockerfile's own comment: "Requires a PINNACLE_EXPORT_PAT build
         # secret with read access to the repo"); the same secret is reused
         # here. retrieve/logic.py (and anything importing it) needs this
-        # checked out, but a handful of test files depend on retrieve/logic.py
-        # transitively and already handle its absence via
-        # `pytest.importorskip("backend.src.retrieve.PinnacleExport", ...)`
-        # -- so this step's own failure (private/inaccessible/secret unset)
-        # must not fail the job, only shrink what pytest below can run.
-        # docs/plans/pii-boundary-test-suite.md §E flagged this as an open
-        # question rather than an assumption: whether this CI runner
-        # actually has access isn't determinable from inside this repo.
+        # checked out, and a handful of test files depend on retrieve/logic.py
+        # transitively -- most guard the shallow "is the package importable
+        # at all" case via `pytest.importorskip("backend.src.retrieve.
+        # PinnacleExport", ...)`, which handles an uninitialized/empty
+        # submodule directory cleanly. This step's own failure (private/
+        # inaccessible/secret unset) must not fail the JOB though, only
+        # leave that directory empty for those guards to catch -- see the
+        # "Install PinnacleExport's own dependencies" step below for a
+        # related but distinct gap those importorskip guards do NOT catch
+        # (the package being importable but one of ITS OWN dependencies
+        # missing). docs/plans/pii-boundary-test-suite.md §E flagged
+        # checkout access itself as an open question rather than an
+        # assumption: whether this CI runner actually has access isn't
+        # determinable from inside this repo.
         env:
           PINNACLE_EXPORT_PAT: ${{ secrets.PINNACLE_EXPORT_PAT }}
         run: |
@@ -97,6 +103,31 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      - name: Install PinnacleExport's own dependencies (if checked out)
+        # PinnacleExport has its own requirements.txt (pymedphys, scipy,
+        # matplotlib, and ~60 other packages) that requirements-dev.txt
+        # above never installs -- discovered the hard way on this workflow's
+        # own first real run: the checkout step above succeeded (the PAT
+        # worked), but retrieve/logic.py's import chain
+        # (PinnacleExport.entrypoint -> .src.database -> .src.patient ->
+        # `import regex`) failed on a bare ModuleNotFoundError. That failure
+        # happens OUTSIDE any `pytest.importorskip("backend.src.retrieve.
+        # PinnacleExport", ...)` guard -- those guards only catch the
+        # shallow "is the package importable at all" case (an empty/
+        # uninitialized submodule directory), not "the package imports fine
+        # but one of ITS OWN dependencies is missing," which is a failure
+        # several imports deeper, inside a plain (unguarded) `from
+        # backend.src.retrieve import logic` statement in several test
+        # files. Installing PinnacleExport's own requirements.txt whenever
+        # it's actually present is the direct fix, rather than trying to
+        # patch every affected test file's import-guarding.
+        run: |
+          if [ -f backend/src/retrieve/PinnacleExport/requirements.txt ]; then
+            pip install -r backend/src/retrieve/PinnacleExport/requirements.txt
+          else
+            echo "PinnacleExport not checked out; skipping its dependencies."
+          fi
+
       - name: Run HermesDB migrations (alembic upgrade head)
         # Tests don't run this themselves (only backend/main.py's own
         # startup, via backend/src/database.py's setup_status_db, does) --
@@ -108,4 +139,16 @@ jobs:
         run: python -m backend.scripts.seed_anon_test_db
 
       - name: Run pytest
-        run: python -m pytest backend/tests/ -v
+        # --continue-on-collection-errors: defense in depth on top of the
+        # dependency-install step above, not a substitute for it. Without
+        # this flag, pytest aborts the ENTIRE run (every test in every
+        # file, not just the affected ones) the moment any single test
+        # file fails to import -- confirmed on this workflow's own first
+        # real run, where the regex gap above turned 6 files' import
+        # failures into a 0-tests-ran, whole-job abort rather than 6
+        # reported errors alongside ~415 passing tests. With PinnacleExport's
+        # dependencies now installed there should be no collection errors
+        # left to hit this, but a future, different, genuinely-missing
+        # dependency shouldn't be able to silently take down the entire
+        # suite's signal the same way this one did.
+        run: python -m pytest backend/tests/ -v --continue-on-collection-errors
