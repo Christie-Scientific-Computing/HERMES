@@ -398,15 +398,18 @@ def test_timeline_scrubs_the_real_mrn_out_of_error_message_and_details(client, j
 
 def test_timeline_preserves_multiple_distinct_checksums_entries(client, job_id):
     """
-    _scrub_json walks string LEAVES only, never dict keys -- an earlier
-    implementation serialized `details` to a JSON string, ran a substring
-    replace, and re-parsed it, which also touched dict KEYS.
-    `checksums` (dict[SOPInstanceUID, hash]) has UID-shaped keys by
-    construction: pii_patterns.redact()'s generic UID-pattern floor turns
-    every UID-shaped key into the same placeholder string, so re-parsing
-    that text silently collapsed multiple checksum entries into one via a
-    dict-key collision. Two genuinely distinct SOPInstanceUIDs here must
-    both survive.
+    _scrub_json walks string LEAVES only, never dict keys. This matters
+    because `checksums` (dict[SOPInstanceUID, hash]) has UID-shaped keys by
+    construction: had _scrub_json instead serialized `details` to a JSON
+    string, run it through pii_patterns.redact() (whose generic UID-pattern
+    floor would turn every UID-shaped key into the same placeholder
+    string), and re-parsed the result, multiple checksum entries would
+    silently collapse into one via a dict-key collision on re-parse -- a
+    real risk considered and rejected while choosing this implementation,
+    not something the shipped `main` version (a plain real-MRN substring
+    replace with no pattern floor) ever exhibited. This test guards the
+    structural-walk design directly: two genuinely distinct SOPInstanceUIDs
+    here must both survive.
     """
     status_db.create_job(job_id)
     status_db.add_event(

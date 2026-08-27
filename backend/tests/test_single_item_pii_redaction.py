@@ -79,6 +79,28 @@ def test_single_import_success_redacts_mosaiq_reason(retrieve_client, active_pro
     assert REAL_MRN in details["mosaiq_reason"]  # DB keeps full fidelity
 
 
+def test_single_import_mrn_survives_when_display_id_looks_date_shaped(retrieve_client, active_project, monkeypatch):
+    # redact_dict's generic pattern floor runs over EVERY string value in
+    # response.model_dump() -- if "mrn" itself were included in that pass,
+    # an anon id that happens to be 8 digits parsing as a valid calendar
+    # date (the anon-id scheme is an externally-owned table HERMES doesn't
+    # control the format of) would get silently overwritten with the
+    # redaction placeholder instead of the real display id.
+    client, retrieve_endpoints = retrieve_client
+    project_id, username = active_project
+    job_id = f"single-import-datelike-{uuid.uuid4()}"
+
+    monkeypatch.setattr(retrieve_endpoints.anon, "to_display_id", lambda real_id: "20260115")
+    monkeypatch.setattr(retrieve_endpoints.anon, "resolve_real_id", lambda anon_id: REAL_MRN)
+
+    resp = client.post("/import/single_import", json={
+        "job_id": job_id, "mrn": "20260115", "import_level": "Planning data",
+        "project_id": project_id, "username": username,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["mrn"] == "20260115"  # not "[redacted]"
+
+
 def test_single_import_error_redacts_exception_message(retrieve_client, active_project, monkeypatch):
     client, retrieve_endpoints = retrieve_client
     project_id, username = active_project
@@ -160,6 +182,23 @@ def test_proknow_upload_patient_success_redacts_free_text_fields(export_client, 
     history = export_endpoints.status_db.get_patient_history(job_id, REAL_MRN)
     details = next(e for e in history if e["event_type"] == "success")["details"]
     assert REAL_MRN in details["status"]  # DB keeps full fidelity
+
+
+def test_proknow_upload_patient_mrn_survives_when_display_id_looks_date_shaped(export_client, active_project, monkeypatch):
+    client, export_endpoints = export_client
+    project_id, username = active_project
+    job_id = f"pk-single-datelike-{uuid.uuid4()}"
+
+    export_endpoints.Exporter.upload_to_proknow = lambda self, patient_id: {"status": "Success"}
+    monkeypatch.setattr(export_endpoints.anon, "resolve_real_id", lambda anon_id: REAL_MRN)
+    monkeypatch.setattr(export_endpoints.anon, "to_display_id", lambda real_id: "20260115")
+
+    resp = client.post("/export/proknow_upload_patient", json={
+        "job_id": job_id, "mrn": "20260115", "collection": "SOME_COLLECTION",
+        "project_id": project_id, "username": username,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["mrn"] == "20260115"  # not "[redacted]"
 
 
 def test_proknow_upload_patient_error_redacts_exception_message(export_client, active_project):
