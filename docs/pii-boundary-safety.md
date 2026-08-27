@@ -1,11 +1,15 @@
 # PII boundary safety — testing and enforcement design
 
-**Status:** v1, written ahead of the first DMZ-facing deployment (`proxy/` in
-front of the backend, `ANON_DB_*` configured). This document is a design and
-risk-register document, not a remediation record — none of the gaps below
-have been fixed yet. It exists so the team has a concrete, reviewable basis
-for signing off on deployment, and a shared reference for scoping the
-follow-up fix work.
+**Status:** v2 — remediation complete. Originally written ahead of the first
+DMZ-facing deployment (`proxy/` in front of the backend, `ANON_DB_*`
+configured) as a design and risk-register document with none of the gaps
+below fixed. `docs/plans/pii-boundary-test-suite.md` (§4's testing-harness
+sketch, turned into a concrete 8-step implementation plan) has since closed
+every row in §2's risk register — see each row for the PR that closed it.
+§1's "correcting an overstated claim" note below is now itself out of date
+in the opposite direction (the claim it corrected is accurate again) and is
+kept only as a historical record of what was wrong and when; a summary of
+the actual final mechanism follows it.
 
 ## §0 — Scope & purpose
 
@@ -66,31 +70,95 @@ further scrubbing).
   `debug` flag is never set to `True` anywhere in this codebase, so there is
   no traceback-in-response-body leak from that path.
 
-### Correcting an overstated claim
+### Correcting an overstated claim (historical — see below for current state)
 
 Both `docs/known-issues.md` ("Strengths worth preserving," line 92) and
-`CLAUDE.md`'s "Anonymisation boundary" section describe scrubbing as applied
+`CLAUDE.md`'s "Anonymisation boundary" section described scrubbing as applied
 "at every outbound API edge" / "every outbound response/SSE event." Against
-the code as it stands today, that's true only for `results/endpoints.py`'s
-four consumers above. It is **not** true for `common/sse.py`'s
-`run_batch_job` generator, nor for two single-item endpoints — see the risk
-register below. Both docs should be corrected to scope the claim accurately
-(tracked as a follow-up edit, §6).
+the code as it stood at the time this document was first written, that was
+true only for `results/endpoints.py`'s four consumers above — **not** true
+for `common/sse.py`'s `run_batch_job` generator, nor for two single-item
+endpoints (see the risk register below, rows 1-2). Both docs have since been
+corrected (`docs/known-issues.md`, `CLAUDE.md`) to describe the mechanism
+below, which now makes the "every outbound edge" claim accurate again.
+
+### The final mechanism (current state, all risk-register rows closed)
+
+Three layers, applied together rather than any one being a complete fix on
+its own:
+
+1. **A general pattern class, not a single known value**
+   (`backend/src/common/pii_patterns.py`, row 5) — `redact()`/`redact_dict()`
+   detect and redact dates, DICOM UIDs, filesystem paths, and DB
+   connection-string/`host:port` shapes generically, plus every format
+   variant of a known real id (zero-padded, float-cast) via
+   `real_id_variants()` — not just an exact-string match against one known
+   MRN. `redact_dict`'s `NON_PII_STRUCTURAL_FIELDS` exclusion (`mrn`,
+   `destination`, `destination_type`, `submitted_by`) keeps this generic
+   floor from mangling legitimate operational values that happen to look
+   date/UID-shaped.
+2. **Real DICOM UIDs are stripped, not just redacted-if-recognised**
+   (`backend/src/common/sse.py`'s `to_public_details()`, the export-manifest
+   finding) — `study_uids`/`series_uids` are dropped entirely and
+   `checksums` re-keyed from `dict[SOPInstanceUID, hash]` to a plain
+   `list[str]`, applied at every outbound success-emission point while
+   `events.details`/`tasks.details` keep full fidelity for audit.
+3. **Clinical dates are shifted, not redacted**
+   (`backend/src/identity/anon.py`'s `shift_date()`, row 4) — a per-patient
+   day offset (`key_value.date_perturbation`) preserves relative clinical
+   intervals while breaking the link to the real calendar date, applied to
+   `study_date`/`series_date`/`plan_date`.
+4. **A global, catch-all safety net** (`backend/src/common/errors.py`'s
+   `register_pii_safe_exception_handlers`, row 3) — every `HTTPException`
+   anywhere in the app, not just the ones someone remembered to scrub, has
+   its `detail` run through `pii_patterns.redact()`'s generic floor before
+   the response is sent. Deliberately generic-pattern-only, not
+   real-id-aware (no request-scoped real id is available at that layer) —
+   a safety net for the *unexpected* case, not a replacement for the precise
+   substitution every call site that already knows its own real id still
+   does.
+5. **A CI-gated test suite, not manual review** (row 8/9) —
+   `.github/workflows/test.yml` runs the full suite (including
+   `backend/tests/support/pii_assertions.py`'s `assert_no_pii`, a strict
+   superset of "does the one known real MRN appear," applied across every
+   `test_*_anon_boundary.py`/`test_batch_alias_pii_boundary.py`/
+   `test_single_item_pii_boundary.py`/`test_http_exception_pii_boundary.py`
+   file) on every PR/push to `main`.
+
+None of this closes the free-text blind spot named below — pattern-based
+detection catches *shapes*, not arbitrary prose.
 
 ## §2 — Risk register
 
-| # | Finding | Location | Live UI path today? | Severity |
-|---|---|---|---|---|
-| 1 | `run_batch_job`'s SSE `error` event and spread `**res` success fields are never scrubbed | `backend/src/common/sse.py:167–191` | No — the UI's actual path (CSV upload → `tasks` queue → `_observe_job`) already scrubs `error_message`/`details` and never emits `real_id` (confirmed: `TasksDB.job_progress` selects `real_id` only as the scrub key, `results/endpoints.py:300,312`). This row is about the separate, non-queue "list of MRNs" batch-alias route, which is unscrubbed and still live/reachable even though the UI doesn't call it | High (unscrubbed by construction, not just untested) |
-| 2 | `single_import` and `proknow_upload_patient` return raw `str(e)` in a 200-status JSON body | `backend/src/retrieve/endpoints.py:172`, `backend/src/export/endpoints.py:302` | **Yes** — both are real `backend_client.py` call sites | High |
-| 3 | ~34 `HTTPException(..., detail=str(e))` sites have no structural guard against an exception message embedding an MRN, DB connection string, or path | `retrieve/`, `export/`, `studies/`, `results/`, `projects/endpoints.py`, `identity/anon.py` | Yes — frontend clients pass `detail` through unmodified into `messages.error(...)` | Medium (mostly latent — depends what a given exception's message happens to contain) |
-| 4 | `studies/endpoints.py` never redacts `study_date`/`series_date`/`study_instance_uid`/`series_instance_uid`/`study_description`/`series_description` | `backend/src/studies/endpoints.py` (`list_studies`/`get_study`) | Yes | Medium — may be an intentional scope decision, but nothing in code or docs says so (contrast with `patient_name`, which *is* explicitly redacted alongside these fields) |
-| 5 | Scrubbing only ever targets the MRN as a single known value — no code path treats dates, DICOM UIDs, or filesystem paths as a general class to redact | Repo-wide | — | Medium (structural, underlies #1–4) |
-| 6 | CSV/tmp-file path disclosure: `Could not read CSV: {e}` can embed the server's `./tmp/{job_id}_{filename}` path, including a user-supplied filename | `retrieve/endpoints.py:73`, `export/endpoints.py:152,395` | Yes | Low–Medium (filesystem layout disclosure, not patient PII, but the filename itself could contain an MRN if a user named their CSV that way) |
-| 7 | `known-issues.md`/`CLAUDE.md` overstate scrubbing coverage as universal | Docs only | — | Low (documentation accuracy, but risks future contributors trusting a guarantee that doesn't hold) |
-| 8 | No CI enforcement of any of the above | `.github/workflows/` (only workflow: `docker-publish.yml`, release-triggered image build/push — no test/lint/security-scan job exists) | — | High (process gap — nothing currently prevents a regression here from merging) |
-| 9 | Every existing negative/leakage test checks only for the literal real-MRN string, never a date/UID/path pattern as a class | `test_results_anon_boundary.py`, `test_export_anon_boundary.py`, `test_studies_anon_boundary.py`, `test_observer_stream.py` | — | Medium — test fixtures already contain exactly this data (e.g. `StudyDate`, `StudyInstanceUID` in `test_studies_anon_boundary.py`'s mock) unexamined by any assertion |
-| 10 | This exact failure mode has already occurred once and was caught late | `docs/plans/safety-plan.md` §E (v2 correction) — new `*_reason` fields nearly shipped into `job_patients_summary` unscrubbed | — | Informational — evidence the "remember to call `_scrub` per field" discipline is leak-prone by construction, not hypothetical |
+All 10 rows below are now **fixed** (row 7, this document's own accuracy, by
+this note itself). Original finding/location/severity columns are kept
+verbatim for the historical record; the **Resolution** column is new.
+
+| # | Finding | Location | Live UI path today? | Severity | Resolution |
+|---|---|---|---|---|---|
+| 1 | `run_batch_job`'s SSE `error` event and spread `**res` success fields are never scrubbed | `backend/src/common/sse.py:167–191` | No — the UI's actual path (CSV upload → `tasks` queue → `_observe_job`) already scrubs `error_message`/`details` and never emits `real_id` (confirmed: `TasksDB.job_progress` selects `real_id` only as the scrub key, `results/endpoints.py:300,312`). This row is about the separate, non-queue "list of MRNs" batch-alias route, which is unscrubbed and still live/reachable even though the UI doesn't call it | High (unscrubbed by construction, not just untested) | **Fixed** — PR #50 (`pii_patterns.redact()`/`redact_dict()` applied to both the error yield and the success spread), PR #53 (composed with `to_public_details()` to also strip UIDs, closing a regression the #50↔main merge briefly reopened). Covered by `test_sse.py`, `test_batch_alias_pii_boundary.py` |
+| 2 | `single_import` and `proknow_upload_patient` return raw `str(e)` in a 200-status JSON body | `backend/src/retrieve/endpoints.py:172`, `backend/src/export/endpoints.py:302` | **Yes** — both are real `backend_client.py` call sites | High | **Fixed** — PR #50, PR #53. Covered by `test_single_item_pii_boundary.py` |
+| 3 | ~34 `HTTPException(..., detail=str(e))` sites have no structural guard against an exception message embedding an MRN, DB connection string, or path | `retrieve/`, `export/`, `studies/`, `results/`, `projects/endpoints.py`, `identity/anon.py` | Yes — frontend clients pass `detail` through unmodified into `messages.error(...)` | Medium (mostly latent — depends what a given exception's message happens to contain) | **Fixed** — PR #51: `backend/src/common/errors.py`'s `register_pii_safe_exception_handlers`, one global handler covering every current and future site, not 34 individual edits. Covered by `test_http_exception_pii_boundary.py`. Generic-pattern-only (no real-id context at that layer) — a deliberate, documented scoping tradeoff, not a gap |
+| 4 | `studies/endpoints.py` never redacts `study_date`/`series_date`/`study_instance_uid`/`series_instance_uid`/`study_description`/`series_description` | `backend/src/studies/endpoints.py` (`list_studies`/`get_study`) | Yes | Medium — may be an intentional scope decision, but nothing in code or docs says so (contrast with `patient_name`, which *is* explicitly redacted alongside these fields) | **Fixed** — PR #44 (`anon.shift_date()` mechanism), PR #50 (applied: dates shifted, UIDs/descriptions nulled the same way `patient_name` already was). Covered by `test_studies_anon_boundary.py` |
+| 5 | Scrubbing only ever targets the MRN as a single known value — no code path treats dates, DICOM UIDs, or filesystem paths as a general class to redact | Repo-wide | — | Medium (structural, underlies #1–4) | **Fixed** — PR #42 (`backend/src/common/pii_patterns.py`, the general pattern-class module named here as missing), PR #50 (`redact_dict`/`NON_PII_STRUCTURAL_FIELDS` generalized across every call site). See "The final mechanism" above |
+| 6 | CSV/tmp-file path disclosure: `Could not read CSV: {e}` can embed the server's `./tmp/{job_id}_{filename}` path, including a user-supplied filename | `retrieve/endpoints.py:73`, `export/endpoints.py:152,395` | Yes | Low–Medium (filesystem layout disclosure, not patient PII, but the filename itself could contain an MRN if a user named their CSV that way) | **Fixed** — PR #50 (`pii_patterns.redact()` applied at both CSV-read-error sites) |
+| 7 | `known-issues.md`/`CLAUDE.md` overstate scrubbing coverage as universal | Docs only | — | Low (documentation accuracy, but risks future contributors trusting a guarantee that doesn't hold) | **Fixed** — this document, `docs/known-issues.md`, and `CLAUDE.md` updated together (step 8 of the implementation plan) to describe the actual mechanism rather than just `results/endpoints.py`'s `_scrub` |
+| 8 | No CI enforcement of any of the above | `.github/workflows/` (only workflow: `docker-publish.yml`, release-triggered image build/push — no test/lint/security-scan job exists) | — | High (process gap — nothing currently prevents a regression here from merging) | **Fixed** — PR #54: `.github/workflows/test.yml` (full suite on every PR/push) + `backend/scripts/seed_anon_test_db.py` (reproducible seeding, previously hand-done). **Residual manual step**: making the new check a hard, required merge gate (as opposed to merely existing) needs a GitHub branch-protection rule configured by a repo admin — not expressible in the workflow file itself; noted in PR #54, not yet done as of this writing |
+| 9 | Every existing negative/leakage test checks only for the literal real-MRN string, never a date/UID/path pattern as a class | `test_results_anon_boundary.py`, `test_export_anon_boundary.py`, `test_studies_anon_boundary.py`, `test_observer_stream.py` | — | Medium — test fixtures already contain exactly this data (e.g. `StudyDate`, `StudyInstanceUID` in `test_studies_anon_boundary.py`'s mock) unexamined by any assertion | **Fixed** — PR #42 (`backend/tests/support/pii_assertions.py`'s `assert_no_pii`), PR #53 (rolled out across every `test_*_anon_boundary.py` file, plus new `test_batch_alias_pii_boundary.py`/`test_single_item_pii_boundary.py` with induced-failure and format-variant coverage) |
+| 10 | This exact failure mode has already occurred once and was caught late | `docs/plans/safety-plan.md` §E (v2 correction) — new `*_reason` fields nearly shipped into `job_patients_summary` unscrubbed | — | Informational — evidence the "remember to call `_scrub` per field" discipline is leak-prone by construction, not hypothetical | **Addressed structurally** — row 5's fix replaces the per-field-memory discipline this row is evidence against with a floor applied automatically to every string value, not something a future field addition can forget to opt into |
+
+**Known residual gap, accepted, not fixed by any of the above** (per
+`docs/plans/pii-boundary-test-suite.md` §A, stated up front rather than
+discovered late): pattern-based detection catches *shapes* (a date-shaped
+string, a UID-shaped string, a path-shaped string), not arbitrary
+identifying prose that doesn't match one of those shapes — e.g. a clinician
+typing a patient's name into a DICOM series description at scan time, or a
+date written as prose ("seen 3rd Jan") in a free-text comment field rather
+than a structured date field. This is a real limit of pattern-based testing
+generally, not a gap in this implementation specifically, and there is no
+proposed fix — a general solution would require something closer to NLP-based
+PII detection, a materially different (and much higher false-positive-rate)
+approach than the structural pattern-matching used throughout this document.
 
 ## §3 — Design principle: enforcement does not belong in the proxy
 
@@ -158,6 +226,13 @@ merge gate. Leaves room to bolt on a dependency/static-analysis scanner
 (e.g. `pip-audit`, `bandit`) later — neither exists in `requirements*.txt`
 today — without that being a prerequisite for the boundary suite itself.
 
+**Implemented as designed** (`.github/workflows/test.yml`, §2 row 8) with one
+caveat: a workflow file can make the check *exist* and run on every PR, but
+making it an actually-enforced, blocking "hard merge gate" needs a GitHub
+branch-protection rule (repo Settings → Branches → require this status
+check) — that's a one-time manual step for a repo admin, not something
+expressible in the workflow YAML itself.
+
 ### Secondary layer: a structural backend fix (named here, not designed in full)
 
 The actual defect underlying findings #1, #2, #5, and #10 is procedural: the
@@ -190,15 +265,18 @@ primary control.
 - **Definition of an incident.** Any real MRN, date, DICOM UID, or server
   filesystem path appearing in a response body the proxy relays to a browser.
 - **Pre-deployment checklist:**
-  1. The CI boundary suite (§4) is green.
+  1. The CI boundary suite (§4) is green. — **Done** once PRs #51/#53/#54
+     (still open as of this writing, alongside this doc-update PR) are
+     merged; each was independently verified green on its own branch before
+     being opened (see each PR's description).
   2. Every row in the risk register (§2) has been explicitly marked
      **fixed**, **accepted risk** (with a one-line reason, mirroring
      `docs/known-issues.md`'s existing accepted-limitations tier), or
      **deferred** (with a reason it's safe to defer) — not left silently
-     unaddressed.
+     unaddressed. — **Done**, see §2's Resolution column.
   3. `docs/known-issues.md` and `CLAUDE.md`'s scrubbing-coverage claims
      (§1's "correcting an overstated claim") have been corrected to match
-     whatever state is actually shipped.
+     whatever state is actually shipped. — **Done**, this PR.
 - **Triage for future findings.** Add a new row to §2's table, classify
   severity using the same live-path/latent distinction used above, decide
   fix-now vs. accepted-risk, and update this document — the same lifecycle
@@ -212,9 +290,9 @@ primary control.
   UID exposure, found only while designing that plan).
 - `docs/plans/safety-plan.md` §D/§E — the audit-manifest and import-outcome work,
   and the one prior real instance of this document's core failure mode.
-- `docs/known-issues.md` — sibling risk-register document; needs its
-  "Strengths worth preserving" section corrected per §1 above.
+- `docs/known-issues.md` — sibling risk-register document; its "Strengths
+  worth preserving" section has been corrected per §1 above.
 - `docs/plans/worker-queue-design.md` — the observer-stream SSE vocabulary that
   §1's "what's already correct" section relies on.
-- `CLAUDE.md`'s "Anonymisation boundary" section — needs the same correction
-  as `known-issues.md`.
+- `CLAUDE.md`'s "Anonymisation boundary" section — carries the same
+  correction as `known-issues.md`, plus a summary of the final mechanism.
