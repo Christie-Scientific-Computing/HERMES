@@ -224,8 +224,11 @@ def test_dicom_move_destination_field_survives_date_shaped_value(export_client, 
     Regression coverage for the specific redact_dict bug finding #1
     describes: `destination` is operational config (an Orthanc AE title),
     never patient data -- it must survive intact even when it happens to
-    look date-shaped, on both the success AND error event (redact_dict's
-    exclude applies to both spreads in run_batch_job).
+    look date-shaped. Checked on the success event only -- run_batch_job's
+    error event carries no `destination` field at all (just "type"/
+    "execution_time"/"mrn"/"error", the last scrubbed via plain
+    pii_patterns.redact(), not redact_dict) so there's nothing to assert on
+    that side of this same bug class.
     """
     class OkExporter:
         read_input_file = staticmethod(RealExporter.read_input_file)

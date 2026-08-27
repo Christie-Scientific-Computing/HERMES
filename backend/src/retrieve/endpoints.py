@@ -218,8 +218,19 @@ async def find_patient(
         # quote the real MRN (same free-text leak as single_import's
         # success path) -- this is a plain 200 response, not an exception,
         # so it's outside what a global exception handler could ever catch
-        # and needs this explicit fix.
-        return Response(mrn=display_mrn, **pii_patterns.redact_dict(res, real_id=real_mrn, display_id=display_mrn))
+        # and needs this explicit fix. Also routed through to_public_details:
+        # Importer.find_patient() never actually populates study_uids today
+        # (it only checks presence in mosaiq/pinnacle/proknow, unlike
+        # handle_patient), so this is currently a no-op -- but Response
+        # itself carries a study_uids field, and to_public_details' own
+        # docstring calls out being safe to call unconditionally at every
+        # success-emission site specifically so a future change to
+        # find_patient (or to what it returns) can't reopen this leak
+        # silently.
+        return Response(
+            mrn=display_mrn,
+            **pii_patterns.redact_dict(to_public_details(res), real_id=real_mrn, display_id=display_mrn),
+        )
     except anon.AnonServiceError as e:
         logger.exception("find_patient failed to translate result for %s", mrn)
         raise HTTPException(status_code=503, detail=str(e))
