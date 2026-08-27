@@ -66,6 +66,22 @@ class TestFindPaths:
     def test_does_not_match_bare_slash_fraction(self):
         assert pii_patterns.find_paths("3/4 imported") == []
 
+    def test_finds_bare_relative_path_with_no_leading_slash_or_dot(self):
+        # Path("./tmp") / f"{job_id}_{filename}" stringifies WITHOUT the
+        # leading "./" (pathlib drops it) -- FileNotFoundError/pandas quote
+        # exactly this bare relative form.
+        assert pii_patterns.find_paths("tmp/9f1c2b3a_patients.csv") == ["tmp/9f1c2b3a_patients.csv"]
+
+    def test_finds_quoted_path_containing_spaces(self):
+        text = "No such file or directory: 'tmp/9f1c2b3a_patient list.csv'"
+        found = pii_patterns.find_paths(text)
+        assert "tmp/9f1c2b3a_patient list.csv" in " ".join(found)
+
+    def test_finds_double_quoted_path(self):
+        text = 'No such file or directory: "tmp/9f1c2b3a_patients.csv"'
+        found = pii_patterns.find_paths(text)
+        assert any("tmp/9f1c2b3a_patients.csv" in f for f in found)
+
 
 class TestFindSecrets:
     def test_finds_postgres_connection_string(self):
@@ -142,6 +158,10 @@ class TestRedact:
         result = pii_patterns.redact("db error: postgres://hermes:hunter2@db.internal:5432/hermesdb")
         assert "hunter2" not in result
         assert "[redacted]" in result
+
+    def test_redacts_bare_relative_tmp_path(self):
+        result = pii_patterns.redact("Could not read CSV: [Errno 2] No such file or directory: 'tmp/9f1c2b3a_patients.csv'")
+        assert "9f1c2b3a_patients.csv" not in result
 
     def test_redacts_everything_together(self):
         text = (

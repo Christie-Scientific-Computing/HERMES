@@ -31,6 +31,35 @@ _DATE_FORMATTERS = {
 }
 
 
+def _date_variants(value: str) -> set[str]:
+    """Every DA/ISO/slash rendering of a given raw date string.
+
+    A caller of assert_no_pii(..., real_dates=[...]) only knows the raw date
+    in whatever format they happened to seed it in (typically DICOM DA, from
+    a fixture's StudyDate) -- but the endpoint under test might echo an
+    unshifted leak in a different format (e.g. ISO). Exact-string-only
+    matching against a single format would silently miss that. Falls back to
+    just the literal value if it doesn't parse as a recognised date shape at
+    all (e.g. a non-date string passed by mistake) -- still checked as-is,
+    just with no extra variants added.
+    """
+    variants = {value}
+    parsed = None
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(value, fmt).date()
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return variants
+    variants.add(parsed.strftime("%Y%m%d"))
+    variants.add(parsed.strftime("%Y-%m-%d"))
+    variants.add(parsed.strftime("%Y/%m/%d"))
+    variants.add(parsed.strftime("%d/%m/%Y"))
+    return variants
+
+
 def _parse_sse(text: str) -> Optional[list]:
     """Parse concatenated `data: {...}\\n\\n` SSE events into a list of
     dicts. Returns None (not []) if any `data:` line isn't valid JSON, so
@@ -71,13 +100,15 @@ def _to_parsed(body) -> Any:
         return None
 
 
-def _check_leaf(path: str, key: Optional[str], value: str, real_id_variants: set, real_dates, errors: list) -> None:
+def _check_leaf(
+    path: str, key: Optional[str], value: str, real_id_variants: set, real_date_variants: set, errors: list
+) -> None:
     for variant in real_id_variants:
         if variant and variant in value:
             errors.append(f"{path}: contains real-id variant {variant!r} in {value!r}")
-    for raw_date in real_dates:
-        if raw_date and str(raw_date) in value:
-            errors.append(f"{path}: contains raw real date {raw_date!r} in {value!r}")
+    for variant in real_date_variants:
+        if variant and variant in value:
+            errors.append(f"{path}: contains raw real date variant {variant!r} in {value!r}")
     if key not in ALLOWED_TIMESTAMP_FIELDS and key not in SHIFTED_DATE_FIELDS:
         for found in pii_patterns.find_dates(value):
             errors.append(f"{path}: looks like a raw date {found!r} in {value!r}")
@@ -89,14 +120,14 @@ def _check_leaf(path: str, key: Optional[str], value: str, real_id_variants: set
         errors.append(f"{path}: looks like a secret/connection string in {value!r}")
 
 
-def _walk(value, path: str, key: Optional[str], real_id_variants: set, real_dates, errors: list) -> None:
+def _walk(value, path: str, key: Optional[str], real_id_variants: set, real_date_variants: set, errors: list) -> None:
     if isinstance(value, dict):
         for k, v in value.items():
-            _walk(v, f"{path}.{k}", k, real_id_variants, real_dates, errors)
+            _walk(v, f"{path}.{k}", k, real_id_variants, real_date_variants, errors)
         return
     if isinstance(value, list):
         for i, v in enumerate(value):
-            _walk(v, f"{path}[{i}]", key, real_id_variants, real_dates, errors)
+            _walk(v, f"{path}[{i}]", key, real_id_variants, real_date_variants, errors)
         return
     if value is None or isinstance(value, bool):
         return
@@ -108,7 +139,7 @@ def _walk(value, path: str, key: Optional[str], real_id_variants: set, real_date
         # a string leaf would.
         s = str(value)
         if s:
-            _check_leaf(path, key, s, real_id_variants, real_dates, errors)
+            _check_leaf(path, key, s, real_id_variants, real_date_variants, errors)
 
 
 def assert_no_pii(body, *, real_ids=(), real_dates=(), context: str = "") -> None:
@@ -131,14 +162,17 @@ def assert_no_pii(body, *, real_ids=(), real_dates=(), context: str = "") -> Non
     real_id_variants: set = set()
     for rid in real_ids:
         real_id_variants |= pii_patterns.real_id_variants(rid)
+    real_date_variants: set = set()
+    for rd in real_dates:
+        real_date_variants |= _date_variants(str(rd))
 
     errors: list = []
     parsed = _to_parsed(body)
     if parsed is not None:
-        _walk(parsed, "$", None, real_id_variants, real_dates, errors)
+        _walk(parsed, "$", None, real_id_variants, real_date_variants, errors)
     else:
         text = body if isinstance(body, str) else str(body)
-        _check_leaf("$", None, text, real_id_variants, real_dates, errors)
+        _check_leaf("$", None, text, real_id_variants, real_date_variants, errors)
 
     if errors:
         prefix = f"[{context}] " if context else ""

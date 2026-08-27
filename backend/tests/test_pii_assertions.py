@@ -62,6 +62,18 @@ class TestAssertNoPiiJson:
         with pytest.raises(AssertionError):
             assert_no_pii(json.dumps({"study_date": "20260115"}), real_dates=["20260115"])
 
+    def test_real_date_check_catches_cross_format_leak(self):
+        # real_dates is seeded with the DA-format raw date (the natural
+        # choice given studies/endpoints.py works in DICOM DA), but the leak
+        # shows up in ISO format -- must still be caught, not silently
+        # missed because the exact string didn't match.
+        with pytest.raises(AssertionError):
+            assert_no_pii(json.dumps({"note": "found on 2026-01-15"}), real_dates=["20260115"])
+
+    def test_real_date_check_catches_slash_format_leak(self):
+        with pytest.raises(AssertionError):
+            assert_no_pii(json.dumps({"note": "found on 15/01/2026"}), real_dates=["20260115"])
+
     def test_numeric_leaf_real_id_is_caught(self):
         # Response.mrn is typed `str | int` in retrieve/export endpoints.py
         with pytest.raises(AssertionError):

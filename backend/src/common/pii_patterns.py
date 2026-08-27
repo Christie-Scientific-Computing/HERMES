@@ -50,7 +50,23 @@ DATE_PATTERNS = (_DA_RE, _ISO_RE, _SLASH_RE)
 # caught, not just the ones already found in the risk register.
 _UNIX_PATH_RE = re.compile(r"(?:\.{1,2})?/[\w.\-]+(?:/[\w.\-]+)+")
 _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\(?:[\w.\-]+\\)*[\w.\-]+")
-PATH_PATTERNS = (_UNIX_PATH_RE, _WINDOWS_PATH_RE)
+# pathlib silently drops a leading "./" when a Path built from "./tmp" is
+# stringified -- retrieve/export endpoints.py's own
+# `Path("./tmp") / f"{job_id}_{filename}"` renders as the bare relative
+# "tmp/<job_id>_<filename>", which _UNIX_PATH_RE's required "/"/"./"/"../"
+# root would miss entirely, and pandas/open()'s own FileNotFoundError
+# quotes that exact bare form. Extension-terminated so this doesn't swallow
+# unrelated slash-separated text (a ratio, "and/or") that never ends in a
+# dotted extension.
+_BARE_RELATIVE_PATH_RE = re.compile(r"\b[\w\-]+(?:/[\w\-]+)*/[\w\-]+\.[A-Za-z][A-Za-z0-9]{0,7}\b")
+# A user-uploaded filename can contain a space (e.g. "patient list.csv"),
+# which the character-class-based patterns above can't span -- but Python's
+# own OSError/FileNotFoundError repr always quotes the path
+# (`'tmp/x patients.csv'`), so matching "anything single/double-quoted that
+# contains a slash" catches the space-bearing case the structural patterns
+# above miss, without needing to guess which characters a filename may hold.
+_QUOTED_PATH_RE = re.compile(r"'[^'\n]*/[^'\n]*'|\"[^\"\n]*/[^\"\n]*\"")
+PATH_PATTERNS = (_UNIX_PATH_RE, _WINDOWS_PATH_RE, _BARE_RELATIVE_PATH_RE, _QUOTED_PATH_RE)
 
 # DB connection strings (postgres://user:pass@host/db, or any scheme://user:pass@...)
 # and host:port pairs -- a bonus catch-all for a raw psycopg2 error echoing
@@ -111,10 +127,27 @@ def find_uids(text: str) -> list[str]:
 
 
 def find_paths(text: str) -> list[str]:
+    """
+    Every substring of `text` that looks like a filesystem path, across all
+    of PATH_PATTERNS.
+
+    A rooted match (e.g. "/var/hermes/tmp/foo.csv") and the bare-relative
+    pattern both fire on overlapping text (the bare pattern has no way to
+    know a "/"-rooted match already covers it), and a quoted match wholly
+    contains whatever structural pattern matched inside the quotes -- so
+    results are deduplicated down to maximal, non-overlapping matches
+    (longest first, dropping anything that's a substring of an already-kept
+    match) rather than returned as raw per-pattern hits.
+    """
     found = []
     for pattern in PATH_PATTERNS:
         found.extend(m.group(0) for m in pattern.finditer(text))
-    return found
+
+    deduped: list[str] = []
+    for candidate in sorted(set(found), key=len, reverse=True):
+        if not any(candidate in kept for kept in deduped):
+            deduped.append(candidate)
+    return deduped
 
 
 def find_secrets(text: str) -> list[str]:
