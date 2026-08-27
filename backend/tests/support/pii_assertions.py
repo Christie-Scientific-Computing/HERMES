@@ -107,12 +107,30 @@ def _to_parsed(body) -> Any:
 def _check_leaf(
     path: str, key: Optional[str], value: str, real_id_variants: set, real_date_variants: set, errors: list
 ) -> None:
+    # real_id/real_date substring checks stay active regardless of `key`,
+    # including for NON_PII_STRUCTURAL_FIELDS ("mrn", "destination", ...) --
+    # `mrn` in particular is REQUIRED to hold the display (anon) id at this
+    # boundary, never the real one, so a real-id substring landing there is
+    # exactly the kind of regression this suite must catch, not exempt.
     for variant in real_id_variants:
         if variant and variant in value:
             errors.append(f"{path}: contains real-id variant {variant!r} in {value!r}")
     for variant in real_date_variants:
         if variant and variant in value:
             errors.append(f"{path}: contains raw real date variant {variant!r} in {value!r}")
+
+    # The generic pattern-SHAPE scans below are skipped for
+    # NON_PII_STRUCTURAL_FIELDS, mirroring production's own exclusion
+    # (redact_dict/_scrub_json pass these fields through byte-for-byte
+    # untouched by design -- operational config such as an AE title or
+    # ProKnow collection name, never patient data, so the generic floor has
+    # nothing to protect there and only something to accidentally break,
+    # e.g. a collection name that happens to contain a date-shaped
+    # substring like "Trial_2024-01-15_Cohort"). This is narrower than
+    # skipping the whole field: an actual real-id/real-date LEAK into one of
+    # these fields (checked above) is still caught either way.
+    if key in pii_patterns.NON_PII_STRUCTURAL_FIELDS:
+        return
     if key not in ALLOWED_TIMESTAMP_FIELDS and key not in SHIFTED_DATE_FIELDS:
         for found in pii_patterns.find_dates(value):
             errors.append(f"{path}: looks like a raw date {found!r} in {value!r}")
