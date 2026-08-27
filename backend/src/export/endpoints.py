@@ -18,6 +18,7 @@ from backend.src.export.logic import Exporter, checksummed_series_manifest
 from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
+from backend.src.common import pii_patterns
 from backend.src.identity import anon
 from backend.src.projects import enforcement
 from backend.src.projects.enforcement import verify_internal_key
@@ -149,7 +150,11 @@ def _build_export_items(path_to_csv: str) -> list[BatchItem]:
     try:
         rows = Exporter.read_input_file(path_to_csv)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
+        # str(e) can embed the server's ./tmp/{job_id}_{filename} path
+        # (including a user-supplied filename) -- no specific real id is in
+        # scope yet at this point, so this is the generic pattern floor
+        # only, not a real-id-aware substitution.
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {pii_patterns.redact(str(e))}")
     try:
         return build_patient_id_batch(rows, input_path=path_to_csv)
     except anon.AnonLookupError as e:
@@ -289,7 +294,12 @@ async def proknow_upload_patient(body: Request):
             except Exception as e:
                 logger.warning("Status DB write failed: %s", e)
 
-        return {'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()}
+        # response.model_dump() keeps full fidelity in the add_event call
+        # above -- only this outbound return goes through redact_dict.
+        return {
+            'type': 'success', 'execution_time': np.round(time.time() - start, 2),
+            **pii_patterns.redact_dict(response.model_dump(), real_id=real_mrn, display_id=display_mrn),
+        }
 
     except Exception as e:
         # Record failure
@@ -299,7 +309,12 @@ async def proknow_upload_patient(body: Request):
             except Exception as ex:
                 logger.warning("Status DB write failed: %s", ex)
 
-        return {'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn, 'error': str(e)}
+        # str(e) routinely quotes the real MRN -- StatusDB above already has
+        # the raw message for the audit trail.
+        return {
+            'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn,
+            'error': pii_patterns.redact(str(e), real_id=real_mrn, display_id=display_mrn),
+        }
 
 
 
@@ -392,7 +407,7 @@ def _build_uid_items(path_to_csv: str, level: str) -> list[BatchItem]:
         with open(path_to_csv, newline="") as f:
             rows = list(csv_mod.DictReader(f))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {pii_patterns.redact(str(e))}")
 
     for row in rows:
         study_uid  = (row.get("study_instance_uid")  or "").strip()

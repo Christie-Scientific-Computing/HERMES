@@ -59,6 +59,50 @@ async def test_success_and_failure_events_all_carry_type(db, job_id):
 
 
 @pytest.mark.asyncio
+async def test_error_event_redacts_real_id_and_path_from_exception_message(db, job_id):
+    items = [BatchItem(real_id="500123", display_id="1001", status_mrn="500123")]
+
+    def worker(item: BatchItem) -> dict:
+        raise ValueError(f"Could not read ./tmp/job1_500123.csv for patient {item.real_id}")
+
+    chunks = await _collect(run_batch_job(job_id, items, stage="retrieve", worker=worker, status_db=db))
+    events = _parse_events(chunks)
+    error_event = next(e for e in events if e["type"] == "error")
+
+    assert "500123" not in error_event["error"]
+    assert "1001" in error_event["error"]  # real id -> display id substitution
+    assert "./tmp/job1_500123.csv" not in error_event["error"]  # generic path floor
+
+    # StatusDB keeps the raw, unredacted message for the audit trail.
+    history = db.get_patient_history(job_id, "500123")
+    failure = next(e for e in history if e["event_type"] == "failure")
+    assert "500123" in failure["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_success_event_redacts_free_text_fields_but_db_keeps_them_raw(db, job_id):
+    items = [BatchItem(real_id="500123", display_id="1001", status_mrn="500123")]
+
+    def worker(item: BatchItem) -> dict:
+        return {
+            "in_mosaiq": False,
+            "mosaiq_reason": f"connection refused for patient {item.real_id}",
+        }
+
+    chunks = await _collect(run_batch_job(job_id, items, stage="retrieve", worker=worker, status_db=db))
+    events = _parse_events(chunks)
+    success_event = next(e for e in events if e["type"] == "success")
+
+    assert "500123" not in success_event["mosaiq_reason"]
+    assert success_event["mosaiq_reason"] == "connection refused for patient 1001"
+    assert success_event["in_mosaiq"] is False
+
+    history = db.get_patient_history(job_id, "500123")
+    success = next(e for e in history if e["event_type"] == "success")
+    assert "500123" in success["details"]["mosaiq_reason"]
+
+
+@pytest.mark.asyncio
 async def test_worker_cannot_override_display_id_via_res(db, job_id):
     items = [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")]
 

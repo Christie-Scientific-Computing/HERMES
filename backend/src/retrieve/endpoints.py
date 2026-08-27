@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
+from backend.src.common import pii_patterns
 from backend.src.identity import anon
 from backend.src.projects import enforcement
 from backend.src.projects.enforcement import verify_internal_key
@@ -70,7 +71,11 @@ def _build_import_items(path_to_csv: str) -> list[BatchItem]:
     try:
         rows = Importer.read_input_file(path_to_csv)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not read CSV: {e}")
+        # str(e) can embed the server's ./tmp/{job_id}_{filename} path
+        # (including a user-supplied filename) -- no specific real id is in
+        # scope yet at this point (rows haven't been resolved), so this is
+        # the generic pattern floor only, not a real-id-aware substitution.
+        raise HTTPException(status_code=400, detail=f"Could not read CSV: {pii_patterns.redact(str(e))}")
     try:
         return build_patient_id_batch(rows, input_path=path_to_csv)
     except anon.AnonLookupError as e:
@@ -156,7 +161,16 @@ async def single_import(body: Request):
             except Exception as e:
                 logger.warning("Status DB write failed: %s", e)
 
-        return {'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()}
+        # response.model_dump() keeps full fidelity in the add_event call
+        # above -- only this outbound return goes through redact_dict,
+        # which scrubs free-text fields (mosaiq_reason/pinnacle_reason/
+        # proknow_reason routinely quote the real MRN) with the real id in
+        # scope here.
+        display_mrn = response.mrn
+        return {
+            'type': 'success', 'execution_time': np.round(time.time() - start, 2),
+            **pii_patterns.redact_dict(response.model_dump(), real_id=real_mrn, display_id=display_mrn),
+        }
 
     except Exception as e:
         logger.exception("single_import failed for %s", req['mrn'])
@@ -169,7 +183,12 @@ async def single_import(body: Request):
             display_mrn = anon.to_display_id(real_mrn)
         except Exception:
             display_mrn = "[unknown]"
-        return {'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn, 'error': str(e)}
+        # str(e) routinely quotes the real MRN -- StatusDB above already has
+        # the raw message for the audit trail.
+        return {
+            'type': 'error', 'execution_time': np.round(time.time() - start, 2), 'mrn': display_mrn,
+            'error': pii_patterns.redact(str(e), real_id=real_mrn, display_id=display_mrn),
+        }
 
 
 @router.get('/find_patient')
@@ -190,7 +209,13 @@ async def find_patient(
     try:
         imp = Importer(import_level)
         res = imp.find_patient(real_mrn)
-        return Response(mrn=anon.to_display_id(real_mrn), **res)
+        display_mrn = anon.to_display_id(real_mrn)
+        # res's mosaiq_reason/pinnacle_reason/proknow_reason routinely
+        # quote the real MRN (same free-text leak as single_import's
+        # success path) -- this is a plain 200 response, not an exception,
+        # so it's outside what a global exception handler could ever catch
+        # and needs this explicit fix.
+        return Response(mrn=display_mrn, **pii_patterns.redact_dict(res, real_id=real_mrn, display_id=display_mrn))
     except anon.AnonServiceError as e:
         logger.exception("find_patient failed to translate result for %s", mrn)
         raise HTTPException(status_code=503, detail=str(e))

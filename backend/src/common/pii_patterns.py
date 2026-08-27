@@ -27,6 +27,7 @@ one, by field name rather than by re-deriving the perturbation here.
 """
 import re
 from datetime import date as _date
+from typing import Optional
 
 # 6+ dot-separated numeric segments -- long enough that a short version
 # string (e.g. plans.pinnacle_version = "16.2") never false-positives, but
@@ -307,3 +308,32 @@ def redact(text, *, real_id=None, display_id=None) -> str:
         cursor = end
     pieces.append(result[cursor:])
     return "".join(pieces)
+
+
+def redact_dict(details: Optional[dict], *, real_id=None, display_id=None) -> dict:
+    """
+    Apply redact() to every string value in a flat dict, leaving non-string
+    values (bools, ints, lists, nested dicts) untouched.
+
+    Built for outbound success/error payloads that mix known-safe
+    structured fields (status, in_mosaiq, study_count, ...) with
+    worker-generated free text that routinely quotes a real id --
+    mosaiq_reason/pinnacle_reason/proknow_reason (Importer.find_patient's
+    per-source diagnostic strings, CLAUDE.md's anonymisation-boundary
+    section calls this out explicitly) are the concrete example, but
+    applying redact() uniformly across every string value, rather than an
+    explicit per-field allow-list, means a field nobody thought to name
+    specifically still gets the same protection.
+
+    Does NOT recurse into nested dicts/lists -- every direct caller of this
+    function passes a worker's raw, freshly-returned dict (a flat pydantic
+    Response.model_dump()), not a JSONB blob read back from the DB;
+    results/endpoints.py's _scrub_json already handles that separate,
+    genuinely-nested case.
+    """
+    if not details:
+        return details or {}
+    return {
+        k: redact(v, real_id=real_id, display_id=display_id) if isinstance(v, str) else v
+        for k, v in details.items()
+    }

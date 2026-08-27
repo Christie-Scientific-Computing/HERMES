@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from backend.src.identity import anon
+from backend.src.common import pii_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +164,16 @@ async def run_batch_job(
                     logger.warning("Status DB write failed: %s", e)
 
             # "mrn" is set last, after spreading res, so nothing worker
-            # returns can ever override it with a real id.
+            # returns can ever override it with a real id. res's free-text
+            # fields (e.g. mosaiq_reason/pinnacle_reason/proknow_reason,
+            # which routinely quote the real MRN -- see CLAUDE.md's
+            # anonymisation-boundary note) are redacted before crossing the
+            # boundary via redact_dict; the add_event call above already
+            # wrote the raw, full-fidelity res to StatusDB.
             yield format_sse({
                 "type": "success",
                 "execution_time": round(time.time() - start, 2),
-                **res,
+                **pii_patterns.redact_dict(res, real_id=item.real_id, display_id=item.display_id),
                 "mrn": item.display_id,
             })
 
@@ -183,11 +189,15 @@ async def run_batch_job(
                 except Exception as ex:
                     logger.warning("Status DB write failed: %s", ex)
 
+            # str(e) routinely quotes the real MRN (an Importer/Exporter
+            # exception message built from/around it) -- redact() before
+            # this crosses the boundary; StatusDB above already has the raw
+            # message for the audit trail.
             yield format_sse({
                 "type": "error",
                 "execution_time": round(time.time() - start, 2),
                 "mrn": item.display_id,
-                "error": str(e),
+                "error": pii_patterns.redact(str(e), real_id=item.real_id, display_id=item.display_id),
             })
 
     yield format_sse({"type": "done"})

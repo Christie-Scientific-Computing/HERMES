@@ -13,6 +13,7 @@ os.environ["ANON_DB_NAME"] = "anon_test"
 os.environ["ANON_DB_USER"] = "postgres"
 os.environ["ANON_DB_PASS"] = "test"
 
+import psycopg2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -24,6 +25,43 @@ from backend.src.results.endpoints import router as results_router, status_db
 
 REAL_MRN = "500123"
 ANON_MRN = "1001"
+
+
+def _anon_conn():
+    return psycopg2.connect(host="localhost", port=55433, dbname="anon_test", user="postgres", password="test")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _ensure_date_perturbation_column():
+    conn = _anon_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("ALTER TABLE key_value ADD COLUMN IF NOT EXISTS date_perturbation INT")
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def perturbation():
+    conn = _anon_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE key_value SET date_perturbation = %s WHERE key_value = %s AND key_type_id = 1",
+                (10, int(REAL_MRN)),
+            )
+    finally:
+        conn.close()
+    yield 10
+    conn = _anon_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE key_value SET date_perturbation = NULL WHERE key_value = %s AND key_type_id = 1",
+                (int(REAL_MRN),),
+            )
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -161,9 +199,12 @@ def test_job_patients_summary_scrubs_the_real_mrn_out_of_reason_fields(client, j
     patient = resp.json()["patients"][0]
 
     assert patient["mosaiq_reason"] == f"Could not query AE_ONE: connection refused for patient {ANON_MRN}"
-    assert patient["pinnacle_reason"] == (
-        f"Could not reconstruct DICOM: no RTSTRUCT for {ANON_MRN} at /pinnacle/{ANON_MRN}/Plan_1"
-    )
+    # The trailing filesystem path is ALSO redacted now, on top of the real
+    # MRN it contained -- _scrub goes through pii_patterns.redact(), whose
+    # generic pattern floor forbids a server filesystem path from crossing
+    # this boundary at all (docs/pii-boundary-safety.md §0), not just the
+    # real id embedded in it.
+    assert patient["pinnacle_reason"] == f"Could not reconstruct DICOM: no RTSTRUCT for {ANON_MRN} at [redacted]"
     assert patient["proknow_reason"] == "Patient not found on ProKnow"
 
     # The load-bearing assertion: the real MRN must not appear ANYWHERE in
@@ -362,6 +403,13 @@ def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_sc
     but `path` is built from the MRN and `comment`/`error_message` quote it.
     Those three free-text fields are the only way a real id could cross this
     boundary, on precisely the page built for reading error text.
+
+    `path` is a genuine server filesystem path -- pii_patterns.redact()'s
+    generic pattern floor (routed through here via _scrub) forbids that from
+    crossing the boundary at all, not just the real id it happened to
+    contain (docs/pii-boundary-safety.md §0 names "server filesystem paths"
+    alongside real MRNs/dates/UIDs as forbidden) -- so the whole field comes
+    back as the redaction placeholder, not a real-id-for-anon-id swap.
     """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -387,11 +435,46 @@ def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_sc
 
     assert body["available"] is True
     plan = body["plans"][0]
-    assert plan["path"] == f"/pinnacle/patients/{ANON_MRN}/Plan_1"
+    assert plan["path"] == "[redacted]"  # a real path, forbidden regardless of the id inside it
     assert plan["comment"] == f"re-run for {ANON_MRN}"
     assert plan["error_message"] == f"RTSTRUCT missing for patient {ANON_MRN}"
     assert plan["plan_name"] == "Prostate"  # untouched
     assert REAL_MRN not in resp.text
+
+
+def test_plans_shifts_plan_date(client, plans_schema, perturbation):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {PINNACLE_SCHEMA}.plans
+                (mrn, path, plan_id, plan_name, plan_date, status)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (REAL_MRN, "dev-seed/plan-1", 1, "Prostate", "2026-01-01", "complete"),
+        )
+
+    resp = client.get(f"/results/patient/{ANON_MRN}/plans")
+    assert resp.status_code == 200
+    plan = resp.json()["plans"][0]
+    assert plan["plan_date"] == "2026-01-11"  # 2026-01-01 + 10 days
+    assert "2026-01-01" not in resp.text  # the raw date never appears
+
+
+def test_plans_null_plan_date_stays_null(client, plans_schema, perturbation):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            INSERT INTO {PINNACLE_SCHEMA}.plans
+                (mrn, path, plan_id, plan_name, plan_date, status)
+            VALUES (%s, %s, %s, %s, NULL, %s)
+            """,
+            (REAL_MRN, "dev-seed/plan-2", 2, "Undated", "complete"),
+        )
+
+    resp = client.get(f"/results/patient/{ANON_MRN}/plans")
+    assert resp.status_code == 200
+    plan = resp.json()["plans"][0]
+    assert plan["plan_date"] is None
 
 
 def test_plans_unavailable_when_pinnacle_schema_absent(client):

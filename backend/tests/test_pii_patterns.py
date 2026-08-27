@@ -275,3 +275,36 @@ class TestRedact:
         assert "1.2.840.10008.5.1.4.1.1.481.3" not in result
         assert "u:p@" not in result
         assert "1001" in result
+
+
+class TestRedactDict:
+    def test_redacts_string_values_only(self):
+        result = pii_patterns.redact_dict(
+            {"mosaiq_reason": "failed for 500123", "in_mosaiq": False, "study_count": 2},
+            real_id="500123", display_id="1001",
+        )
+        assert result == {"mosaiq_reason": "failed for 1001", "in_mosaiq": False, "study_count": 2}
+
+    def test_does_not_recurse_into_nested_structures(self):
+        # By design -- every direct caller passes a flat Response.model_dump(),
+        # not a JSONB blob; results/endpoints.py's _scrub_json handles the
+        # genuinely-nested case separately.
+        result = pii_patterns.redact_dict(
+            {"nested": {"id": "500123"}}, real_id="500123", display_id="1001",
+        )
+        assert result == {"nested": {"id": "500123"}}
+
+    def test_none_input_returns_empty_dict(self):
+        assert pii_patterns.redact_dict(None) == {}
+
+    def test_empty_dict_returns_empty_dict(self):
+        assert pii_patterns.redact_dict({}) == {}
+
+    def test_no_real_id_still_applies_generic_floor(self):
+        result = pii_patterns.redact_dict({"note": "scanned 20260115"})
+        assert "20260115" not in result["note"]
+
+    def test_does_not_mutate_input(self):
+        original = {"reason": "failed for 500123"}
+        pii_patterns.redact_dict(original, real_id="500123", display_id="1001")
+        assert original == {"reason": "failed for 500123"}
