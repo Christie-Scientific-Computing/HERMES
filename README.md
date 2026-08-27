@@ -1,18 +1,18 @@
 <img src='./static/hermes-logo.svg'>
 
-### Handles Everything: Receive, Modify, Export Stuff
+## Handles Everything: Restore, Modify, Export Stuff
 
-Web-app for exporting plans from all data sources (Pinnacle, Raystation, Mosaiq).
+Web-app for restoring and exporting plans from radiotherapy systems.
 
 ## Outline
-*1. Receive*: Centralises data across data sources. Imports data (granularity specified by `import_level`) from MOSAIQ, Pinnacle (via PinnacleExport) and Raystation (*TODO*) into a single Orthanc node (specified by `ORTHANC_URL`).
+*1. Restore*: Centralises data across data sources. Imports data (granularity specified by `import_level`) from MOSAIQ, Pinnacle (via PinnacleExport) and Raystation (*TODO*) into a single Orthanc node (specified by `ORTHANC_URL`).
 
 *2. Modify*: Not implemented
 
 *3. Export*: Exports data from Orthanc to other DICOM nodes (need to be registered as Orthanc Modalities) or to ProKnow.
 
 ## System Architecture
-<img src='./static/diagram.png'>
+<img src='./static/user-diagram.svg' width="800">
 
 One FastAPI backend (`backend/`) holds every feature; one or more `backend/worker.py` processes execute queued batch import/export jobs. An optional thin reverse proxy (`proxy/`) can sit in front of the backend on a separate machine for external access. Two frontends currently exist side by side: `frontend/` (Django, production today) and `frontend_fastapi/` (FastAPI + Jinja2, its in-progress replacement — not yet feature-complete, see Known Issues below).
 
