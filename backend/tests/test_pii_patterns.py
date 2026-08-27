@@ -82,6 +82,36 @@ class TestFindPaths:
         found = pii_patterns.find_paths(text)
         assert any("tmp/9f1c2b3a_patients.csv" in f for f in found)
 
+    def test_two_distinct_occurrences_of_the_same_filename_are_not_collapsed(self):
+        # Positional dedup must not drop a genuinely separate, later
+        # occurrence just because its text is a substring of an earlier,
+        # unrelated match elsewhere in the string.
+        text = "export A at tmp/patients.csv done; separate retry at archive/tmp/patients.csv done"
+        found = pii_patterns.find_paths(text)
+        joined = " ".join(found)
+        assert "tmp/patients.csv" in joined
+        assert "archive/tmp/patients.csv" in joined
+        # both redacted, not just the first
+        redacted = pii_patterns.redact(text)
+        assert "patients.csv" not in redacted
+
+    def test_quoted_path_match_is_length_bounded(self):
+        # An unrelated, distant quote character elsewhere in the same
+        # string must not let the quoted-path match swallow everything
+        # between it and the real path.
+        far_prefix = "x" * 1000
+        text = f"log: '{far_prefix}' and separately 'tmp/real_leak.csv' happened"
+        found = pii_patterns.find_paths(text)
+        assert any(len(f) < 400 for f in found)
+        assert not any(len(f) > 900 for f in found)
+
+    def test_bare_relative_pattern_over_redacts_ordinary_prose_by_design(self):
+        # Documents an accepted tradeoff (docs/pii-boundary-safety.md SS3:
+        # over-redaction is the safe failure mode) rather than a bug --
+        # an unrooted word/word.ext shape can't be distinguished from a
+        # real relative path by regex alone.
+        assert pii_patterns.find_paths("see input/output.py for details") != []
+
 
 class TestFindSecrets:
     def test_finds_postgres_connection_string(self):

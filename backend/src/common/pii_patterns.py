@@ -57,7 +57,12 @@ _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\(?:[\w.\-]+\\)*[\w.\-]+")
 # root would miss entirely, and pandas/open()'s own FileNotFoundError
 # quotes that exact bare form. Extension-terminated so this doesn't swallow
 # unrelated slash-separated text (a ratio, "and/or") that never ends in a
-# dotted extension.
+# dotted extension -- but being unrooted, it WILL still flag ordinary prose
+# that happens to look like "word/word.ext" (e.g. "input/output.py",
+# "etc/config.yaml"). That's an accepted false-positive, not an oversight:
+# this module's whole design (docs/pii-boundary-safety.md SS3) treats
+# over-redaction as the safe failure mode and under-redaction as the unsafe
+# one -- see test_bare_relative_pattern_over_redacts_ordinary_prose_by_design.
 _BARE_RELATIVE_PATH_RE = re.compile(r"\b[\w\-]+(?:/[\w\-]+)*/[\w\-]+\.[A-Za-z][A-Za-z0-9]{0,7}\b")
 # A user-uploaded filename can contain a space (e.g. "patient list.csv"),
 # which the character-class-based patterns above can't span -- but Python's
@@ -65,7 +70,11 @@ _BARE_RELATIVE_PATH_RE = re.compile(r"\b[\w\-]+(?:/[\w\-]+)*/[\w\-]+\.[A-Za-z][A
 # (`'tmp/x patients.csv'`), so matching "anything single/double-quoted that
 # contains a slash" catches the space-bearing case the structural patterns
 # above miss, without needing to guess which characters a filename may hold.
-_QUOTED_PATH_RE = re.compile(r"'[^'\n]*/[^'\n]*'|\"[^\"\n]*/[^\"\n]*\"")
+# The {0,300} bound (a real path is never that long) caps how much text an
+# adversarial or coincidentally-unbalanced quote count elsewhere in the same
+# string could pull into one match -- without it this is unbounded and could
+# swallow everything between two distant, unrelated quote characters.
+_QUOTED_PATH_RE = re.compile(r"'[^'\n]{0,300}/[^'\n]{0,300}'|\"[^\"\n]{0,300}/[^\"\n]{0,300}\"")
 PATH_PATTERNS = (_UNIX_PATH_RE, _WINDOWS_PATH_RE, _BARE_RELATIVE_PATH_RE, _QUOTED_PATH_RE)
 
 # DB connection strings (postgres://user:pass@host/db, or any scheme://user:pass@...)
@@ -135,19 +144,33 @@ def find_paths(text: str) -> list[str]:
     pattern both fire on overlapping text (the bare pattern has no way to
     know a "/"-rooted match already covers it), and a quoted match wholly
     contains whatever structural pattern matched inside the quotes -- so
-    results are deduplicated down to maximal, non-overlapping matches
-    (longest first, dropping anything that's a substring of an already-kept
-    match) rather than returned as raw per-pattern hits.
-    """
-    found = []
-    for pattern in PATH_PATTERNS:
-        found.extend(m.group(0) for m in pattern.finditer(text))
+    overlapping hits are collapsed down to maximal spans, keeping the
+    longest match at each position and dropping any span fully contained
+    within one already kept.
 
-    deduped: list[str] = []
-    for candidate in sorted(set(found), key=len, reverse=True):
-        if not any(candidate in kept for kept in deduped):
-            deduped.append(candidate)
-    return deduped
+    Deliberately positional (by match span), not by comparing matched TEXT:
+    an earlier text-equality-based version of this dedup would incorrectly
+    drop a second, later, genuinely distinct occurrence of a leaked path
+    whenever its text happened to be a literal substring of a different
+    match elsewhere in the same string (e.g. the same filename appearing at
+    two different directories) -- silently leaving that second leak
+    unredacted. Position-based dedup only ever drops a span that is
+    literally inside another match's span, which can't discard a distinct
+    occurrence.
+    """
+    spans: list[tuple[int, int]] = []
+    for pattern in PATH_PATTERNS:
+        spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
+
+    # Longest-first so a shorter, fully-contained span is skipped in favour
+    # of the match that already covers it.
+    spans.sort(key=lambda span: (span[0], -(span[1] - span[0])))
+    kept: list[tuple[int, int]] = []
+    for start, end in spans:
+        if any(k_start <= start and end <= k_end for k_start, k_end in kept):
+            continue
+        kept.append((start, end))
+    return [text[start:end] for start, end in kept]
 
 
 def find_secrets(text: str) -> list[str]:

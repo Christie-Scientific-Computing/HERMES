@@ -32,16 +32,20 @@ _DATE_FORMATTERS = {
 
 
 def _date_variants(value: str) -> set[str]:
-    """Every DA/ISO/slash rendering of a given raw date string.
+    """Every DA/ISO/slash rendering of a raw date given in DA or ISO form.
 
     A caller of assert_no_pii(..., real_dates=[...]) only knows the raw date
-    in whatever format they happened to seed it in (typically DICOM DA, from
-    a fixture's StudyDate) -- but the endpoint under test might echo an
-    unshifted leak in a different format (e.g. ISO). Exact-string-only
-    matching against a single format would silently miss that. Falls back to
-    just the literal value if it doesn't parse as a recognised date shape at
-    all (e.g. a non-date string passed by mistake) -- still checked as-is,
-    just with no extra variants added.
+    in whatever format they happened to seed it in -- always DICOM DA or ISO
+    in this codebase (every real date source is one of those two; nothing
+    here ever produces slash-separated dates as input, only as a defensive
+    output variant) -- but the endpoint under test might echo an unshifted
+    leak in a different format (e.g. ISO when DA was seeded). Exact-string-
+    only matching against a single format would silently miss that.
+
+    Only DA/ISO are accepted as the INPUT format -- a slash-form raw_date
+    isn't parsed (DD/MM vs MM/DD is ambiguous without knowing the source
+    convention, and no caller needs it) -- it falls back to just the literal
+    value unexpanded, still checked as-is.
     """
     variants = {value}
     parsed = None
