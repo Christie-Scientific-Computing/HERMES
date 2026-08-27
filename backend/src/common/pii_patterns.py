@@ -63,18 +63,36 @@ _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\(?:[\w.\-]+\\)*[\w.\-]+")
 # this module's whole design (docs/pii-boundary-safety.md SS3) treats
 # over-redaction as the safe failure mode and under-redaction as the unsafe
 # one -- see test_bare_relative_pattern_over_redacts_ordinary_prose_by_design.
-_BARE_RELATIVE_PATH_RE = re.compile(r"\b[\w\-]+(?:/[\w\-]+)*/[\w\-]+\.[A-Za-z][A-Za-z0-9]{0,7}\b")
+#
+# Every quantifier here is bounded ({1,120} per segment, {1,20} segments) --
+# NOT for correctness (an unbounded `+` would match the same realistic
+# paths) but for time complexity: this is meant to run on arbitrary free
+# text, including (per later steps of this plan) a global exception handler
+# fed attacker-influenced strings, and a string with no valid extension
+# anywhere forces the engine to retry the match at every "\b" position with
+# no early exit. Unbounded segment/repetition counts made that O(n^2) --
+# confirmed via a 100k-char adversarial "a/a/a/.../a" input going from
+# several seconds to under 0.1s once bounded. A real path is never anywhere
+# near 120 chars per segment or 20 directories deep, so this loses no
+# realistic match.
+_BARE_RELATIVE_PATH_RE = re.compile(r"\b[\w\-]{1,120}(?:/[\w\-]{1,120}){1,20}\.[A-Za-z][A-Za-z0-9]{0,7}\b")
 # A user-uploaded filename can contain a space (e.g. "patient list.csv"),
 # which the character-class-based patterns above can't span -- but Python's
 # own OSError/FileNotFoundError repr always quotes the path
 # (`'tmp/x patients.csv'`), so matching "anything single/double-quoted that
 # contains a slash" catches the space-bearing case the structural patterns
 # above miss, without needing to guess which characters a filename may hold.
-# The {0,300} bound (a real path is never that long) caps how much text an
-# adversarial or coincidentally-unbalanced quote count elsewhere in the same
-# string could pull into one match -- without it this is unbounded and could
-# swallow everything between two distant, unrelated quote characters.
-_QUOTED_PATH_RE = re.compile(r"'[^'\n]{0,300}/[^'\n]{0,300}'|\"[^\"\n]{0,300}/[^\"\n]{0,300}\"")
+# The bound (a real path is never anywhere near this long) caps how much
+# text an adversarial or coincidentally-unbalanced quote count elsewhere in
+# the same string could pull into one match -- without it this is unbounded
+# and could swallow everything between two distant, unrelated quote
+# characters. 1024 rather than the original 300: comfortable headroom over
+# any realistic `./tmp/{uuid}_{filename}` shape (a uuid is ~36 chars, most
+# filesystems cap a single filename around 255) without meaningfully
+# widening the "swallow a huge blob" blast radius -- this is a bounded
+# quantifier on a single non-nested character class either way, so raising
+# it doesn't reintroduce the quadratic-time risk above.
+_QUOTED_PATH_RE = re.compile(r"'[^'\n]{0,1024}/[^'\n]{0,1024}'|\"[^\"\n]{0,1024}/[^\"\n]{0,1024}\"")
 PATH_PATTERNS = (_UNIX_PATH_RE, _WINDOWS_PATH_RE, _BARE_RELATIVE_PATH_RE, _QUOTED_PATH_RE)
 
 # DB connection strings (postgres://user:pass@host/db, or any scheme://user:pass@...)
@@ -140,37 +158,38 @@ def find_paths(text: str) -> list[str]:
     Every substring of `text` that looks like a filesystem path, across all
     of PATH_PATTERNS.
 
-    A rooted match (e.g. "/var/hermes/tmp/foo.csv") and the bare-relative
-    pattern both fire on overlapping text (the bare pattern has no way to
-    know a "/"-rooted match already covers it), and a quoted match wholly
-    contains whatever structural pattern matched inside the quotes -- so
-    overlapping hits are collapsed down to maximal spans, keeping the
-    longest match at each position and dropping any span fully contained
-    within one already kept.
-
-    Deliberately positional (by match span), not by comparing matched TEXT:
-    an earlier text-equality-based version of this dedup would incorrectly
-    drop a second, later, genuinely distinct occurrence of a leaked path
-    whenever its text happened to be a literal substring of a different
-    match elsewhere in the same string (e.g. the same filename appearing at
-    two different directories) -- silently leaving that second leak
-    unredacted. Position-based dedup only ever drops a span that is
-    literally inside another match's span, which can't discard a distinct
-    occurrence.
+    Different patterns routinely fire on overlapping text (a rooted match
+    and the bare-relative pattern both matching the same tail end; a quoted
+    match wholly containing whatever structural pattern matched inside the
+    quotes) -- including PARTIAL overlap, not just one span fully containing
+    another (e.g. a rooted match ending mid-segment and a bare-relative
+    match starting a few characters earlier, both ending at different
+    points). redact() replaces each returned string via a single global
+    `str.replace`, so any character covered by one match but excluded from
+    every OTHER returned match is what actually gets redacted -- a
+    contained-spans-only dedup (an earlier version of this function) drops
+    the shorter span outright when neither fully contains the other, and
+    leaves the non-overlapping tail of the dropped span un-redacted. Merging
+    all overlapping/touching spans into their union closes that: every
+    character any pattern matched is covered by exactly one returned
+    (possibly larger) span, so nothing a pattern found is ever silently
+    dropped.
     """
     spans: list[tuple[int, int]] = []
     for pattern in PATH_PATTERNS:
         spans.extend((m.start(), m.end()) for m in pattern.finditer(text))
+    if not spans:
+        return []
 
-    # Longest-first so a shorter, fully-contained span is skipped in favour
-    # of the match that already covers it.
-    spans.sort(key=lambda span: (span[0], -(span[1] - span[0])))
-    kept: list[tuple[int, int]] = []
-    for start, end in spans:
-        if any(k_start <= start and end <= k_end for k_start, k_end in kept):
-            continue
-        kept.append((start, end))
-    return [text[start:end] for start, end in kept]
+    spans.sort()
+    merged: list[list[int]] = [list(spans[0])]
+    for start, end in spans[1:]:
+        last = merged[-1]
+        if start <= last[1]:  # overlapping or directly touching
+            last[1] = max(last[1], end)
+        else:
+            merged.append([start, end])
+    return [text[start:end] for start, end in merged]
 
 
 def find_secrets(text: str) -> list[str]:

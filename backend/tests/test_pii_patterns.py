@@ -112,6 +112,30 @@ class TestFindPaths:
         # real relative path by regex alone.
         assert pii_patterns.find_paths("see input/output.py for details") != []
 
+    def test_partially_overlapping_matches_are_fully_redacted_not_dropped(self):
+        # A rooted match and a bare-relative match can overlap WITHOUT
+        # either fully containing the other (unlike the earlier
+        # same-filename-twice case above) -- a contained-spans-only dedup
+        # would drop the shorter one outright and leave its non-overlapping
+        # tail un-redacted. Both repros below leaked a bare filename
+        # ("patients.csv"/"output.csv") under that earlier version.
+        assert "patients.csv" not in pii_patterns.redact("archive/backup.v2-1/patients.csv missing")
+        assert "output.csv" not in pii_patterns.redact("wrote logs/run.log-3/output.csv")
+
+    def test_bare_relative_pattern_is_not_quadratic_on_adversarial_input(self):
+        # A long run of "/"-separated segments with no valid trailing
+        # extension anywhere forces the regex engine to retry the match at
+        # every word-boundary start position; unbounded segment/repetition
+        # quantifiers made this O(n^2) (multi-second on ~16k chars).
+        # Bounded quantifiers should keep this comfortably sub-second even
+        # at 100k chars.
+        import time
+
+        text = "a/" * 100_000 + "a"
+        start = time.monotonic()
+        pii_patterns.find_paths(text)
+        assert time.monotonic() - start < 2.0
+
 
 class TestFindSecrets:
     def test_finds_postgres_connection_string(self):
