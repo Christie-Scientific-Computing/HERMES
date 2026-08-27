@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from backend.src.export.logic import Exporter, checksummed_series_manifest
 from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
-from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch
+from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_batch, to_public_details
 from backend.src.identity import anon
 from backend.src.projects import enforcement
 from backend.src.projects.enforcement import verify_internal_key
@@ -289,7 +289,14 @@ async def proknow_upload_patient(body: Request):
             except Exception as e:
                 logger.warning("Status DB write failed: %s", e)
 
-        return {'type': 'success', 'execution_time': np.round(time.time() - start, 2), **response.model_dump()}
+        # response.model_dump() keeps full fidelity in the add_event call
+        # above -- only this outbound return goes through
+        # to_public_details, which strips study_uids/series_uids and
+        # reshapes checksums (see its docstring, backend/src/common/sse.py).
+        return {
+            'type': 'success', 'execution_time': np.round(time.time() - start, 2),
+            **to_public_details(response.model_dump()),
+        }
 
     except Exception as e:
         # Record failure

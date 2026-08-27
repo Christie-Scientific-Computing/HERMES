@@ -410,23 +410,31 @@ def test_manifest_fields_reach_sse_payload_and_events_details(client, tmp_path, 
     success = success_events[0]
     assert success["series_count"] == 2
     assert success["instance_count"] == 5
-    assert success["study_uids"] == ["1.2.840.study.end2end"]
-    assert success["series_uids"] == ["1.2.840.series.end2end.a", "1.2.840.series.end2end.b"]
-    assert success["checksums"] == {"1.2.840.sop.end2end.1": "deadbeef"}
+    # UIDs never cross the HTTP/SSE boundary (docs/plans/pii-boundary-test-suite.md
+    # decision 6 + §C) -- see test_export_manifest_shape.py for the
+    # dedicated coverage of this reshape; asserted here too since this is
+    # the one test exercising the real end-to-end run_batch_job path.
+    assert "study_uids" not in success
+    assert "series_uids" not in success
+    assert success["checksums"] == ["deadbeef"]  # re-keyed to a plain list of hash values
     assert success["destination"] == "SOME_AE"
     assert success["destination_type"] == "dicom_modality"
     assert success["submitted_by"] == username
     assert success["mrn"] == ANON_MRN  # outbound boundary: anon id, never the real one
     assert REAL_MRN not in resp.text
 
-    # And the same fields landed in events.details via StatusDB.add_event
-    # (backend-internal storage, real id).
+    # And the FULL-FIDELITY fields (including real UIDs) landed in
+    # events.details via StatusDB.add_event (backend-internal storage, real
+    # id) -- the reshape above is only at the outbound SSE emission point,
+    # never applied to what gets written to the audit trail.
     history = export_endpoints.status_db.get_patient_history(job_id, REAL_MRN)
     success_db_events = [e for e in history if e["event_type"] == "success"]
     assert len(success_db_events) == 1
     details = success_db_events[0]["details"]
     assert details["series_count"] == 2
     assert details["instance_count"] == 5
+    assert details["study_uids"] == ["1.2.840.study.end2end"]
+    assert details["series_uids"] == ["1.2.840.series.end2end.a", "1.2.840.series.end2end.b"]
     assert details["checksums"] == {"1.2.840.sop.end2end.1": "deadbeef"}
     assert details["destination"] == "SOME_AE"
     assert details["destination_type"] == "dicom_modality"

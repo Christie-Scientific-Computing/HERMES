@@ -20,7 +20,7 @@ from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 from backend.src.plans.db_client import PlansDB
 from backend.src.identity import anon
-from backend.src.common.sse import format_sse
+from backend.src.common.sse import format_sse, to_public_details
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/results', tags=['results'])
@@ -50,16 +50,35 @@ def _anonymize_events(events: list[dict]) -> list[dict]:
     MRN it was handed; `details` is a worker's own return value. Translating
     only the structured `mrn` column left the real id crossing the boundary in
     prose -- on the timeline, which is the page people read errors on.
+
+    `details` also goes through to_public_details (backend/src/common/sse.py)
+    -- an export-stage success event's details carries the same real
+    study_uids/series_uids/checksums the observer stream (_observe_job) and
+    every other outbound emission point strip; a DICOM UID never contains
+    the MRN, so _scrub_json's substring substitution alone never touches it.
+    This is the patient timeline, backing GET /results/patient/{job_id}/{mrn}
+    and GET /results/patient/timeline/{mrn}/all -- the same missed emission
+    point applies to both.
     """
     if not events:
         return events
     display_map = anon.to_display_ids([e["mrn"] for e in events])
+
+    def _public_details(e: dict) -> Optional[dict]:
+        # Preserves a genuine None (no details recorded for this event) as
+        # None rather than to_public_details' own None-in/{}-out contract
+        # -- unlike _observe_job's pre-existing `or {}`, this endpoint never
+        # substituted an empty dict for "no details" before, and changing
+        # that shape isn't this fix's job.
+        scrubbed = _scrub_json(e.get("details"), e["mrn"], display_map[e["mrn"]])
+        return to_public_details(scrubbed) if scrubbed is not None else None
+
     return [
         {
             **e,
             "mrn": display_map[e["mrn"]],
             "error_message": _scrub(e.get("error_message"), e["mrn"], display_map[e["mrn"]]),
-            "details": _scrub_json(e.get("details"), e["mrn"], display_map[e["mrn"]]),
+            "details": _public_details(e),
         }
         for e in events
     ]
@@ -297,7 +316,12 @@ async def _observe_job(job_id: str) -> AsyncIterator[str]:
                     progress_reported.add(task_id)
                     yield format_sse({"type": "progress", "current": display_id, "stage": stage})
             elif state == "succeeded":
-                details = _scrub_json(row["details"], real_id, display_id) or {}
+                # to_public_details strips real DICOM UIDs (study_uids/
+                # series_uids/checksums' keys) -- see its docstring
+                # (backend/src/common/sse.py). row["details"] itself (the
+                # tasks.details DB column) keeps full fidelity; only this
+                # outbound yield is reshaped.
+                details = to_public_details(_scrub_json(row["details"], real_id, display_id) or {})
                 yield format_sse({"type": "success", "mrn": display_id, "stage": stage, **details})
             elif state == "failed" or (state == "cancelled" and row["error_message"]):
                 # 'cancelled' is two different things, distinguished by
