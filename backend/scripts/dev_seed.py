@@ -54,6 +54,14 @@ ADMIN = "admin"
 MRNS = [f"900000{i}" for i in range(1, 7)]  # 9000001..9000006
 ANON_IDS = list(range(1001, 1007))  # 1001..1006
 
+# One non-zero date_perturbation (day offset, key_value.date_perturbation)
+# per seeded MRN, in lockstep with MRNS/ANON_IDS above -- so local dev/
+# testing can exercise identity/anon.py's shift_date, not just the id
+# mapping. Deliberately varied (mix of past/future, small/large) rather
+# than one repeated value, so a bug that only shows up for a particular
+# sign or magnitude of offset isn't hidden.
+DATE_PERTURBATIONS = [-45, 12, 200, -7, 30, -100]
+
 PROJECTS = {
     "dev-proj-draft": "Draft project",
     "dev-proj-submitted": "Submitted, awaiting review",
@@ -224,15 +232,26 @@ def seed_anon_db() -> None:
                     id SERIAL PRIMARY KEY,
                     patient_id BIGINT NOT NULL,
                     key_value BIGINT NOT NULL,
-                    key_type_id INT NOT NULL
+                    key_type_id INT NOT NULL,
+                    date_perturbation INT
                 )
                 """
             )
+            # ALTER ... ADD COLUMN IF NOT EXISTS covers a database seeded by
+            # an older version of this script, before date_perturbation
+            # existed -- CREATE TABLE IF NOT EXISTS above is a no-op against
+            # an already-existing table, so the column would otherwise never
+            # get added to a dev database that predates this change.
+            cur.execute("ALTER TABLE key_value ADD COLUMN IF NOT EXISTS date_perturbation INT")
             cur.execute("SELECT COUNT(*) FROM key_value WHERE key_type_id = 1")
             if cur.fetchone()[0] == 0:
-                rows = [(anon_id, int(mrn), 1) for anon_id, mrn in zip(ANON_IDS, MRNS)]
+                rows = [
+                    (anon_id, int(mrn), 1, perturbation)
+                    for anon_id, mrn, perturbation in zip(ANON_IDS, MRNS, DATE_PERTURBATIONS)
+                ]
                 cur.executemany(
-                    "INSERT INTO key_value (patient_id, key_value, key_type_id) VALUES (%s, %s, %s)",
+                    "INSERT INTO key_value (patient_id, key_value, key_type_id, date_perturbation) "
+                    "VALUES (%s, %s, %s, %s)",
                     rows,
                 )
     finally:

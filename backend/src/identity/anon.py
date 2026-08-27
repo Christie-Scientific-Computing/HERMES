@@ -17,6 +17,14 @@ If ANON_DB_HOST is not set, is_configured() returns False and callers should
 operate in passthrough mode (no anonymisation) -- e.g. internal-only
 deployments that don't need this at all.
 
+`key_value` also carries a `date_perturbation INT` column (one value per
+key_type_id=1 row, alongside the id mapping) -- a per-patient day offset,
+positive shifting a date into the future, negative into the past. See
+get_date_perturbation(s)/shift_date below (docs/plans/pii-boundary-test-suite.md
+§B): clinical dates crossing the API boundary are shifted by this amount
+rather than redacted outright, preserving the relative time intervals
+between a patient's scans while breaking the link to real calendar dates.
+
 Optional hardening (see docs/safety-plan.md §B1), both opt-in and unset by
 default -- matching this module's existing idiom of "unset means today's
 behavior, unchanged":
@@ -37,9 +45,11 @@ behavior, unchanged":
                             informational (nothing is blocked or rejected).
 """
 import os
+import re
 import time
 import logging
 import threading
+from datetime import datetime, timedelta
 from typing import Optional
 
 import psycopg2
@@ -75,6 +85,11 @@ _SQL_ANON_TO_REAL = """
 """
 _SQL_REAL_TO_ANON = """
     SELECT key_value as real_id, patient_id as anon_id
+    FROM   key_value
+    WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
+"""
+_SQL_DATE_PERTURBATION = """
+    SELECT key_value as real_id, date_perturbation
     FROM   key_value
     WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
 """
@@ -286,3 +301,99 @@ def to_display_ids(real_ids: list[str]) -> dict[str, str]:
     if not is_configured():
         return {r: r for r in real_ids}
     return lookup_anon_ids(real_ids)
+
+
+def get_date_perturbations(real_ids: list[str]) -> dict[str, int]:
+    """
+    Batch fetch each real id's day offset (key_value.date_perturbation,
+    key_type_id=1) -- positive shifts a date into the future, negative into
+    the past. Mirrors lookup_real_ids' shape (batched, dict return, id-list
+    dedup, lookup-volume tracking) since it hits the same table via the same
+    pool.
+
+    Passthrough (ANON_DB_HOST unset): every id maps to 0 (no shift) --
+    consistent with dates not being touched at all in an internal-only
+    deployment, same as the existing id-mapping passthrough.
+
+    Raises AnonLookupError if any id has no row, OR has a row with a NULL
+    date_perturbation -- deliberately NOT defaulted to 0 in either case. A
+    silent "no shift" default here would mean the caller falls through to
+    returning the raw, unshifted real date -- exactly the leak this
+    mechanism exists to prevent (see shift_date below, which instead
+    redacts to None on this error). Raises AnonServiceError if the DB
+    itself can't be reached/queried, same as every other lookup in this
+    module.
+    """
+    if not real_ids:
+        return {}
+    if not is_configured():
+        return {r: 0 for r in real_ids}
+
+    unique = list(dict.fromkeys(real_ids))
+    _note_lookup_volume(len(unique))
+    as_ints = _to_bigints(unique)
+    rows = _query(_SQL_DATE_PERTURBATION, list(as_ints.values()))
+
+    mapping = {str(row[0]): row[1] for row in rows}
+    missing = [rid for rid in unique if mapping.get(rid) is None]
+    if missing:
+        raise AnonLookupError(
+            f"No date_perturbation on record for real id{'s' if len(missing) > 1 else ''}: "
+            + ", ".join(missing)
+        )
+    return {rid: int(mapping[rid]) for rid in unique}
+
+
+def get_date_perturbation(real_id: str) -> int:
+    """Single-id convenience wrapper around get_date_perturbations."""
+    return get_date_perturbations([real_id])[real_id]
+
+
+_DA_FORMAT = "%Y%m%d"
+_ISO_FORMAT = "%Y-%m-%d"
+_DA_SHAPE = re.compile(r"\d{8}")
+_ISO_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def shift_date(real_id: str, date_str: Optional[str]) -> Optional[str]:
+    """
+    Shift a clinical date by real_id's per-patient day offset
+    (get_date_perturbation), preserving the relative time interval between
+    a patient's scans while breaking the link to the real calendar date --
+    see docs/plans/pii-boundary-test-suite.md §B.
+
+    Detects DICOM DA (YYYYMMDD) vs ISO (YYYY-MM-DD) format from the input
+    and re-formats the output the same way, so callers never need to know
+    which format a given field uses.
+
+    Returns None -- fail-SAFE, never the unshifted raw value -- for an
+    empty/absent input date, an input that isn't DA or ISO shaped, an input
+    that doesn't parse as a real calendar date, or a failed perturbation
+    lookup (AnonLookupError/AnonServiceError). A caller getting None back
+    must render it as "unknown"/omit the field, never fall back to the raw
+    `date_str` it was given.
+    """
+    if not date_str:
+        return None
+
+    if _DA_SHAPE.fullmatch(date_str):
+        fmt = _DA_FORMAT
+    elif _ISO_SHAPE.fullmatch(date_str):
+        fmt = _ISO_FORMAT
+    else:
+        logger.warning("shift_date given a value in neither DA nor ISO format; redacting")
+        return None
+
+    try:
+        parsed = datetime.strptime(date_str, fmt).date()
+    except ValueError:
+        logger.warning("shift_date given a value that isn't a real calendar date; redacting")
+        return None
+
+    try:
+        offset_days = get_date_perturbation(real_id)
+    except (AnonLookupError, AnonServiceError):
+        logger.warning("Could not determine date perturbation for real id; redacting date")
+        return None
+
+    return (parsed + timedelta(days=offset_days)).strftime(fmt)
