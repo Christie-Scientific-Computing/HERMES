@@ -36,7 +36,7 @@ from frontend_fastapi.flash import flash
 # lifespan, which this fixture never runs; see main.py).
 from frontend_fastapi.main import _forbidden, _not_authenticated
 from frontend_fastapi.models import Base, Session, User
-from frontend_fastapi.routers import accounts, research_projects
+from frontend_fastapi.routers import accounts, jobs, research_projects
 from frontend_fastapi.session_middleware import SessionMiddleware
 
 
@@ -143,6 +143,7 @@ def app(SessionFactory):
     # directly rather than the /test/* stand-ins below, which stay in
     # place for the lower-level session/CSRF/auth-gate primitive tests
     # that predate any real router existing.
+    test_app.include_router(jobs.router)
     test_app.include_router(accounts.router)
     test_app.include_router(research_projects.router)
 
