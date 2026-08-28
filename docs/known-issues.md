@@ -95,10 +95,22 @@ in more detail. Status reflects the author's decisions, not just severity.
 
 ## Strengths worth preserving through any of the above changes
 
-- The anon/real ID split and free-text scrubbing at every outbound API edge
-  (`backend/src/identity/anon.py`, `results/endpoints.py`'s `_scrub`/`_scrub_json`).
-  See `docs/pii-boundary-safety.md` for where this coverage claim currently
-  overstates reality and the concrete gaps found.
+- The anon/real ID split and PII scrubbing at every outbound API edge:
+  `backend/src/identity/anon.py` (real⇄anon translation, plus
+  `shift_date()` for clinical dates — shifted to preserve relative
+  intervals, not just redacted), `backend/src/common/pii_patterns.py`
+  (general pattern-class redaction — dates/UIDs/paths/secrets/format
+  variants of a known id, not a single hardcoded MRN string),
+  `backend/src/common/sse.py`'s `to_public_details()` (strips real DICOM
+  UIDs from the export manifest and every batch success event),
+  `backend/src/common/errors.py`'s global exception handler (a pattern-based
+  floor on every `HTTPException`, not per-site memory), and
+  `results/endpoints.py`'s `_scrub`/`_scrub_json` (precise real-id
+  substitution, now built on the pattern module above rather than a bare
+  string replace). `docs/pii-boundary-safety.md` has the full design and a
+  risk register recording exactly what each piece closed — the "overstates
+  reality" gap that document once flagged here has been closed by the work
+  it describes.
 - Fail-closed authorization discipline in `backend/src/projects/enforcement.py`
   (a DB error denies, never silently allows).
 - The two-phase, session-gated SSE job pattern in `frontend/jobs/views.py` —
