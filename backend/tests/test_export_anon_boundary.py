@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from backend.src.export import endpoints as export_endpoints
 from backend.src.export.logic import Exporter as RealExporter
 from backend.src.identity import anon
+from backend.tests.support.pii_assertions import assert_no_pii
 
 REAL_MRN_1, ANON_MRN_1 = "500123", "1001"
 REAL_MRN_2, ANON_MRN_2 = "500456", "1002"
@@ -70,12 +71,44 @@ def test_dicom_move_events_use_anon_id_not_real(client, tmp_path, active_project
     assert [e["type"] for e in events] == ["start", "progress", "success", "progress", "success", "done"]
     success_mrns = [e["mrn"] for e in events if e["type"] == "success"]
     assert set(success_mrns) == {ANON_MRN_1, ANON_MRN_2}
-    assert REAL_MRN_1 not in resp.text
-    assert REAL_MRN_2 not in resp.text
+    assert_no_pii(events, real_ids=[REAL_MRN_1, REAL_MRN_2], context="dicom_move success events")
 
     # StatusDB, backend-internal, is allowed to (and does) contain the real ids
     history = export_endpoints.status_db.get_patient_history(job_id, REAL_MRN_1)
     assert [e["event_type"] for e in history] == ["start", "success"]
+
+
+def test_dicom_move_worker_echoing_float_cast_id_still_caught(client, tmp_path, active_project, monkeypatch):
+    """
+    Format-variant coverage: a worker whose result dict echoes the real id
+    float-cast (e.g. round-tripped through a pandas/polars numeric column
+    upstream, the specific coercion bug pii_patterns.real_id_variants was
+    written to catch) must still be caught by assert_no_pii, not just an
+    exact-string match.
+    """
+    class FloatCastExporter:
+        read_input_file = staticmethod(RealExporter.read_input_file)
+
+        def __init__(self, destination):
+            self.destination = destination
+
+        def dicom_c_move(self, patient_id, message_id=None):
+            return {"status": f"moved {float(patient_id)}"}
+
+    monkeypatch.setattr(export_endpoints, "Exporter", FloatCastExporter)
+    project_id, username = active_project
+    csv_path = tmp_path / "patients.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["patient_id"])
+        writer.writerow([ANON_MRN_1])
+
+    resp = client.post("/export/dicom_move", json={
+        "job_id": f"export-floatcast-{uuid.uuid4()}", "path_to_csv": str(csv_path), "destination": "SOME_AE",
+        "project_id": project_id, "username": username,
+    })
+    assert resp.status_code == 200
+    assert_no_pii(_parse_sse(resp.text), real_ids=[REAL_MRN_1], context="dicom_move float-cast-id success event")
 
 
 def test_dicom_move_unknown_anon_id_in_csv_returns_422(client, tmp_path, active_project):

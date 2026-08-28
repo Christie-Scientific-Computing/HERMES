@@ -13,6 +13,7 @@ from backend.src.studies.endpoints import router as studies_router
 from backend.src.projects.endpoints import router as projects_router
 from backend.src.admin.endpoints import router as admin_router
 from backend.src.notifications.endpoints import router as notifications_router
+from backend.src.common.errors import register_pii_safe_exception_handlers
 
 load_dotenv()
 
@@ -36,6 +37,7 @@ else:
     logger.warning("DATABASE_URL not set; ABORTING!")
     exit()
 app = FastAPI()
+register_pii_safe_exception_handlers(app)
 app.include_router(import_router)
 app.include_router(export_router)
 app.include_router(results_router)

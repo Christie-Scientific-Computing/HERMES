@@ -216,12 +216,19 @@ async def run_batch_job(
             #
             # redact_dict only ever handles free text -- it does NOT strip
             # UID-shaped fields (study_uids/series_uids/checksums), a
-            # separate concern this same res should also go through
-            # to_public_details for (plan step 3) once that lands.
+            # separate concern to_public_details (plan step 3) handles;
+            # applied first so redact_dict's free-text pass runs over the
+            # already-UID-stripped/checksums-reshaped dict (order doesn't
+            # actually change the result either way -- to_public_details
+            # only touches study_uids/series_uids/checksums, redact_dict
+            # only touches string leaves -- but this mirrors every other
+            # call site's own compose order).
             yield format_sse({
                 "type": "success",
                 "execution_time": round(time.time() - start, 2),
-                **pii_patterns.redact_dict(res, real_id=item.real_id, display_id=item.display_id),
+                **pii_patterns.redact_dict(
+                    to_public_details(res), real_id=item.real_id, display_id=item.display_id
+                ),
                 "mrn": item.display_id,
             })
 

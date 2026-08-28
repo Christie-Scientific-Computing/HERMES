@@ -1,0 +1,183 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    services:
+      # HermesDB -- fully HERMES-owned, migrated via Alembic below.
+      # Host port matches backend/tests/conftest.py's TEST_DATABASE_URL
+      # default exactly, so DATABASE_URL doesn't need overriding per step.
+      hermesdb:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: hermes_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # Stands in for the anon-mapping DB (backend/src/identity/anon.py) --
+      # an existing, externally-owned database in production; HERMES only
+      # ever SELECTs against it. Host port matches every
+      # test_*_anon_boundary.py file's hardcoded ANON_DB_PORT=55433 exactly.
+      anon_test:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: anon_test
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:test@localhost:55432/hermes_test
+      ANON_DB_HOST: localhost
+      ANON_DB_PORT: "55433"
+      ANON_DB_NAME: anon_test
+      ANON_DB_USER: postgres
+      ANON_DB_PASS: test
+      # retrieve/logic.py's own module-level `PINNACLE_PUSH_PORT =
+      # int(os.getenv('PINNACLE_PUSH_PORT'))` has no fallback for an unset
+      # var -- crashes on import (not just when actually pushing to
+      # Pinnacle) once PinnacleExport is genuinely importable. Values here
+      # are never dialled out to; only need to exist and parse.
+      PINNACLE_PUSH_HOST: localhost
+      PINNACLE_PUSH_PORT: "104"
+      PINNACLE_PUSH_AE_TITLE: TEST_AE
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # No submodules here -- PinnacleExport is fetched as a separate,
+        # explicitly non-fatal step below, matching the Dockerfile's own
+        # approach (a plain `git clone` with a PAT, not `git submodule
+        # update`) rather than actions/checkout's built-in submodules
+        # option, which would fail this whole step (and so the job) if the
+        # PINNACLE_EXPORT_PAT secret is absent/lacks access -- see that
+        # step's own comment for why this must degrade gracefully instead.
+
+      - name: Fetch PinnacleExport submodule (best-effort)
+        # backend/src/retrieve/PinnacleExport is a private submodule
+        # (Dockerfile's own comment: "Requires a PINNACLE_EXPORT_PAT build
+        # secret with read access to the repo"); the same secret is reused
+        # here. retrieve/logic.py (and anything importing it) needs this
+        # checked out, and a handful of test files depend on retrieve/logic.py
+        # transitively -- most guard the shallow "is the package importable
+        # at all" case via `pytest.importorskip("backend.src.retrieve.
+        # PinnacleExport", ...)`, which handles an uninitialized/empty
+        # submodule directory cleanly. This step's own failure (private/
+        # inaccessible/secret unset) must not fail the JOB though, only
+        # leave that directory empty for those guards to catch.
+        #
+        # PinnacleExport also needs its own requirements.txt installed
+        # (below) and Python 3.13 (also below) to actually import cleanly
+        # -- see those steps' own comments for the rest of this story.
+        # Earlier versions of this workflow tried to sidestep both by not
+        # bothering (accepting these ~7 files as permanently uncollectable
+        # in CI) -- traded away needlessly once the real cause was found.
+        env:
+          PINNACLE_EXPORT_PAT: ${{ secrets.PINNACLE_EXPORT_PAT }}
+        run: |
+          rm -rf backend/src/retrieve/PinnacleExport
+          if [ -z "$PINNACLE_EXPORT_PAT" ]; then
+            echo "PINNACLE_EXPORT_PAT not set; skipping. Tests needing PinnacleExport will skip via pytest.importorskip."
+          elif git clone "https://x-access-token:${PINNACLE_EXPORT_PAT}@github.com/Christie-Scientific-Computing/PinnacleExport.git" backend/src/retrieve/PinnacleExport; then
+            echo "PinnacleExport checked out."
+          else
+            echo "PinnacleExport checkout failed; continuing without it. Tests needing it will skip via pytest.importorskip."
+          fi
+
+      - name: Set up Python
+        # 3.13, not 3.12 (Dockerfile.dev's version, the closest existing
+        # convention) -- PinnacleExport's own code
+        # (src/to_dicom/subclasses/base.py) declares
+        # `Generator[tuple[str, str]]`, the single-type-argument shorthand
+        # for typing.Generator. That shorthand only works where
+        # typing.Generator's own type parameters carry defaults, a stdlib
+        # change that landed in 3.13 -- on 3.12, the exact same import
+        # raises `TypeError: Too few arguments for typing.Generator;
+        # actual 1, expected 3`. Confirmed directly: this reproduces on a
+        # real 3.12 CI run and does NOT reproduce locally in this repo's
+        # own dev environment, which happens to run 3.13 already -- nothing
+        # to do with which packages are installed (an earlier version of
+        # this workflow misdiagnosed it as a pymedphys/dependency-tree
+        # conflict while chasing it with only a 3.12 runner available to
+        # test against). Not something HERMES's own code can fix -- it's
+        # PinnacleExport's source, a separate private repo -- so matching
+        # the Python version it actually needs is the fix on this side.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install PinnacleExport's own dependencies (if checked out)
+        # ~70 packages (pymedphys, scipy, matplotlib, regex, tqdm, ...) that
+        # requirements-dev.txt deliberately doesn't list -- installed here,
+        # from PinnacleExport's own requirements.txt, only when the
+        # checkout above actually succeeded. Installed BEFORE
+        # requirements-dev.txt, not after: PinnacleExport pins
+        # `pytest==9.0.2`, which would silently downgrade the
+        # already-validated `pytest==9.1.1` pin below if installed second --
+        # confirmed via a local `pip install --dry-run`-equivalent test that
+        # this order makes requirements-dev.txt's own pins (pytest, httpx)
+        # win as intended, while everything ELSE PinnacleExport pins (numpy,
+        # pandas, ...) is left alone, since requirements.txt's own
+        # equivalents are unpinned bare names that are already satisfied by
+        # whatever PinnacleExport just installed -- pip doesn't touch an
+        # already-satisfied unpinned requirement.
+        #
+        # An earlier version of this workflow tried this same install and
+        # reverted it after hitting `TypeError: Too few arguments for
+        # typing.Generator` -- misdiagnosed at the time as a dependency
+        # conflict in this tree. It wasn't: that error was the Python 3.12
+        # vs 3.13 issue the step above now fixes, unrelated to which
+        # packages get installed. Once actually tested with 3.13, this
+        # install works cleanly.
+        run: |
+          if [ -f backend/src/retrieve/PinnacleExport/requirements.txt ]; then
+            pip install -r backend/src/retrieve/PinnacleExport/requirements.txt
+          else
+            echo "PinnacleExport not checked out; skipping its dependencies."
+          fi
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run HermesDB migrations (alembic upgrade head)
+        # Tests don't run this themselves (only backend/main.py's own
+        # startup, via backend/src/database.py's setup_status_db, does) --
+        # see backend/tests/conftest.py, which just points DATABASE_URL at
+        # an already-migrated database and assumes that's already true.
+        run: alembic -c backend/alembic.ini upgrade head
+
+      - name: Seed the anon-test DB
+        run: python -m backend.scripts.seed_anon_test_db
+
+      - name: Run pytest
+        # --continue-on-collection-errors: without this flag, pytest aborts
+        # the ENTIRE run (every test in every file, not just the affected
+        # ones) the moment any single test file fails to import -- confirmed
+        # on an earlier run of this workflow, back when PinnacleExport
+        # wasn't actually importable yet (see the fetch step's and Python
+        # setup step's comments for what that took), where one missing
+        # dependency turned ~7 files' import failures into a 0-tests-ran,
+        # whole-job abort. Kept as defense in depth now that PinnacleExport
+        # itself imports cleanly -- a different, genuinely-missing
+        # dependency in the future still shouldn't be able to take the
+        # entire suite's signal down to nothing the same way.
+        run: python -m pytest backend/tests/ -v --continue-on-collection-errors

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from backend.src.identity import anon
 from backend.src.studies import endpoints as studies_endpoints
+from backend.tests.support.pii_assertions import assert_date_shifted_correctly, assert_no_pii
 
 REAL_MRN = "500123"
 ANON_MRN = "1001"
@@ -111,7 +112,7 @@ def test_list_studies_translates_patient_id_and_redacts_name(client):
     body = resp.json()
     assert body["studies"][0]["patient_id"] == ANON_MRN
     assert body["studies"][0]["patient_name"] is None
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="list_studies")
     assert "Doe" not in resp.text
 
 
@@ -119,8 +120,10 @@ def test_list_studies_shifts_study_date(client, perturbation):
     resp = client.get("/studies")
     assert resp.status_code == 200
     study = resp.json()["studies"][0]
-    assert study["study_date"] == "20260111"  # 20260101 + 10 days
-    assert study["study_date"] != "20260101"  # never the raw date
+    assert_date_shifted_correctly(
+        study["study_date"], raw_value="20260101", perturbation_days=perturbation, date_format="DA"
+    )
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], real_dates=["20260101"], context="list_studies date shift")
 
 
 def test_list_studies_redacts_study_description_and_uid_when_configured(client):
@@ -159,7 +162,7 @@ def test_get_study_translates_and_redacts(client):
     body = resp.json()
     assert body["patient_id"] == ANON_MRN
     assert body["patient_name"] is None
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="get_study")
     assert "Doe" not in resp.text
 
 
@@ -167,9 +170,13 @@ def test_get_study_shifts_study_and_series_date(client, perturbation):
     resp = client.get("/studies/orthanc-abc")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["study_date"] == "20260111"  # 20260101 + 10 days
-    assert body["series"][0]["series_date"] == "20260111"
-    assert "20260101" not in resp.text
+    assert_date_shifted_correctly(
+        body["study_date"], raw_value="20260101", perturbation_days=perturbation, date_format="DA"
+    )
+    assert_date_shifted_correctly(
+        body["series"][0]["series_date"], raw_value="20260101", perturbation_days=perturbation, date_format="DA"
+    )
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], real_dates=["20260101"], context="get_study date shift")
 
 
 def test_get_study_redacts_descriptions_and_uids_when_configured(client):

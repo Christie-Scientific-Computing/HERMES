@@ -22,6 +22,7 @@ from backend.src.db import get_conn
 from backend.src.identity import anon
 from backend.src.plans.db_client import PINNACLE_SCHEMA
 from backend.src.results.endpoints import router as results_router, status_db
+from backend.tests.support.pii_assertions import assert_date_shifted_correctly, assert_no_pii
 
 REAL_MRN = "500123"
 ANON_MRN = "1001"
@@ -116,7 +117,7 @@ def test_job_patients_returns_anon_id_never_real(client, job_id):
     assert resp.status_code == 200
     body = resp.json()
     assert body["patients"] == [ANON_MRN]
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="job_patients")
 
 
 def test_job_summary_includes_job_metadata(client, job_id):
@@ -165,7 +166,7 @@ def test_job_patients_summary_includes_source_presence_and_anon_id(client, job_i
         "export_outcome": None, "export_error_message": None,
         "mosaiq_reason": None, "pinnacle_reason": None, "proknow_reason": None,
     }]
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="job_patients_summary")
 
 
 def test_job_patients_summary_scrubs_the_real_mrn_out_of_reason_fields(client, job_id):
@@ -207,9 +208,32 @@ def test_job_patients_summary_scrubs_the_real_mrn_out_of_reason_fields(client, j
     assert patient["pinnacle_reason"] == f"Could not reconstruct DICOM: no RTSTRUCT for {ANON_MRN} at [redacted]"
     assert patient["proknow_reason"] == "Patient not found on ProKnow"
 
-    # The load-bearing assertion: the real MRN must not appear ANYWHERE in
-    # the raw response body, not just in the fields we happened to check above.
-    assert REAL_MRN not in resp.text
+    # The load-bearing assertion: no PII-shaped content -- real MRN, path, or
+    # date -- may appear ANYWHERE in the raw response body, not just in the
+    # fields we happened to check above.
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="job_patients_summary reason fields")
+
+
+def test_job_patients_summary_zero_padded_and_float_cast_id_still_caught(client, job_id):
+    """
+    Format-variant coverage: _scrub (backend/src/results/endpoints.py) goes
+    through pii_patterns.redact(), which matches real_id_variants (zero-
+    padded/float-cast forms), not just the exact string a caller happened to
+    seed -- proving that here, not just at the unit-test layer
+    (test_pii_patterns.py already covers redact() itself).
+    """
+    status_db.create_job(job_id)
+    status_db.add_event(
+        job_id, REAL_MRN, stage="retrieve", event_type="success",
+        details={
+            "in_mosaiq": False,
+            "mosaiq_reason": f"connection refused for patient {int(REAL_MRN):09d} (retried as {REAL_MRN}.0)",
+        },
+    )
+
+    resp = client.get(f"/results/job/{job_id}/patients/summary")
+    assert resp.status_code == 200
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="job_patients_summary format-variant reason field")
 
 
 def test_job_patients_summary_surfaces_failure_only_patients(client, job_id):
@@ -232,7 +256,7 @@ def test_job_patients_summary_surfaces_failure_only_patients(client, job_id):
     assert patient["in_mosaiq"] is None
     # the error text quoted the real id -- it must come back anonymised
     assert patient["error_message"] == f"Pinnacle export failed for {ANON_MRN}"
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="job_patients_summary failure-only patient")
 
 
 def test_job_patients_summary_null_for_export_only_patient(client, job_id):
@@ -326,7 +350,7 @@ def test_job_patients_summary_distinguishes_import_and_export_outcome(client, jo
     assert patient["export_error_message"] == f"C-MOVE failed for {ANON_MRN}"
     # stage-agnostic fields still reflect the latest event overall (export)
     assert patient["outcome"] == "failure"
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="job_patients_summary import/export outcome")
 
 
 def test_job_patients_summary_export_outcome_null_when_no_export_ran(client, job_id):
@@ -359,7 +383,7 @@ def test_patient_timeline_translates_inbound_and_outbound(client, job_id):
 
     assert body["mrn"] == ANON_MRN
     assert [e["mrn"] for e in body["events"]] == [ANON_MRN, ANON_MRN]
-    assert REAL_MRN not in resp.text  # the real id must never appear in the response body
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="patient_timeline")
 
 
 def test_patient_timeline_all_jobs_boundary(client, job_id):
@@ -371,7 +395,7 @@ def test_patient_timeline_all_jobs_boundary(client, job_id):
     body = resp.json()
     assert body["mrn"] == ANON_MRN
     assert all(e["mrn"] == ANON_MRN for e in body["events"])
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="patient_timeline_all")
 
 
 def test_timeline_scrubs_the_real_mrn_out_of_error_message_and_details(client, job_id):
@@ -398,18 +422,20 @@ def test_timeline_scrubs_the_real_mrn_out_of_error_message_and_details(client, j
 
 def test_timeline_preserves_multiple_distinct_checksums_entries(client, job_id):
     """
-    _scrub_json walks string LEAVES only, never dict keys. This matters
-    because `checksums` (dict[SOPInstanceUID, hash]) has UID-shaped keys by
-    construction: had _scrub_json instead serialized `details` to a JSON
+    _scrub_json walks string LEAVES only, never dict keys, before
+    to_public_details re-keys `checksums` (dict[SOPInstanceUID, hash]) down
+    to a plain list[str] of hash values (backend/src/common/sse.py) -- the
+    real DICOM UID keys themselves must never cross this boundary at all
+    (docs/plans/pii-boundary-test-suite.md decision 6), not just get
+    substituted. Had _scrub_json instead serialized `details` to a JSON
     string, run it through pii_patterns.redact() (whose generic UID-pattern
     floor would turn every UID-shaped key into the same placeholder
     string), and re-parsed the result, multiple checksum entries would
-    silently collapse into one via a dict-key collision on re-parse -- a
-    real risk considered and rejected while choosing this implementation,
-    not something the shipped `main` version (a plain real-MRN substring
-    replace with no pattern floor) ever exhibited. This test guards the
+    silently collapse into one via a dict-key collision on re-parse before
+    to_public_details even got a chance to run -- a real risk considered and
+    rejected while choosing this implementation. This test guards the
     structural-walk design directly: two genuinely distinct SOPInstanceUIDs
-    here must both survive.
+    here must both survive as far as to_public_details's own reshape.
     """
     status_db.create_job(job_id)
     status_db.add_event(
@@ -425,9 +451,10 @@ def test_timeline_preserves_multiple_distinct_checksums_entries(client, job_id):
     resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
     assert resp.status_code == 200
     event = resp.json()["events"][0]
-    assert len(event["details"]["checksums"]) == 2
-    assert set(event["details"]["checksums"].values()) == {"aaa111", "bbb222"}
-    assert REAL_MRN not in resp.text
+    # A plain list of hash values, not the dict[SOPInstanceUID, hash] shape
+    # events.details keeps in the DB -- to_public_details' own contract.
+    assert set(event["details"]["checksums"]) == {"aaa111", "bbb222"}
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="timeline checksums")
 
 
 def test_timeline_preserves_date_shaped_destination_field(client, job_id):
@@ -514,7 +541,7 @@ def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_sc
     assert plan["comment"] == f"re-run for {ANON_MRN}"
     assert plan["error_message"] == f"RTSTRUCT missing for patient {ANON_MRN}"
     assert plan["plan_name"] == "Prostate"  # untouched
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="plans")
 
 
 def test_plans_shifts_plan_date(client, plans_schema, perturbation):
@@ -531,8 +558,10 @@ def test_plans_shifts_plan_date(client, plans_schema, perturbation):
     resp = client.get(f"/results/patient/{ANON_MRN}/plans")
     assert resp.status_code == 200
     plan = resp.json()["plans"][0]
-    assert plan["plan_date"] == "2026-01-11"  # 2026-01-01 + 10 days
-    assert "2026-01-01" not in resp.text  # the raw date never appears
+    assert_date_shifted_correctly(
+        plan["plan_date"], raw_value="2026-01-01", perturbation_days=perturbation, date_format="ISO"
+    )
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], real_dates=["2026-01-01"], context="plans plan_date shift")
 
 
 def test_plans_null_plan_date_stays_null(client, plans_schema, perturbation):
