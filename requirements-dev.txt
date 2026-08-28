@@ -25,13 +25,4 @@ httpx==0.28.1  # httpx is already in requirements.txt for app use; pinned
 # pins like pytest above still win) from PinnacleExport's own
 # requirements.txt when the submodule is actually checked out. See that
 # step's comment for why (and for the Python-version story this depends on).
-#
-# joblib is the one exception: PinnacleExport's src/export.py imports it
-# directly (`from joblib import Parallel, delayed`), but it's genuinely
-# absent from PinnacleExport's own requirements.txt and isn't pulled in
-# transitively by anything else that file lists either -- confirmed by
-# statically scanning every import in that submodule's source tree against
-# what's actually installed after both requirements files above. A real
-# gap in a separate, private repo this project doesn't control, patched
-# here rather than left to break CI collection again.
-joblib==1.5.2
+
