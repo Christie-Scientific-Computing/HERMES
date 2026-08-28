@@ -19,7 +19,7 @@ from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 from backend.src.plans.db_client import PlansDB
 from backend.src.identity import anon
-from backend.src.common.sse import format_sse
+from backend.src.common.sse import format_sse, to_public_details
 from backend.src.common import pii_patterns
 
 logger = logging.getLogger(__name__)

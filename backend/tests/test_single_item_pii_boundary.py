@@ -28,6 +28,8 @@ pytest.importorskip("backend.src.retrieve.PinnacleExport", reason="PinnacleExpor
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from backend.tests.support.pii_assertions import assert_no_pii
+
 REAL_MRN = "500123"
 ANON_MRN = "1001"
 
@@ -71,7 +73,7 @@ def test_single_import_success_redacts_mosaiq_reason(retrieve_client, active_pro
     })
     assert resp.status_code == 200
     body = resp.json()
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="single_import success")
     assert body["mosaiq_reason"] == f"connection refused for patient {ANON_MRN}"
 
     history = retrieve_endpoints.status_db.get_patient_history(job_id, REAL_MRN)
@@ -122,13 +124,39 @@ def test_single_import_error_redacts_exception_message(retrieve_client, active_p
     assert resp.status_code == 200
     body = resp.json()
     assert body["type"] == "error"
-    assert REAL_MRN not in body["error"]
+    assert_no_pii(body, real_ids=[REAL_MRN], context="single_import error")
     assert ANON_MRN in body["error"]
     assert "patients.csv" not in body["error"]  # generic path floor
 
     history = retrieve_endpoints.status_db.get_patient_history(job_id, REAL_MRN)
     failure = next(e for e in history if e["event_type"] == "failure")
     assert REAL_MRN in failure["error_message"]  # DB keeps full fidelity
+
+
+def test_single_import_error_zero_padded_id_still_caught(retrieve_client, active_project, monkeypatch):
+    """Format-variant coverage: a worker echoing the real id zero-padded
+    (a plausible coercion bug upstream of handle_patient) must still be
+    caught -- assert_no_pii's real_ids matching goes through
+    pii_patterns.real_id_variants, not an exact-string check."""
+    client, retrieve_endpoints = retrieve_client
+    project_id, username = active_project
+    job_id = f"single-import-zp-{uuid.uuid4()}"
+
+    class ZeroPadImporter:
+        def __init__(self, import_level):
+            pass
+
+        def handle_patient(self, mrn):
+            raise ValueError(f"lookup failed for patient {int(mrn):09d}")
+
+    monkeypatch.setattr(retrieve_endpoints, "Importer", ZeroPadImporter)
+
+    resp = client.post("/import/single_import", json={
+        "job_id": job_id, "mrn": ANON_MRN, "import_level": "Planning data",
+        "project_id": project_id, "username": username,
+    })
+    assert resp.status_code == 200
+    assert_no_pii(resp.json(), real_ids=[REAL_MRN], context="single_import zero-padded-id error")
 
 
 def test_find_patient_redacts_reason_fields(retrieve_client, active_project):
@@ -138,7 +166,7 @@ def test_find_patient_redacts_reason_fields(retrieve_client, active_project):
     resp = client.get(f"/import/find_patient?mrn={ANON_MRN}&username={username}")
     assert resp.status_code == 200
     body = resp.json()
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="find_patient success")
     assert body["mosaiq_reason"] == f"connection refused for patient {ANON_MRN}"
     assert body["pinnacle_reason"] == f"no RTSTRUCT for {ANON_MRN} at [redacted]"  # path floor
 
@@ -176,7 +204,7 @@ def test_proknow_upload_patient_success_redacts_free_text_fields(export_client, 
     })
     assert resp.status_code == 200
     body = resp.json()
-    assert REAL_MRN not in resp.text
+    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="proknow_upload_patient success")
     assert body["status"] == f"Success for {ANON_MRN}"
 
     history = export_endpoints.status_db.get_patient_history(job_id, REAL_MRN)
@@ -237,7 +265,7 @@ def test_proknow_upload_patient_error_redacts_exception_message(export_client, a
     assert resp.status_code == 200
     body = resp.json()
     assert body["type"] == "error"
-    assert REAL_MRN not in body["error"]
+    assert_no_pii(body, real_ids=[REAL_MRN], context="proknow_upload_patient error")
     assert ANON_MRN in body["error"]
     assert "patients.csv" not in body["error"]
 
