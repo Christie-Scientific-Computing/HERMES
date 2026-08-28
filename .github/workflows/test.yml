@@ -77,12 +77,12 @@ jobs:
         # inaccessible/secret unset) must not fail the JOB though, only
         # leave that directory empty for those guards to catch.
         #
-        # PinnacleExport also needs `regex` (requirements-dev.txt) and
-        # Python 3.13 (below) to actually import cleanly -- see that
-        # step's own comment for the second half of this story. Earlier
-        # versions of this workflow tried to sidestep both by not bothering
-        # (accepting these ~7 files as permanently uncollectable in CI) --
-        # traded away needlessly once the real cause was found.
+        # PinnacleExport also needs its own requirements.txt installed
+        # (below) and Python 3.13 (also below) to actually import cleanly
+        # -- see those steps' own comments for the rest of this story.
+        # Earlier versions of this workflow tried to sidestep both by not
+        # bothering (accepting these ~7 files as permanently uncollectable
+        # in CI) -- traded away needlessly once the real cause was found.
         env:
           PINNACLE_EXPORT_PAT: ${{ secrets.PINNACLE_EXPORT_PAT }}
         run: |
@@ -116,6 +116,36 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      - name: Install PinnacleExport's own dependencies (if checked out)
+        # ~70 packages (pymedphys, scipy, matplotlib, regex, tqdm, ...) that
+        # requirements-dev.txt deliberately doesn't list -- installed here,
+        # from PinnacleExport's own requirements.txt, only when the
+        # checkout above actually succeeded. Installed BEFORE
+        # requirements-dev.txt, not after: PinnacleExport pins
+        # `pytest==9.0.2`, which would silently downgrade the
+        # already-validated `pytest==9.1.1` pin below if installed second --
+        # confirmed via a local `pip install --dry-run`-equivalent test that
+        # this order makes requirements-dev.txt's own pins (pytest, httpx)
+        # win as intended, while everything ELSE PinnacleExport pins (numpy,
+        # pandas, ...) is left alone, since requirements.txt's own
+        # equivalents are unpinned bare names that are already satisfied by
+        # whatever PinnacleExport just installed -- pip doesn't touch an
+        # already-satisfied unpinned requirement.
+        #
+        # An earlier version of this workflow tried this same install and
+        # reverted it after hitting `TypeError: Too few arguments for
+        # typing.Generator` -- misdiagnosed at the time as a dependency
+        # conflict in this tree. It wasn't: that error was the Python 3.12
+        # vs 3.13 issue the step above now fixes, unrelated to which
+        # packages get installed. Once actually tested with 3.13, this
+        # install works cleanly.
+        run: |
+          if [ -f backend/src/retrieve/PinnacleExport/requirements.txt ]; then
+            pip install -r backend/src/retrieve/PinnacleExport/requirements.txt
+          else
+            echo "PinnacleExport not checked out; skipping its dependencies."
+          fi
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt

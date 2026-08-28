@@ -19,10 +19,9 @@ httpx==0.28.1  # httpx is already in requirements.txt for app use; pinned
                # depends on it and a future app-side bump shouldn't
                # silently also change what the test suite runs against
 
-# PinnacleExport's own dependency (backend/src/retrieve/PinnacleExport/src/patient.py),
-# not otherwise pulled in by anything above -- retrieve/logic.py imports
-# PinnacleExport at module level, so several test files transitively need
-# this just to be collectable, even though nothing in HERMES's own code
-# uses it directly. See .github/workflows/test.yml's Python-version comment
-# for the other half of getting PinnacleExport importable in CI.
-regex==2025.11.3
+# PinnacleExport's own dependencies (regex, tqdm, pandas, pymedphys, ...)
+# are deliberately NOT listed here -- installed as a separate CI step
+# (.github/workflows/test.yml, right after this file) from PinnacleExport's
+# own requirements.txt when the submodule is actually checked out, rather
+# than duplicated/hand-picked into this file. See that step's comment for
+# why (and for the Python-version story this depends on).
