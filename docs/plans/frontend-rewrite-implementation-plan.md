@@ -1,8 +1,14 @@
 # HERMES frontend rewrite — implementation plan
 
-**Status:** approved architecture, ready to implement. Builds on `docs/frontend-migration.md` (the original Django→FastAPI analysis) and `docs/worker-queue-design.md` (the queue architecture this plan's `jobs/` phase depends on). Written against `main` @ the worker-queue cutover (PRs #23-#26 merged). This document is the execution-level companion to those two: where they analyze *whether* and *what*, this specifies *how*, file by file, phase by phase, with testing and risk call-outs. Every claim below was checked directly against the live code on this branch, not assumed from the earlier docs — see each phase's "Validated against the codebase" note.
+**Status:** Phases 0–2 built and merged (`eb0f401`, `3211497`, `e2c37e1` + review-fix commits). Phase 3a (`jobs/`) not started. Builds on `docs/frontend-migration.md` (the original Django→FastAPI analysis) and `docs/worker-queue-design.md` (the queue architecture this plan's `jobs/` phase depends on). Originally written against `main` @ the worker-queue cutover (PRs #23-#26 merged); this document is the execution-level companion to those two: where they analyze *whether* and *what*, this specifies *how*, file by file, phase by phase, with testing and risk call-outs.
 
-**Scope confirmed with the user before writing this**: FastAPI + Jinja2, htmx adopted now (not deferred) for tab-switching and filter pills, minimal break-glass CLI scripts in Phase 1, and four new features folded into the rewrite: a combined import→export page, a cohort/data-availability browser (Orthanc + the destination PACS), an admin compliance dashboard, and in-app notifications. Two decisions from architecture review, carried forward here: the document-access-control gap (see Phase 2) is fixed as part of Phase 2, not patched standalone first; backend-side role enforcement stays frontend-only, consistent with the existing architecture (see Phase 4).
+**2026-08-28 update:** Phases 0–2 re-verified directly against the built code (not re-derived from this doc) — see each phase's "Validated against the codebase" note, several of which are now dated relative to a since-moved codebase. The most significant drift: `frontend/jobs/` was restructured (commit `b13bf2d`, merged to `main`) **after** this plan was written and after Phase 2 shipped, consolidating what Phase 3a described (`collect_data`/`retrieve_data`) and what this plan's since-removed Phase 3b called a not-yet-built new feature (the combined import→export page) into one already-shipped `submit_job` view. Phase 3a §5.0 below explains the consequence: combined import→export is fully part of the Phase 3a port now. Everything else in this status block (scope, phase ordering, the two architecture-review decisions) is unaffected and still accurate.
+
+**2026-08-28 update 2:** Phase 3b (the cohort/data-availability browser) has been removed from this plan — it's being scoped and planned separately, and should not be treated as in-scope work here. Every cross-reference to it below has been updated accordingly; see "Validated against the codebase" notes where relevant.
+
+**2026-08-28 update 3:** Phases 3a, 4, and 5 are now built. `frontend_fastapi/` is the production frontend and the backend's sole caller; `frontend/` (Django) is kept running only for the Phase 6 decommission burn-in period. Phase 5's scope was narrowed to what this repo actually controls (see §7's own note): the user/`ProjectDocument` migration script, a worker-hooks post-deploy health check, a trailing-slash regression test, and switching dev tooling (`scripts/dev-up.sh`, `docker-compose.dev.yml`) to default to `frontend_fastapi/`. Root `docker-compose.yml` (the real production compose file) never had a `frontend`/`frontend_fastapi` service to begin with, so there was no production infra entry to flip here — only Phase 6 (decommissioning `frontend/`) remains.
+
+**Scope confirmed with the user before writing this**: FastAPI + Jinja2, htmx adopted now (not deferred) for tab-switching and filter pills, minimal break-glass CLI scripts in Phase 1, and new features folded into the rewrite: a combined import→export page (now shipped, folded into Phase 3a — see above), an admin compliance dashboard, and in-app notifications (Phase 4). A cohort/data-availability browser (Orthanc + the destination PACS) was originally scoped here too, as Phase 3b — it no longer is; see the update note above. Two decisions from architecture review, carried forward here: the document-access-control gap (see Phase 2) is fixed as part of Phase 2, not patched standalone first; backend-side role enforcement stays frontend-only, consistent with the existing architecture (see Phase 4).
 
 ---
 
@@ -42,12 +48,13 @@ frontend_fastapi/                  # new, sibling to frontend/ (Django stays unt
         accounts.py
         research_projects.py
         jobs.py
-        cohort.py                  # new
         admin.py                   # new
     forms/                         # WTForms, one module per router roughly matching today's forms.py files
 ```
 
 This mirrors `frontend/`'s existing app-per-concern split closely enough that porting is mechanical where possible, while collapsing Django's `app/{models,views,forms,urls,templates}.py` scatter into `routers/`+`forms/`+`models/` (no per-router `urls.py` needed — FastAPI routers declare their own paths inline).
+
+**Update (post Phase 0–2, checked against the actual tree):** the built layout diverges from this sketch in a few small, harmless ways worth recording rather than reconciling — `db.py` is `database.py`; `models/` is a single `models.py` (User, Session, ProjectDocument all fit in one file without strain); and several modules exist that weren't anticipated here: `auth.py`, `email_backend.py`, `exceptions.py` (the `NotAuthenticated`/`Forbidden` types main.py's exception handlers use), `flash.py`, `migrations.py`, `security.py`, `session_middleware.py`, `templating.py`. None of this changes any phase's scope — noted only so this section stops being a slightly-wrong map of the codebase.
 
 ---
 
@@ -62,6 +69,8 @@ This mirrors `frontend/`'s existing app-per-concern split closely enough that po
 3. **Local Alembic project** (`frontend_fastapi/alembic/`) — run `alembic init` inside `frontend_fastapi/`, then edit `env.py` to mirror `backend/alembic/env.py`'s pattern (`DATABASE_URL` env override wins over `alembic.ini`, `disable_existing_loggers=False`) but point at a **separate** DSN (e.g. `HERMES_FRONTEND_DATABASE_URL`, defaulting to a local sqlite file matching today's `db.sqlite3` convenience, or a Postgres DSN if preferred). **Do not point this at `DATABASE_URL`/HermesDB** — this is a hard rule already established for `backend/`'s two-database split (CLAUDE.md's "Two entirely separate Postgres databases" section) and applies identically here: a third, entirely separate local DB, never conflated with HermesDB or the anon-mapping DB.
 4. **Sessions** — a small dependency (`deps.get_session`) that reads an opaque cookie (`hermes_session`, httponly, `secure` in prod, `samesite=lax`), loads the `Session` row, creates one if absent, exposes it as `request.state.session`. Two independent lifetime knobs, replicating `HermesLoginView.form_valid`'s exact `set_expiry(0)` semantics (`accounts/views.py:26-34`): `Session.expires_at` always ~2 weeks server-side regardless of "remember me"; the cookie's `Max-Age` is what "remember me" actually controls — present (2 weeks) when checked, **omitted** entirely when unchecked (an omitted `Max-Age` is what makes a cookie a true browser-session cookie).
 5. **CSRF** — recommend `starlette-csrf` over hand-rolling (this is exactly the kind of security-sensitive, easy-to-subtly-break code — constant-time comparison, `SameSite` correctness, token-session binding — not worth writing from scratch without a dedicated security pass). Fallback if a third-party dependency is unwanted: a `csrf_token` column on `Session` (already planned above), a Jinja global `csrf_token()`, a hidden `<input name="csrf_token">` replacing every `{% csrf_token %}` (mechanical find-and-replace across the ported templates), a dependency 403ing any POST where the field doesn't match.
+
+   **Resolved (Phase 0 build):** the hand-rolled fallback was the path taken, not `starlette-csrf`. `session_middleware.py`'s `SessionMiddleware` + `deps.csrf_protect` implement exactly the fallback shape above, applied globally via `main.py`'s `FastAPI(dependencies=[Depends(csrf_protect)])` (every route protected by default, matching Django's `CsrfViewMiddleware`, rather than opt-in per route) — a stronger default than this section originally scoped, worth keeping in mind as the precedent when `jobs/`'s POST-heavy routes are added.
 6. **`require_login`/`require_data_custodian`** dependencies. Confirmed the exact function this replaces is defined **twice, verbatim**, in `accounts/views.py:18-19` and `research_projects/views.py:10-11` (`user.is_active and user.is_staff`) — collapse to one shared dependency here, don't port the duplication.
 7. **Flash messages** — `flash_messages` as a `MutableList.as_mutable(JSON)` column on `Session` (not a plain `JSON` column — SQLAlchemy's unit-of-work doesn't track in-place `.append()` on a bare JSON column, this was caught in the original doc's own review pass). A `flash(request, tag, text)` helper + a Jinja template block that pops (reads-then-clears) on render, porting `templates/base.html`'s existing message block including its per-tag styling.
 8. **Active-projects context dependency** — port `hermes_frontend/context_processors.py`'s `active_projects` (11 lines, trivial) as a FastAPI dependency injected into every authenticated route's template context, same `nav_active_projects` key, same "staff have no special case here, it's literally just their own active projects" behavior.
@@ -190,101 +199,55 @@ Read `research_projects/models.py`, `views.py`, `forms.py`, `urls.py` in full di
 
 ## 5. Phase 3a — `jobs/` core parity
 
-**Goal:** a faithful port of *today's* behavior only. Deliberately nothing from this plan's new features lands here — see Phase 3b — so a bug in this phase can never be confused with a parity regression, and vice versa.
+**Goal:** a faithful port of *today's* behavior only — which, as of this update, already includes combined import→export (see §5.0). Deliberately nothing net-new beyond what Django already ships lands here — so a bug in this phase can never be confused with a parity regression, and vice versa.
+
+### 5.0 Update: the route table below is a rewrite, not the original
+
+**This section was rewritten** against the current `frontend/jobs/` app, which has moved on since this plan was first written. Confirmed via `git log --follow -- frontend/jobs/views.py`: commit `b13bf2d` ("Django frontend: one-stop-shop Import & Export page", on `feature/combined-import-export-job`, merged to `main`) landed **after** this plan's Phase 2 was completed (`e2c37e1`) and **after** this plan document itself was last written — collapsing the old `collect_data`/`retrieve_data` two-view, eight-tab split (and the `import_export_data` page the original table didn't even have a row for) into one `submit_job` view with `do_import`/`do_export` checkboxes on a single `JobSubmissionForm`. That commit **is** what this plan, before Phase 3b was removed from it, used to describe as a not-yet-built "new feature" — it was built directly against Django instead of waiting for the rewrite, presumably because the clinical need for combined jobs didn't wait for phase sequencing.
+
+Practical effect on this phase: porting `jobs/` now means porting `submit_job` (which already has the combined-job branch, the `is_combined` split, and the two-stage progress component) — there's no separate "plain port" version of this page to build first and a "combined" version to add later. The old table (`collect_data` → `/collect-data`, `retrieve_data` → `/retrieve-data`) is stale and replaced by the table in §5.2.
 
 ### 5.1 What's dramatically simpler now than when `docs/frontend-migration.md` was written
 
-That doc called this *"the single highest-risk piece in this entire migration"* because of the two-phase `PendingJob` staging mechanism. **That mechanism no longer exists** — the worker-queue rewrite deleted it. Confirmed via fresh read of the current `frontend/jobs/views.py`: `collect_data`/`retrieve_data` now call `_enqueue_batch_job` directly, which POSTs straight to the backend and gets a `job_id` back immediately; nothing is staged to `MEDIA_ROOT` or session. There is **no `PendingJob` model to port**, no staging-security-invariant to replicate, no `pending_jobs` GC cron to invent (the original doc's open item #5 is now moot for this reason). `job_watch`/`job_stream` do a live visibility re-check (`_user_can_watch_job`) on every request instead.
+That doc called this *"the single highest-risk piece in this entire migration"* because of the two-phase `PendingJob` staging mechanism. **That mechanism no longer exists** — the worker-queue rewrite deleted it. Confirmed via fresh read of the current `frontend/jobs/views.py`: `submit_job` calls `_enqueue_batch_job` directly, which POSTs straight to the backend and gets a `job_id` back immediately; nothing is staged to `MEDIA_ROOT` or session. There is **no `PendingJob` model to port**, no staging-security-invariant to replicate, no `pending_jobs` GC cron to invent (the original doc's open item #5 is now moot for this reason). `job_watch`/`job_stream` do a live visibility re-check (`_user_can_watch_job`) on every request instead.
 
 ### 5.2 Tasks — direct port checklist
 
 | Django view | New route | Notes |
 |---|---|---|
-| `dashboard` | `GET /` | two nav cards → **three**, once Phase 3b's combined page lands (see below) |
-| `collect_data` | `GET/POST /collect-data` | single/batch tabs; single mode re-renders inline with `job_id` set (does **not** redirect — `views.py:135-136`, this is deliberate rapid-entry UX, confirmed still true post-queue-rewrite); batch mode redirects to `job_watch` |
-| `retrieve_data` | `GET/POST /retrieve-data` | dicom/proknow tabs, both always redirect (no single-mode) |
-| `job_watch` | `GET /jobs/{job_id}/watch` | `_user_can_watch_job` port: live `job_summary` + `_job_is_visible_to` check, no session trust |
-| `job_stream` | `GET /jobs/{job_id}/stream` | **the one async view** — now just a plain relay of the backend's `GET /results/job/{job_id}/stream`, re-framing `data:` lines as named `event:` lines. Confirmed via direct read: this is now ~30 lines, not the load-bearing security mechanism the original doc worried about |
-| `cancel_job` | `POST /jobs/{job_id}/cancel` | |
-| `job_detail` | `GET /jobs/{job_id}` | patient table + filter pills |
-| `patient_detail` | `GET /jobs/{job_id}/patients/{mrn}` | |
-| `results_lookup` | `GET /results` | job-id or patient-mrn lookup |
+| `dashboard` | `GET /` | recent jobs across the user's active projects; no longer needs a "third nav card" for combined jobs — `submit_job` already covers single/batch/import/export/combined as one entry point |
+| `submit_job` | `GET/POST /submit` | **the one job-submission page** — single patient or batch (CSV) × import and/or export (DICOM or ProKnow), `JobSubmissionForm`'s `do_import`/`do_export` booleans picking one of four `backend_client` calls (`batch_import_file`/`dicom_move_file`/`proknow_upload_file`/`combined_import_export_file`; the last when both are checked). Single-scope submissions re-render the same page inline with `job_id` set and a fresh form (does **not** redirect — `views.py:188-191`, confirmed still the deliberate rapid-entry UX); batch-scope submissions redirect to `job_watch`. `JobSubmissionForm.clean()`'s cross-field requirements (mrn-required-for-single, file-required-for-batch, destination/collection-required-per-export_kind, "choose import, export, or both") port as one WTForms `validate()` |
+| `job_watch` | `GET /jobs/{job_id}/watch` | `_check_job_visibility` port: live `job_summary` + `_job_is_visible_to` check, no session trust. Reads `job_info["is_combined"]` (backend's `TasksDB.job_has_chain_export`, true from submission — see CLAUDE.md's "Chained export" section) to pick the two-stage `combined_job_progress` component over the single-stage `job_progress` one |
+| `job_stream` | `GET /jobs/{job_id}/stream` | **the one async view** — plain relay of the backend's `GET /results/job/{job_id}/stream`, re-framing `data:` lines as named `event:` lines. Confirmed via direct read: still ~30 lines, not a load-bearing security mechanism |
+| `cancel_job` | `POST /jobs/{job_id}/cancel` | same `jobs.cancelled` column regardless of import/export/combined |
+| `job_detail` | `GET /jobs/{job_id}` | patient table + filter pills; `job_info` now carries `imported_count`/`submitted_count`/`exported_count`/`export_attempted_count` — all four render on the summary, not just an import count |
+| `patient_detail` | `GET /jobs/{job_id}/patients/{mrn}` | job-scoped timeline + patient-scoped (not job-scoped) Pinnacle plans, with plan-status filter pills |
+| `results_lookup` | `GET /results` | job-id or patient-mrn lookup, `?lookup=job`/`?lookup=patient` |
 
-**htmx work in this phase** (per the confirmed decision to adopt now): replace the hand-rolled `hermesShowTab()` JS — confirmed duplicated verbatim across `collect_data.html`/`retrieve_data.html` — with `hx-get`/`hx-target` tab switching (one shared partial instead of two copies of the same script), and make `patient_table`'s filter pills swap via `hx-get` instead of a full page reload.
+**htmx work in this phase** (per the confirmed decision to adopt now): the original rationale — deduping `hermesShowTab()` JS duplicated across `collect_data.html`/`retrieve_data.html` — no longer applies now that there's a single `submit_job.html` with one copy of the toggle script; still worth an `hx-get`/`hx-target` treatment for its own sake (progressive enhancement of the do_import/do_export/scope/export_kind toggles), but it's no longer removing duplication, just improving one page. `patient_table`'s filter pills are still plain `<a href="?filter=...">` full-page-reload links today (confirmed via `cotton/patient_table.html`) — swapping those via `hx-get` remains valid, unchanged work.
 
 ### 5.3 Testing
 
-- Port `jobs/tests.py`'s existing 182 lines (confirmed real, not a scaffold) — structurally translatable: FastAPI's `TestClient`/`httpx.AsyncClient` + dependency-override mocking of `backend_client` plays the same role Django's `mock.patch("jobs.views.backend_client")` + `force_login` does.
-- **Manual SSE pass, end-to-end against a real backend** — this is still necessary; confirmed no automated test (old or new) covers `job_stream` itself, even post-simplification: start a batch job, confirm live progress renders, cancel mid-job, confirm the observer stream reports `cancelled` then `done` correctly.
-- Explicitly re-verify the single-patient inline-progress behavior (`collect_data`'s single mode) — click through it twice in a row without navigating away. This is exactly the kind of behavior a line-by-line code review can miss (flagged in the original doc: an unconditional redirect *looks* like a reasonable simplification and would pass casual review while silently breaking the rapid-entry workflow).
+- Port `jobs/tests.py`'s existing suite — **now 465 lines, not the 182 this section previously cited** (the combined-import-export work added its own coverage directly to Django's test file; confirmed via `wc -l`). Structurally translatable: FastAPI's `TestClient`/`httpx.AsyncClient` + dependency-override mocking of `backend_client` plays the same role Django's `mock.patch("jobs.views.backend_client")` + `force_login` does. This also means the combined-job form validation (`clean()`'s cross-field rules) and the `is_combined` branch already have Django-side characterization tests to port, not net-new tests to invent.
+- **Manual SSE pass, end-to-end against a real backend** — still necessary; confirmed no automated test (old or new) covers `job_stream` itself: start a batch job, confirm live progress renders, cancel mid-job, confirm the observer stream reports `cancelled` then `done` correctly. Run this once for a plain import/export job and once for a combined one (two progress bars, `stage`-routed badges).
+- Explicitly re-verify the single-patient inline-progress behavior (`submit_job`'s single-scope mode) — click through it twice in a row without navigating away. This is exactly the kind of behavior a line-by-line code review can miss (flagged in the original doc: an unconditional redirect *looks* like a reasonable simplification and would pass casual review while silently breaking the rapid-entry workflow).
+- The "not exported — not found on import" UI state (§6.1 in the original version of this doc; now just an ordinary part of this phase) — confirm it renders correctly, not as a perpetual spinner, by running a combined job against a CSV with at least one patient that won't be found.
 
 ### 5.4 Risks
 
-Low risk relative to the original doc's assessment, specifically *because* the hardest part (two-phase staging) is gone — but this is still the highest-traffic app in the whole system, so port discipline (matching today's behavior exactly, no incidental changes) matters more here than anywhere else in the migration.
+Low risk relative to the original doc's assessment, specifically *because* the hardest part (two-phase staging) is gone — but this is still the highest-traffic app in the whole system, so port discipline (matching today's behavior exactly, no incidental changes) matters more here than anywhere else in the migration. The chaining race condition that used to be called out as the combined-export feature's biggest risk, back when it was tracked separately, is backend-only and already shipped and presumably already exercised in production by the live Django app — this phase's own risk is purely "port the UI faithfully," not "get the chaining logic right for the first time."
 
 ### 5.5 Validated against the codebase
 
-Re-read `frontend/jobs/views.py` fresh for this plan (not from pre-worker-queue-rewrite memory) — confirmed the current, post-queue shape of every view in the table above, confirmed the single-mode-doesn't-redirect behavior is still present, confirmed `job_stream`'s current ~30-line size.
+Re-read `frontend/jobs/views.py` and `frontend/jobs/forms.py` fresh for this update (not from the original plan's pre-consolidation read) — confirmed the current `submit_job`-centered shape of every route in the table above, confirmed the single-scope-doesn't-redirect behavior is still present, confirmed `job_stream`'s current ~30-line size, confirmed `jobs/tests.py` is now 465 lines, confirmed `git log --follow` places the consolidation commit (`b13bf2d`) after both this plan's last edit and Phase 2's completion commit (`e2c37e1`).
 
 ---
 
-## 6. Phase 3b — new jobs-adjacent features
+## 6. Phase 4 — Admin dashboard + notifications
 
-**Goal:** the combined import→export page and the cohort/data-availability browser. Started once Phase 3a is manually verified (so a bug here is never confused with a parity regression). These share no code path with 3a's port and both sit on infrastructure that already exists — could run in parallel with 3a if resourcing allows.
+**Goal:** net-new functionality (no Django precedent to port, so near-zero regression risk, but real new build effort). Placed after Phase 3a since it reads job/task data Phase 3a's port is what establishes as reliable.
 
-### 6.1 Combined import→export page
-
-Full backend design (chaining mechanism, race-condition fix, new endpoint, SSE vocabulary extensions) is in the architecture plan already agreed — reproduced here as an execution checklist:
-
-**Backend tasks** (`backend/`, separate PRs from the frontend work, same review discipline as the worker-queue PRs):
-1. `backend/worker.py`: `_maybe_chain_export` + reordered `_handle_one` (chain-enqueue **before** `mark_succeeded` — this ordering is load-bearing, not stylistic, see the architecture plan's race-condition writeup) + the try/except guard around the chain call specifically (confirmed via direct read: `main()`'s claim loop has no try/except around `_handle_one`, so an unguarded chain-enqueue failure would crash the whole worker process, not just fail one task).
-2. `backend/src/status/tasks_db.py`: add `kind`/`stage` to `job_progress`'s `SELECT`.
-3. `backend/src/results/endpoints.py`: `_observe_job` — add `"stage"` to `progress`/`success`/`error` payloads; add the new `total` event (emitted whenever `len(rows)` changes, not just once at `start`).
-4. `backend/src/status/db_client.py`: `count_completed_by_stage(job_id, stage, success_detail_key=None)`, generalizing `count_imported_patients`; `get_latest_event_per_patient(job_id, stage=None)` gains the optional stage filter.
-5. `backend/src/results/endpoints.py`: `job_summary` gains `exported_count`; `job_patients_summary` gains `import_outcome`/`import_error_message`/`export_outcome`/`export_error_message`.
-6. `backend/src/retrieve/endpoints.py`: new `combined_import_export_file` endpoint (full code in the architecture plan).
-
-**Frontend tasks** (`frontend_fastapi/`):
-1. `routers/jobs.py`: `combined_import_export` view (GET/POST), `backend_client.combined_import_export_file(...)` wrapper.
-2. `forms/jobs.py`: `CombinedImportExportForm` — mrn-or-file, `import_level`, `export_kind` choice, `destination_or_collection` populated live per `export_kind` (same live-population pattern `retrieve_data` already uses for modalities/collections).
-3. New template, reachable as a **prominent third nav card on the dashboard** — this is meant to be the primary entry point, not buried.
-4. **New progress component** — not a port of `cotton/job_progress.html` (single-stage by design: one `EventSource`, one bar, one log). Needs two progress bars (Import/Export), a per-patient table with two status badges routed by the new `stage` field, and explicit handling of the "import terminal but not `imported=True` → no export task will ever exist for this patient" state (render as "Not exported — not found on import," not a perpetual spinner — this is a real UI state that will otherwise look like a bug).
-5. Final summary reads `job_summary`'s new `exported_count`/`submitted_count`: `"Requested: {submitted_count}, Exported: {exported_count}. View Errors."`, linking to `job_detail` filtered on `export_outcome == 'failure'`.
-
-### 6.2 Cohort/data-availability browser
-
-**Backend tasks:**
-1. `backend/src/studies/endpoints.py`: add `limit`/`offset` params to `GET /studies` (Orthanc's `/tools/find` already supports `Limit`/`Since` — this is additive, not a rewrite).
-2. `dicom_move_uids_file` needs **no backend change** — already exists, tested, queue-converted; this phase is simply its first real caller.
-3. **Destination-PACS querying** — recovered from git history (`gateway/pacs_client.py` at commit `4b968b4`, deleted at `7116708`). Port near-verbatim as a framework-agnostic module (`pacs_client.py`: `is_configured`, `echo`, `query_series_batch`, `query_studies_batch`, the `_convert_uid`/Conquest `dgate64.exe` passthrough logic) so it can be wired into the new frontend directly *or* wrapped by a small standalone service, depending on where the deployed frontend turns out to sit relative to the destination PACS's network — **this placement decision is deferred to this phase specifically**, when the frontend's actual deployment host is known (see the architecture plan's open-question resolution). Whichever way it's wired, wrap the synchronous `pynetdicom` calls in `asyncio.to_thread`.
-
-**Frontend tasks:**
-1. `routers/cohort.py`, template `cohort/browse.html`: filter form (patient_id/study_date/modality) → paginated `/studies` results, checkboxes per study, a selection bar with project+destination pickers feeding `dicom_move_uids_file` (build the CSV client-side matching `_build_uid_items`'s expected columns, POST through a new `backend_client.dicom_move_uids_file(...)` wrapper).
-2. **Client-side guard**: require at least one filter before allowing submission of an unfiltered query (a paginated-but-unfiltered query against a full PACS-scale Orthanc is still a bad first experience) — note in the UI that the result count is "how many came back this page," not a true total match count (Orthanc's find API doesn't expose one independent of `Limit`).
-3. Destination-PACS badge per result row ("on destination PACS: yes/no/unknown"), fetched via one batch `query_studies_batch` call for the visible page (not N+1 per-row queries).
-
-### 6.3 Testing
-
-- `_maybe_chain_export`: mirror `test_worker.py`'s existing fake-kind pattern. Critically, **assert the ordering**: enqueue an import task with `chain_export` params, drive it through the worker, and confirm the export task row exists (queryable via `TasksDB.get_task`/`job_progress`) at the moment *just before* the import task's own `mark_succeeded` call resolves — not just "eventually both exist." A test that only checks final state would pass even with the buggy (post-`mark_succeeded`) ordering; the whole point is closing a race that only shows up under polling timing, so the test needs to assert the ordering directly, not just the end state.
-- `count_completed_by_stage`, the new `total` SSE event (assert it's emitted exactly when task count changes, not every tick), `/studies`' new `limit`/`offset`.
-- Manual pass: run a real combined job end-to-end (a CSV with a mix of patients that will and won't be found), confirm the two-column progress UI and final summary match reality, including the "not exported" case.
-- `pacs_client.py`: unit tests against a mocked `pynetdicom` association (mirroring however the old `gateway/` tests — if any existed — approached this; if none did, this is new coverage) — `is_configured()` false when unset, `echo()`/`query_*_batch` handling of a failed association gracefully (`None` results, not an exception escaping to the caller).
-
-### 6.4 Risks
-
-The chaining race condition (§6.1 point 1) is the single most important correctness detail in this whole plan — it's subtle (only manifests under specific poll timing), silent when wrong (the user just sees the stream end early, no error), and was found by design review rather than being obvious from the code shape. Treat it as the first thing verified, not an afterthought.
-
-### 6.5 Validated against the codebase
-
-`pacs_client.py`/`routers/pacs.py`/`gateway/main.py` recovered and read in full from git history (commit `4b968b4`, before deletion commit `7116708`) — the code excerpts in this plan and the architecture plan are the actual recovered source, not a reconstruction from memory. Confirmed `main()`'s claim loop has no try/except around `_handle_one` by direct read of current `backend/worker.py`.
-
----
-
-## 7. Phase 4 — Admin dashboard + notifications
-
-**Goal:** net-new functionality (no Django precedent to port, so near-zero regression risk, but real new build effort). Placed after Phase 3 since it reads job/task data Phase 3's port is what establishes as reliable.
-
-### 7.1 Tasks
+### 6.1 Tasks
 
 Backend (per the architecture plan's full design):
 1. `backend/src/admin/endpoints.py` — new `/admin` router, `GET /admin/overview`, same `verify_internal_key` gate as every other project-gated router, **no staff check inside the backend** (see §7.2).
@@ -297,13 +260,13 @@ Frontend:
 2. Dashboard template: project-status counts, expiring-soon list, recent-jobs table, audit-chain status ("last verified: ..., OK" / "never verified yet" for a fresh deployment).
 3. Notification dropdown (persisted job-done/approval-decision rows + a visually-distinct "live" section for the current user's own expiring-soon projects, reusing the same query Phase 2's project-list banner already uses).
 
-### 7.2 Backend authorization — the constraint, stated precisely
+### 6.2 Backend authorization — the constraint, stated precisely
 
 **The backend gains no role-checking of its own here** — this was reviewed explicitly and is a deliberate continuation of the existing architecture, not an oversight: HermesDB has no user or role table, by design (`backend/src/projects/db_client.py`'s own docstring: Django — soon the new frontend — is the sole source of truth for user identity). This is true of *every* project-gated backend endpoint today, including the equally-sensitive ethics-review approve/reject/revoke actions, and giving HermesDB an actual role table would be a real architecture change, not a small addition.
 
 **This is not a gap that reappears when Django is removed** — it's the same single point of enforcement, relocated from Django's `user_passes_test(_is_data_custodian)` to this rewrite's `require_data_custodian` dependency (built in Phase 0). The actual risk is the ordinary implementation-discipline risk of a route forgetting to attach that dependency — which is why it's called out as a **requirement**, not a suggestion, checked explicitly in this phase's code review: the frontend route serving `/admin/overview` must use `require_data_custodian`, the same way `research_projects`' review views already use `_is_data_custodian` today.
 
-### 7.3 Testing
+### 6.3 Testing
 
 - `list_expiring_projects`: a project inside/outside/at-the-boundary of the window, a project with no `expiry_date` never appears.
 - `list_recent_jobs_with_counts`: matches what N separate `job_summary` calls would have returned, for a handful of test jobs with mixed success/failure counts (a correctness check on the `JOIN`+`GROUP BY` against the N+1 approach it replaces).
@@ -311,49 +274,61 @@ Frontend:
 - **Explicit frontend-gate test**: an authenticated-but-non-staff user gets 403/redirected from `/admin`, confirming `require_data_custodian` is actually attached — this is the test that would catch the "forgot the dependency" risk named above.
 - Notifications: job completion creates exactly one notification even if `job_is_complete` is checked from multiple concurrent terminal writes (the race-safe marker's whole point); an approval decision notifies every member, not just the submitter.
 
-### 7.4 Risks
+### 6.4 Risks
 
 Silent-failure risk is structurally different from every other phase: a missing `require_data_custodian` dependency, a worker.py audit-check timer that's wired but never actually scheduled, or a notification hook that silently no-ops all have **no visible symptom** until someone notices data they shouldn't see, or an incident where "was this ever actually checked" matters and the honest answer is no one knows. Test for the absence of things, not just the presence.
 
-### 7.5 Validated against the codebase
+### 6.5 Validated against the codebase
 
 Confirmed `ProjectsDB`'s docstring language on user-identity sourcing, confirmed `worker.py`'s existing `reap_stale_claims` timer pattern is a real, working precedent to extend (not a hypothetical), confirmed `verify_audit_chain.py`'s functions are cleanly separable (no CLI-only state) via direct read in the earlier research pass.
 
 ---
 
-## 8. Phase 5 — Cutover
+## 7. Phase 5 — Cutover
 
 Full cutover (stop Django, start the FastAPI app) rather than a gradual split — no reverse proxy exists in front of `frontend/` today to enable a strangler-fig approach, and building one just for this migration isn't worth it for an app this size (same reasoning the original doc gives).
 
 1. Migrate `db.sqlite3`'s `auth_user`/`accounts_profile` rows into the new `users` table via a one-off script. **Dry-run first** (report counts/diffs, don't write) — data migrations have a well-earned reputation for surprises, and this one is irreversible against a production user base if wrong.
+
+   **Built**: `frontend_fastapi/scripts/migrate_from_django.py`. Dry-run by default (`--apply` to write), idempotent on rerun (skips usernames/`file_path`s already migrated). One judgment call not spelled out above: Django hashes passwords with PBKDF2, this project verifies with argon2 (`security.verify_password`), and there is no way to convert one hash format into the other without the plaintext password — so a migrated user's password is *not* carried over. Instead each gets `security.unusable_password()` plus a signed activation token (the same mechanism `invite_submit` already uses for a brand-new invite), printed to stdout for an admin to distribute out-of-band. See `frontend_fastapi/tests/test_migrate_from_django.py`.
+
 2. `ProjectDocument` files stay exactly where they are under `MEDIA_ROOT` if the new app points at the same directory — no file copy needed, only the DB rows describing them (which the migration script above also needs to carry over, since `ProjectDocument` moves from Django's ORM to the new SQLAlchemy model).
+
+   **Built**: the same script's `migrate_documents()` — dedups on `file_path` (Django's `FileField` already renames on any storage collision, so it's unique within the source DB), and verifies (never copies) that each referenced file is actually reachable under `--media-root`, reporting (not failing on) any that aren't.
+
 3. **Confirm, don't just merge**, that `worker.py`'s new periodic hooks (audit check, job-completion notification marker) are actually running in the deployed environment — neither has any frontend-visible symptom if the worker process silently isn't executing them (e.g. an old worker process still running pre-Phase-4 code after a partial deploy).
+
+   **Built**: `backend/scripts/check_worker_health.py`, run post-deploy. Checks `AuditChainDB.latest_check()` staleness, and a new `StatusDB.list_completed_jobs_missing_notification()` (jobs with every task terminal but `completed_notified_at` still NULL past a grace window) — turning this from a one-off manual look into something repeatable with a real exit code.
+
 4. Re-verify the trailing-slash behavior from Phase 0 one more time against the actual production URL set, not just the dev check.
+
+   **Built**: `frontend_fastapi/tests/test_trailing_slash.py` — enumerates the real, fully-assembled router table and asserts every GET route redirects correctly when a trailing slash is added, as a permanent regression test rather than a one-off empirical check. (Production URL re-verification itself is still a deploy-time step, not something a repo-local test can stand in for.)
+
+**Not built, and out of this repo's control**: root `docker-compose.yml` (the actual production compose file) has no `frontend`/`frontend_fastapi` service at all — production traffic routing is evidently handled outside this repo's tracked infra-as-code, so "stop Django, start the FastAPI app" for real production traffic has no corresponding file to edit here. What *is* in this repo's control was flipped instead: `scripts/dev-up.sh` and `docker-compose.dev.yml` now default to `frontend_fastapi/` (Django available via `HERMES_DEV_USE_DJANGO_FRONTEND=1` / a secondary compose port for the Phase 6 burn-in period).
 
 ---
 
-## 9. Phase 6 — Decommission
+## 8. Phase 6 — Decommission
 
 Remove Django-specific dependencies, `db.sqlite3`, `manage.py`, the Django migrations directory, once a defined burn-in period passes with no rollback needed — same posture as `webui/` being kept around rather than deleted outright after its own deprecation.
 
 ---
 
-## 10. Cross-cutting notes
+## 9. Cross-cutting notes
 
-- **`docker-compose.yml`** will need a new service for `frontend_fastapi/` once Phase 3a is ready to run standalone (mirroring how the worker-queue work added a `worker` service to the same file) — not urgent before then, but don't let it be a Phase-5 surprise.
-- **`CLAUDE.md`** describes the current 3-component architecture (backend/frontend/proxy) and the synchronous SSE model in several places (Architecture diagram, "SSE streaming" pattern description) that are already slightly stale post-worker-queue and will need a real update once this rewrite lands too — flagged as a known follow-up, not part of this plan's own scope (consistent with how the worker-queue work itself flagged the same gap without fixing it).
-- **Two open questions carried over from architecture review**, not yet decided, worth resolving before the relevant phase starts rather than blocking this document: (1) the new `total` SSE event's scope — unconditional for every job (recommended) vs. gated behind a "combined job" flag; (2) the notifications dropdown's merge of persisted rows with the live-computed "expiring soon" section vs. keeping the latter as a banner only.
+- ~~**`docker-compose.yml`** will need a new service for `frontend_fastapi/`~~ — **done, ahead of schedule**: `docker-compose.dev.yml` + `Dockerfile.dev` already bring up `frontend_fastapi` alongside `backend`/`worker`/`frontend` for side-by-side dev use, well before Phase 3a needed it.
+- ~~**`CLAUDE.md`** describes the current 3-component architecture... already slightly stale...~~ — **done**: `CLAUDE.md` now has a full `frontend_fastapi/` section (phase status, its own local DB, env vars) and describes the worker-queue SSE model accurately. No longer a follow-up.
+- **Two open questions carried over from architecture review:** (1) the `total` SSE event's scope is now **resolved as shipped** — confirmed unconditional for every job, not gated behind a combined-job flag (`results/endpoints.py`'s `start` event always carries `total`/`import_total`/`export_total`, per Phase 3a §5.0's backend confirmation). (2) The notifications dropdown's merge of persisted rows with the live-computed "expiring soon" section vs. keeping the latter as a banner only is **still open** — Phase 4 hasn't started, nothing in the codebase resolves this yet.
 
 ---
 
-## 11. Verification summary (consolidated from each phase)
+## 10. Verification summary (consolidated from each phase)
 
 | Phase | Automated | Manual |
 |---|---|---|
 | 0 | Session lifetime split, flash-message mutation tracking, CSRF accept/reject, token sign/verify/invalidate-on-password-change | `security-review` skill against this phase specifically; trailing-slash empirical check |
 | 1 | Characterization tests first (none exist today), then port; login/invite/activate/create_user; break-glass scripts | — |
 | 2 | Characterization tests first (none exist today); **document-access 403/200 matrix** (non-member, member, non-member-staff, unauthenticated) | Data custodian opening a non-member project's documents before a review decision |
-| 3a | Port existing 182-line suite | Full SSE pass (start/progress/cancel/done); single-patient rapid-entry flow twice in a row |
-| 3b | Chaining ordering (not just end-state), `total` event emission, `/studies` pagination, `pacs_client.py` against a mocked association | Full combined-job run with a mixed found/not-found patient list |
+| 3a | Port existing 465-line suite (now includes combined-job/`is_combined` coverage — see §5.0) | Full SSE pass, plain and combined (start/progress/cancel/done, two-stage bars); single-patient rapid-entry flow twice in a row; "not exported — not found on import" state |
 | 4 | Expiry-window edges, job-count-rollup correctness, audit-chain tamper detection + empty-table case, **frontend gate test (403 for non-staff)**, notification race-safety | — |
-| 5 | Dry-run user migration diff | Confirm worker hooks are actually running post-deploy; production trailing-slash re-check |
+| 5 | Migration script dry-run/apply/idempotent-rerun + missing-file detection (`test_migrate_from_django.py`); trailing-slash redirect regression test (`test_trailing_slash.py`); worker-health-check staleness/tamper/grace-window logic (`test_check_worker_health.py`) | Run `check_worker_health.py` post-deploy to confirm worker hooks are actually running; production trailing-slash re-check against the real URL set; distribute migrated users' activation links out-of-band |

@@ -12,6 +12,7 @@ main.py -- see that module for why (a dependency can't itself return "a
 different response" the way a route handler can).
 """
 import secrets
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import Depends, Request
@@ -22,6 +23,41 @@ from frontend_fastapi.database import get_db
 from frontend_fastapi.exceptions import Forbidden, NotAuthenticated
 from frontend_fastapi.flash import pop_flashes
 from frontend_fastapi.models import Session, User
+
+EXPIRING_SOON_WITHIN_DAYS = 30
+
+
+def expiring_soon(active_projects: list[dict], within_days: int = EXPIRING_SOON_WITHIN_DAYS) -> list[dict]:
+    """Filters a list of projects down to ones that are currently approved,
+    non-revoked, and whose expiry_date falls within the next `within_days`
+    days. Explicitly re-checks `status == "approved"` itself rather than
+    trusting the caller to have pre-filtered -- research_projects.py's
+    list.html call site passes get_template_context's nav_active_projects
+    (already approved+non-expired, via backend_client.list_user_active_projects),
+    but detail.html's passes a single project of ANY status, which might
+    have a future expiry_date left over from a since-revoked approval. An
+    open-ended approval (expiry_date is None) never qualifies -- there's
+    nothing to warn about. Each returned dict gains a `days_remaining` key.
+
+    Lives here (not in routers/research_projects.py, where it originated)
+    so get_template_context below can also use it for the notification
+    dropdown's "live" expiring-soon section -- routers already import FROM
+    deps, so the reverse would be circular."""
+    now = datetime.now(timezone.utc)
+    soon = []
+    for project in active_projects:
+        if project.get("status") != "approved":
+            continue
+        expiry = project.get("expiry_date")
+        if not expiry:
+            continue
+        expiry_dt = datetime.fromisoformat(expiry) if isinstance(expiry, str) else expiry
+        if expiry_dt.tzinfo is None:
+            expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+        days_remaining = (expiry_dt - now).days
+        if 0 <= days_remaining <= within_days:
+            soon.append({**project, "days_remaining": days_remaining})
+    return soon
 
 _SAFE_METHODS = ("GET", "HEAD", "OPTIONS", "TRACE")
 
@@ -122,6 +158,7 @@ async def get_template_context(
     {**ctx, ...page-specific...})` with this as `ctx`.
     """
     nav_active_projects: list[dict] = []
+    nav_notifications: list[dict] = []
     if user is not None:
         try:
             nav_active_projects = await backend_client.list_user_active_projects(user.username)
@@ -132,10 +169,23 @@ async def get_template_context(
             # itself). httpx.HTTPError also covers connection failures/
             # timeouts, which BackendError alone does not.
             nav_active_projects = []
+        try:
+            nav_notifications = await backend_client.list_notifications(user.username, unread_only=True, limit=10)
+        except (backend_client.BackendError, httpx.HTTPError):
+            # Same reasoning as nav_active_projects above -- the dropdown is
+            # a convenience, not load-bearing.
+            nav_notifications = []
     return {
         "request": request,
         "user": user,
         "csrf_token": session.csrf_token,
         "flashes": pop_flashes(session),
         "nav_active_projects": nav_active_projects,
+        "nav_notifications": nav_notifications,
+        # The notification dropdown's "live" section (Phase 4 §6.1 point 3)
+        # -- computed from nav_active_projects, already fetched above, not a
+        # second backend call. Distinct from nav_notifications (persisted
+        # rows): this is live-computed on every render, same as
+        # research_projects.py's own expiring-soon banner.
+        "nav_expiring_soon": expiring_soon(nav_active_projects),
     }

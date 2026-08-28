@@ -14,7 +14,7 @@ Web-app for restoring and exporting plans from radiotherapy systems.
 ## System Architecture
 <img src='./static/user-diagram.svg' width="800">
 
-One FastAPI backend (`backend/`) holds every feature; one or more `backend/worker.py` processes execute queued batch import/export jobs. An optional thin reverse proxy (`proxy/`) can sit in front of the backend on a separate machine for external access. Two frontends currently exist side by side: `frontend/` (Django, production today) and `frontend_fastapi/` (FastAPI + Jinja2, its in-progress replacement — not yet feature-complete, see Known Issues below).
+One FastAPI backend (`backend/`) holds every feature; one or more `backend/worker.py` processes execute queued batch import/export jobs. An optional thin reverse proxy (`proxy/`) can sit in front of the backend on a separate machine for external access. `frontend_fastapi/` (FastAPI + Jinja2) is the production frontend as of the Phase 5 cutover — the sole caller of the backend. `frontend/` (Django) is kept around only for the Phase 6 decommission burn-in period; see Known Issues below.
 
 See [`docs/architecture.md`](docs/architecture.md) for a concise architecture reference (diagrams included), or `CLAUDE.md` for the full writeup (anonymisation boundary, database layout, every module).
 
@@ -38,9 +38,9 @@ pip install -r requirements-dev.txt
 
 `requirements.txt` covers the backend, the worker, and `frontend_fastapi/`. `proxy/` and `webui/` have their own, smaller dependency lists (see `proxy/pyproject.toml` / `webui/pyproject.toml`) since they're run as separate processes with much narrower needs.
 
-**Fastest path to a full local stack**: `docker compose -f docker-compose.dev.yml up` brings up both Postgres databases, the backend, a worker, `frontend/` (port 8010), and `frontend_fastapi/` (port 8020) together, with dev users pre-seeded. See that file's comments for details.
+**Fastest path to a full local stack**: `docker compose -f docker-compose.dev.yml up` brings up both Postgres databases, the backend, a worker, `frontend_fastapi/` (port 8010, the production frontend), and `frontend/` (port 8011, legacy Django, kept for the Phase 6 burn-in period) together, with dev users pre-seeded. See that file's comments for details.
 
-**Already have Postgres running and just want backend + worker + `frontend/` without Docker?** `./scripts/dev-up.sh` starts all three (one worker by default — set `HERMES_DEV_WORKERS=3` for more) in a single terminal, interleaved and prefixed by process, and stops all of them together on Ctrl-C. The manual steps below are the alternative if you want to run pieces individually.
+**Already have Postgres running and just want backend + worker + frontend without Docker?** `./scripts/dev-up.sh` starts backend + worker(s) + `frontend_fastapi/` (one worker by default — set `HERMES_DEV_WORKERS=3` for more) in a single terminal, interleaved and prefixed by process, and stops all of them together on Ctrl-C. Set `HERMES_DEV_USE_DJANGO_FRONTEND=1` to run the legacy Django frontend instead. The manual steps below are the alternative if you want to run pieces individually.
 
 ### 1. Configure
 
@@ -66,23 +66,25 @@ python -m backend.worker
 
 Run more than one process to process jobs in parallel — each claims one task at a time off a Postgres queue, so this is safe without extra coordination. See `CLAUDE.md`'s Worker section for details.
 
+After deploying (or restarting) the worker, `python backend/scripts/check_worker_health.py` confirms its periodic hooks (audit-chain verification, job-completion notifications) are actually running — neither has any frontend-visible symptom if it silently isn't (e.g. an old worker process still on pre-Phase-4 code).
+
 ### 4. Run a frontend
 
-**`frontend/`** (Django) is the full-featured production frontend today — the only place to actually run an import/export job end-to-end:
-
-```bash
-cd frontend
-python manage.py migrate
-python -m uvicorn hermes_frontend.asgi:application --reload
-```
-
-**`frontend_fastapi/`** is the in-progress FastAPI + Jinja2 replacement. It covers login/accounts and the ethics-project workflow but has no `jobs/` router yet, so it can't run an import/export job on its own — useful today mainly for reviewing the new work:
+**`frontend_fastapi/`** (FastAPI + Jinja2) is the production frontend — the place to actually run an import/export job end-to-end, as of the Phase 5 cutover:
 
 ```bash
 python -m uvicorn frontend_fastapi.main:app --reload
 ```
 
 (Migrations for its own local DB run automatically on startup — no separate migrate step.)
+
+**`frontend/`** (Django) is the legacy frontend it replaced, kept running only for the Phase 6 decommission burn-in period:
+
+```bash
+cd frontend
+python manage.py migrate
+python -m uvicorn hermes_frontend.asgi:application --reload
+```
 
 Both point at the backend via `BACKEND_URI`/`BACKEND_PORT` (already set in your `.env` from step 1).
 
@@ -119,7 +121,7 @@ docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=hermes_
 
 The full, current list lives in `CLAUDE.md`'s "Known Gaps / TODO" section — this is the short version:
 
-- **Frontend rewrite in progress**: `frontend_fastapi/` has auth + the ethics-project workflow but no `jobs/` router yet, so `frontend/` (Django) remains required for actually running import/export jobs. See `docs/frontend-rewrite-implementation-plan.md` for the remaining phases.
+- **Frontend rewrite cut over**: `frontend_fastapi/` is now the production frontend (Phase 5). `frontend/` (Django) is deprecated, kept only for the Phase 6 decommission burn-in period — see `docs/plans/frontend-rewrite-implementation-plan.md`. `frontend_fastapi/scripts/migrate_from_django.py` migrates existing users/documents from `frontend/`'s local DB (dry-run by default).
 - Raystation import not implemented; metadata editing ("Modify") not implemented
 - CBCT export and "all images" export option pending
 - Per-user export destination allow-list not built — any active project member can currently target any registered export destination

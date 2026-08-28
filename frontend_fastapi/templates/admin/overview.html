@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% from "research_projects/_macros.html" import status_badge %}
+{% block title %}Admin — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-6">Admin overview</h1>
+
+{% if backend_error %}
+<div class="mb-6 rounded-md bg-red-50 border border-red-200 p-4 text-sm text-red-700">{{ backend_error }}</div>
+{% endif %}
+
+<div class="grid gap-6 lg:grid-cols-2">
+  <div class="bg-white border border-gray-200 rounded-lg p-6">
+    <h2 class="text-sm font-semibold text-gray-900 mb-4">Projects by status</h2>
+    {% if project_status_counts %}
+    <div class="flex flex-wrap gap-4">
+      {% for status, count in project_status_counts.items() %}
+      <div class="flex items-center gap-2">
+        {{ status_badge(status) }}
+        <span class="text-lg font-semibold text-gray-900 tabular-nums">{{ count }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-gray-400 text-sm">No projects recorded.</p>
+    {% endif %}
+  </div>
+
+  <div class="bg-white border border-gray-200 rounded-lg p-6">
+    <h2 class="text-sm font-semibold text-gray-900 mb-4">Audit chain</h2>
+    {% if audit_chain_check %}
+      {% if audit_chain_check.ok %}
+      <p class="text-green-700 text-sm">Last verified: {{ audit_chain_check.checked_at }} &mdash; OK</p>
+      {% else %}
+      <p class="text-red-700 text-sm font-medium">TAMPERED</p>
+      <p class="text-red-600 text-xs mt-1">{{ audit_chain_check.reason }}</p>
+      {% if audit_chain_check.bad_event_id %}
+      <p class="text-gray-500 text-xs mt-1">Offending event id: {{ audit_chain_check.bad_event_id }}</p>
+      {% endif %}
+      <p class="text-gray-400 text-xs mt-2">Checked: {{ audit_chain_check.checked_at }}</p>
+      {% endif %}
+    {% else %}
+    <p class="text-gray-400 text-sm">Never verified yet.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bg-white border border-gray-200 rounded-lg p-6 mt-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Expiring soon (within 30 days)</h2>
+  {% if expiring_projects %}
+  <table class="min-w-full text-sm divide-y divide-gray-100">
+    <thead><tr>
+      <th class="text-left py-1 font-medium text-gray-500">Project</th>
+      <th class="text-left py-1 font-medium text-gray-500">Created by</th>
+      <th class="text-left py-1 font-medium text-gray-500">Expiry date</th>
+    </tr></thead>
+    <tbody class="divide-y divide-gray-50">
+      {% for project in expiring_projects %}
+      <tr>
+        <td class="py-1"><a class="text-hermes-700 hover:underline" href="/projects/{{ project.project_id }}">{{ project.title }}</a></td>
+        <td class="py-1 text-gray-600">{{ project.created_by }}</td>
+        <td class="py-1 text-gray-500">{{ project.expiry_date }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-gray-400 text-sm">No approved projects expiring soon.</p>
+  {% endif %}
+</div>
+
+<div class="bg-white border border-gray-200 rounded-lg p-6 mt-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Recent jobs</h2>
+  {% if recent_jobs %}
+  <div class="overflow-x-auto">
+    <table class="min-w-full text-sm divide-y divide-gray-100">
+      <thead><tr>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Job</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Created by</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Created</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Imported</th>
+        <th class="text-left py-1 font-medium text-gray-500">Exported</th>
+      </tr></thead>
+      <tbody class="divide-y divide-gray-50">
+        {% for job in recent_jobs %}
+        <tr>
+          <td class="py-1 pr-4"><a class="text-hermes-700 hover:underline font-mono" href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a></td>
+          <td class="py-1 pr-4 text-gray-600">{{ job.created_by }}</td>
+          <td class="py-1 pr-4 text-gray-500">{{ job.created_at }}</td>
+          <td class="py-1 pr-4 tabular-nums">{{ job.imported_count }} / {{ job.submitted_count }}</td>
+          <td class="py-1 tabular-nums">{{ job.exported_count }} / {{ job.export_attempted_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-gray-400 text-sm">No jobs recorded.</p>
+  {% endif %}
+</div>
+{% endblock %}

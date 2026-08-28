@@ -20,7 +20,9 @@ pytest.importorskip("backend.src.retrieve.PinnacleExport", reason="PinnacleExpor
 
 import backend.worker as worker
 from backend.src.common.sse import BatchItem
+from backend.src.notifications.db_client import NotificationsDB
 from backend.src.projects.db_client import ProjectsDB
+from backend.src.status.audit_chain_db import AuditChainDB
 from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
 
@@ -541,6 +543,182 @@ def test_handle_one_chain_export_failure_does_not_block_import_success(
     history = status_db.get_patient_history(job_id, "R1")
     export_failures = [e for e in history if e["stage"] == "export" and e["event_type"] == "failure"]
     assert len(export_failures) == 1
+
+
+
+# --- Job-completion notifications: _maybe_notify_job_complete + its wiring
+# into _handle_one's three terminal-write sites (Phase 4) ---
+
+@pytest.fixture
+def notifications_db():
+    return NotificationsDB()
+
+
+@pytest.fixture
+def creator():
+    """A unique job-creator username per test -- this suite runs against a
+    real, shared, persistent Postgres (see conftest.py), so a fixed literal
+    like "alice" would accumulate notifications across every test in this
+    file that used it, making list_for_user(...) counts flaky/wrong."""
+    return f"creator-{uuid.uuid4()}"
+
+
+def _new_job(status_db, created_by, project_id=None) -> str:
+    """A freshly created job with created_by actually set. Doesn't reuse
+    the shared `job_id` fixture: StatusDB.create_job is `ON CONFLICT
+    (job_id) DO NOTHING`, so calling it a second time on an id the job_id
+    fixture already created would silently no-op and leave created_by
+    unset -- exactly the bug that broke every test below on the first
+    pass."""
+    job_id = f"worker-notif-test-{uuid.uuid4()}"
+    status_db.create_job(job_id, created_by=created_by, project_id=project_id)
+    return job_id
+
+
+def test_maybe_notify_job_complete_creates_a_notification_for_the_job_creator(
+    tasks_db, status_db, notifications_db, active_project, creator,
+):
+    project_id, username = active_project
+    job_id = _new_job(status_db, created_by=creator, project_id=project_id)
+    tasks_db.enqueue(job_id, [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")],
+                      kind="import", stage="retrieve", params={"project_id": project_id, "username": username})
+    task = tasks_db.claim("test-worker")
+    tasks_db.mark_succeeded(task["task_id"], "test-worker", {"ok": True})
+
+    worker._maybe_notify_job_complete(tasks_db, status_db, notifications_db, job_id)
+
+    notifications = notifications_db.list_for_user(creator)
+    assert len(notifications) == 1
+    assert notifications[0]["kind"] == "job_complete"
+    assert notifications[0]["job_id"] == job_id
+
+
+def test_maybe_notify_job_complete_is_a_no_op_while_a_task_is_still_pending(
+    tasks_db, status_db, notifications_db, active_project, creator,
+):
+    project_id, username = active_project
+    job_id = _new_job(status_db, created_by=creator)
+    tasks_db.enqueue(job_id, [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")],
+                      kind="import", stage="retrieve", params={"project_id": project_id, "username": username})
+    # Not claimed/marked -- still queued.
+
+    worker._maybe_notify_job_complete(tasks_db, status_db, notifications_db, job_id)
+
+    assert notifications_db.list_for_user(creator) == []
+
+
+def test_maybe_notify_job_complete_fires_exactly_once_under_concurrent_terminal_writes(
+    tasks_db, status_db, notifications_db, active_project, creator,
+):
+    """THE race-safety regression test (plan §6.3): simulates multiple
+    terminal task writes for the same job independently noticing completion
+    at roughly the same moment (e.g. two tasks in the same job finishing on
+    different worker processes) -- StatusDB.mark_job_notified's guarded
+    UPDATE must let exactly one of them actually create a notification."""
+    project_id, username = active_project
+    job_id = _new_job(status_db, created_by=creator)
+    tasks_db.enqueue(job_id, [BatchItem(real_id="R1", display_id="A1", status_mrn="R1")],
+                      kind="import", stage="retrieve", params={"project_id": project_id, "username": username})
+    task = tasks_db.claim("test-worker")
+    tasks_db.mark_succeeded(task["task_id"], "test-worker", {"ok": True})
+
+    for _ in range(5):  # 5 independent callers, all noticing the same completed job
+        worker._maybe_notify_job_complete(tasks_db, status_db, notifications_db, job_id)
+
+    assert len(notifications_db.list_for_user(creator)) == 1
+
+
+def test_handle_one_end_to_end_notifies_once_job_becomes_complete(
+    tasks_db, status_db, notifications_db, active_project, creator, _restore_handlers,
+):
+    """Through the real _handle_one path (not calling the notify helper
+    directly), for a single-task job: success should trigger a notification
+    exactly once the task's own terminal write lands."""
+    project_id, username = active_project
+    job_id = _new_job(status_db, created_by=creator, project_id=project_id)
+    worker._HANDLERS["fake_success"] = lambda task: {"ok": True}
+
+    task = _enqueue_one(tasks_db, job_id, "fake_success",
+                         params={"project_id": project_id, "username": username})
+    worker._handle_one(tasks_db, status_db, task, notifications_db=notifications_db)
+
+    assert len(notifications_db.list_for_user(creator)) == 1
+
+
+def test_handle_one_does_not_notify_until_every_task_in_the_job_is_terminal(
+    tasks_db, status_db, notifications_db, active_project, creator, _restore_handlers,
+):
+    project_id, username = active_project
+    job_id = _new_job(status_db, created_by=creator)
+    worker._HANDLERS["fake_success"] = lambda task: {"ok": True}
+    params = {"project_id": project_id, "username": username}
+
+    item1 = BatchItem(real_id="R1", display_id="A1", status_mrn="R1")
+    item2 = BatchItem(real_id="R2", display_id="A2", status_mrn="R2")
+    tasks_db.enqueue(job_id, [item1, item2], kind="fake_success", stage="retrieve", params=params)
+
+    first = tasks_db.claim("test-worker")
+    worker._handle_one(tasks_db, status_db, first, notifications_db=notifications_db)
+    assert notifications_db.list_for_user(creator) == []  # one task still queued
+
+    second = tasks_db.claim("test-worker")
+    worker._handle_one(tasks_db, status_db, second, notifications_db=notifications_db)
+    assert len(notifications_db.list_for_user(creator)) == 1  # now complete
+
+
+def test_handle_one_denial_path_notifies_when_it_completes_the_job(
+    tasks_db, status_db, notifications_db, creator, _restore_handlers,
+):
+    """The claim-time-ethics-denial path (cancel_task) is also a terminal
+    write and must trigger the same completion check."""
+    job_id = _new_job(status_db, created_by=creator)
+    worker._HANDLERS["fake_success"] = lambda task: {"ok": True}
+    task = _enqueue_one(tasks_db, job_id, "fake_success",
+                         params={"project_id": "no-such-project", "username": "nobody"})
+
+    worker._handle_one(tasks_db, status_db, task, notifications_db=notifications_db)
+
+    row = tasks_db.get_task(task["task_id"])
+    assert row["state"] == "cancelled"
+    assert len(notifications_db.list_for_user(creator)) == 1
+
+
+# --- Periodic audit-chain verification (Phase 4) ---
+
+def test_run_audit_chain_check_records_ok_for_a_healthy_chain():
+    audit_chain_db = AuditChainDB()
+    worker._run_audit_chain_check(audit_chain_db)
+
+    latest = audit_chain_db.latest_check()
+    assert latest["ok"] is True
+    assert latest["bad_event_id"] is None
+
+
+def test_run_audit_chain_check_records_the_tampered_row_and_reason(status_db, job_id):
+    from backend.src.db import get_conn
+
+    status_db.create_job(job_id)
+    status_db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM events WHERE job_id = %s", (job_id,))
+        tampered_id = cur.fetchone()[0]
+        cur.execute("UPDATE events SET error_message = %s WHERE id = %s", ("tampered", tampered_id))
+
+    try:
+        audit_chain_db = AuditChainDB()
+        worker._run_audit_chain_check(audit_chain_db)
+
+        latest = audit_chain_db.latest_check()
+        assert latest["ok"] is False
+        assert latest["bad_event_id"] == tampered_id
+        assert "row_hash mismatch" in latest["reason"]
+    finally:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE events SET error_message = NULL WHERE id = %s", (tampered_id,))
+        # Leave a healthy record behind so this test doesn't poison whatever
+        # runs _run_audit_chain_check next (including the "healthy" test
+        # above, depending on ordering) with a stale tampered reading.
+        AuditChainDB().record_check(ok=True)
 
 
 def test_handle_one_dicom_move_end_to_end(tasks_db, status_db, job_id, active_project, monkeypatch, _restore_handlers):

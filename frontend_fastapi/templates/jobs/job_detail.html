@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "jobs/_macros.html" import patient_table %}
+{% block title %}Job {{ job_id }} — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-1">Job</h1>
+<p class="text-sm text-gray-500 mb-6 font-mono">{{ job_id }}</p>
+
+{% if submitted_count is not none %}
+<div class="mb-6 flex flex-wrap gap-x-8 gap-y-2">
+  <p class="text-2xl font-semibold text-gray-900">{{ imported_count }} / {{ submitted_count }} <span class="text-base font-normal text-gray-500">patients imported</span></p>
+  {% if export_attempted_count %}
+  <p class="text-2xl font-semibold text-gray-900">{{ exported_count }} / {{ export_attempted_count }} <span class="text-base font-normal text-gray-500">patients exported</span></p>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="bg-white border border-gray-200 rounded-lg p-6 mb-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Summary</h2>
+  <div class="overflow-x-auto">
+    <table class="min-w-full text-sm divide-y divide-gray-100">
+      <thead><tr>
+        <th class="text-left py-1 font-medium text-gray-500">Stage</th>
+        <th class="text-left py-1 font-medium text-gray-500">Event</th>
+        <th class="text-left py-1 font-medium text-gray-500">Count</th>
+      </tr></thead>
+      <tbody class="divide-y divide-gray-50">
+        {% for row in summary %}
+        <tr>
+          <td class="py-1">{{ row.stage }}</td>
+          <td class="py-1">{{ row.event_type }}</td>
+          <td class="py-1 tabular-nums">{{ row.cnt }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="py-4 text-center text-gray-400">No events recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="bg-white border border-gray-200 rounded-lg p-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">
+    Patients ({{ total }})
+    {% if rows|length != total %}<span class="font-normal text-gray-400">— showing {{ rows|length }}</span>{% endif %}
+  </h2>
+  {{ patient_table(rows, pills, job_id, total) }}
+</div>
+{% endblock %}
