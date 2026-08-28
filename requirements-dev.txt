@@ -18,3 +18,11 @@ httpx==0.28.1  # httpx is already in requirements.txt for app use; pinned
                # explicitly here too since fastapi.testclient.TestClient
                # depends on it and a future app-side bump shouldn't
                # silently also change what the test suite runs against
+
+# PinnacleExport's own dependencies (regex, tqdm, pandas, pymedphys, ...)
+# are deliberately NOT listed here -- installed as a separate CI step
+# (.github/workflows/test.yml, right BEFORE this file, so this file's own
+# pins like pytest above still win) from PinnacleExport's own
+# requirements.txt when the submodule is actually checked out. See that
+# step's comment for why (and for the Python-version story this depends on).
+
