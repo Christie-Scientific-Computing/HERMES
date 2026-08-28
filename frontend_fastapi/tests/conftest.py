@@ -36,7 +36,7 @@ from frontend_fastapi.flash import flash
 # lifespan, which this fixture never runs; see main.py).
 from frontend_fastapi.main import _forbidden, _not_authenticated
 from frontend_fastapi.models import Base, Session, User
-from frontend_fastapi.routers import accounts, jobs, research_projects
+from frontend_fastapi.routers import accounts, admin, jobs, notifications, research_projects
 from frontend_fastapi.session_middleware import SessionMiddleware
 
 
@@ -55,14 +55,19 @@ def _isolated_backend_client(monkeypatch):
     exactly one event loop for its entire lifetime).
 
     Autouse so every test gets a fresh client bound to the current test's
-    event loop, defaulting to an empty-but-successful /projects response so
-    that lookup resolves without every test file needing to think about it.
-    Tests that care about a specific backend response (e.g. this module's
-    own research_projects tests) monkeypatch backend_client.client again
-    themselves, same as test_backend_client.py's existing per-test pattern.
+    event loop, defaulting to an empty-but-successful response so that any
+    unmocked backend_client call resolves without every test file needing
+    to think about it. "projects"/"notifications"/"jobs" all live on the
+    same body since a MockTransport handler here doesn't distinguish by
+    path; each caller only ever reads the one key it cares about (e.g.
+    dashboard's list_project_jobs reads "jobs", get_template_context's
+    nav_notifications lookup reads "notifications"). Tests that care about
+    a specific backend response (e.g. this module's own research_projects
+    tests) monkeypatch backend_client.client again themselves, same as
+    test_backend_client.py's existing per-test pattern.
     """
     def default_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"projects": []})
+        return httpx.Response(200, json={"projects": [], "notifications": [], "jobs": []})
 
     monkeypatch.setattr(
         backend_client, "client",
@@ -146,6 +151,8 @@ def app(SessionFactory):
     test_app.include_router(jobs.router)
     test_app.include_router(accounts.router)
     test_app.include_router(research_projects.router)
+    test_app.include_router(admin.router)
+    test_app.include_router(notifications.router)
 
     @test_app.post("/test/login")
     async def _login(

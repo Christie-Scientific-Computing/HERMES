@@ -299,3 +299,76 @@ def test_count_exported_patients_ignores_retrieve_stage(db, job_id):
 
 def test_count_exported_patients_unknown_job_returns_zeroes(db):
     assert db.count_exported_patients(f"nonexistent-{uuid.uuid4()}") == (0, 0)
+
+
+# ---- list_recent_jobs_with_counts (Phase 4 admin dashboard) ----
+
+def _find(rows: list[dict], job_id: str) -> dict:
+    return next(r for r in rows if r["job_id"] == job_id)
+
+
+def test_list_recent_jobs_with_counts_matches_the_n_separate_calls_it_replaces(db, job_id):
+    """
+    Correctness check on the JOIN+GROUP BY against the N-separate-calls
+    approach it replaces (docs/plans/frontend-rewrite-implementation-plan.md
+    §6.3) -- a mixed combined import->export job: 3 submitted, 2 imported,
+    2 export attempts, 1 exported.
+    """
+    db.create_job(job_id, description="mixed job", created_by="alice")
+    db.add_patient(job_id, mrn="MRN1")
+    db.add_patient(job_id, mrn="MRN2")
+    db.add_patient(job_id, mrn="MRN3")
+    db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+    db.add_event(job_id, mrn="MRN2", stage="retrieve", event_type="success", details={"imported": True})
+    db.add_event(job_id, mrn="MRN3", stage="retrieve", event_type="success", details={"imported": False})
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success")
+    db.add_event(job_id, mrn="MRN2", stage="export", event_type="failure", error_message="boom")
+
+    row = _find(db.list_recent_jobs_with_counts(limit=1000), job_id)
+
+    imported_count, submitted_count = db.count_imported_patients(job_id)
+    exported_count, export_attempted_count = db.count_exported_patients(job_id)
+    assert row["submitted_count"] == submitted_count == 3
+    assert row["imported_count"] == imported_count == 2
+    assert row["exported_count"] == exported_count == 1
+    assert row["export_attempted_count"] == export_attempted_count == 2
+
+
+def test_list_recent_jobs_with_counts_zero_for_a_job_with_no_activity_yet(db, job_id):
+    """A job that's been created/submitted but nothing has run yet must
+    still appear, with zero counts -- LEFT JOINs, not INNER."""
+    db.create_job(job_id, description="just submitted")
+
+    row = _find(db.list_recent_jobs_with_counts(limit=1000), job_id)
+
+    assert row["submitted_count"] == 0
+    assert row["imported_count"] == 0
+    assert row["exported_count"] == 0
+    assert row["export_attempted_count"] == 0
+
+
+def test_list_recent_jobs_with_counts_orders_newest_first_and_respects_limit(db, job_id):
+    # This suite runs against a real, shared, persistent Postgres (see
+    # conftest.py) that accumulates jobs across every test run -- there is
+    # no guarantee an arbitrary older fixture job still ranks within any
+    # fixed LIMIT once enough history has piled up, so this doesn't try to
+    # locate a second, deliberately-older job by limit-based search. What's
+    # actually load-bearing and safe to assert: a job created THIS INSTANT
+    # is the single most recent row in a serial test run, so limit=1 must
+    # return exactly it.
+    db.create_job(job_id)
+
+    rows = db.list_recent_jobs_with_counts(limit=1)
+
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == job_id
+
+
+# ---- mark_job_notified (Phase 4 job-completion notification race guard) ----
+
+def test_mark_job_notified_returns_true_exactly_once(db, job_id):
+    db.create_job(job_id)
+
+    assert db.mark_job_notified(job_id) is True
+    assert db.mark_job_notified(job_id) is False  # already notified -- simulates a racing second caller
+    assert db.mark_job_notified(job_id) is False
