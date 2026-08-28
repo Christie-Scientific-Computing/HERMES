@@ -22,7 +22,7 @@ from frontend_fastapi import backend_client
 from frontend_fastapi.deps import csrf_protect
 from frontend_fastapi.exceptions import Forbidden, NotAuthenticated
 from frontend_fastapi.migrations import run_migrations
-from frontend_fastapi.routers import accounts, research_projects
+from frontend_fastapi.routers import accounts, jobs, research_projects
 from frontend_fastapi.session_middleware import SessionMiddleware
 from frontend_fastapi.settings import ALLOWED_HOSTS, DATABASE_URL, LOGIN_URL, STATIC_DIR
 from frontend_fastapi.templating import templates
@@ -56,6 +56,7 @@ app.add_middleware(SessionMiddleware)
 # header poisoning otherwise goes unguarded).
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.include_router(jobs.router)
 app.include_router(accounts.router)
 app.include_router(research_projects.router)
 

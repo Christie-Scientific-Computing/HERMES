@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% from "jobs/_macros.html" import job_progress, combined_job_progress %}
+{% block title %}Job {{ job_id }} — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-1">Job in progress</h1>
+<p class="text-sm text-gray-500 mb-6 font-mono">{{ job_id }}</p>
+
+<div class="max-w-2xl">
+  {% if is_combined %}
+  {{ combined_job_progress(job_id, csrf_token) }}
+  {% else %}
+  {{ job_progress(job_id, csrf_token) }}
+  {% endif %}
+</div>
+{% endblock %}
