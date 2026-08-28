@@ -52,6 +52,14 @@ jobs:
       ANON_DB_NAME: anon_test
       ANON_DB_USER: postgres
       ANON_DB_PASS: test
+      # retrieve/logic.py's own module-level `PINNACLE_PUSH_PORT =
+      # int(os.getenv('PINNACLE_PUSH_PORT'))` has no fallback for an unset
+      # var -- crashes on import (not just when actually pushing to
+      # Pinnacle) once PinnacleExport is genuinely importable. Values here
+      # are never dialled out to; only need to exist and parse.
+      PINNACLE_PUSH_HOST: localhost
+      PINNACLE_PUSH_PORT: "104"
+      PINNACLE_PUSH_AE_TITLE: TEST_AE
 
     steps:
       - name: Checkout
