@@ -95,6 +95,27 @@ def test_connection_kwargs_wrong_key_raises(monkeypatch, tmp_path):
         anon._connection_kwargs()
 
 
+def test_wrong_key_wrapped_as_anon_service_error_through_lookup(monkeypatch, tmp_path):
+    """Same failure as above, but through the real lookup_real_ids() path --
+    confirms the decrypt failure reaches _query()'s exception wrapper, not
+    just _connection_kwargs() in isolation."""
+    path = _write_config(tmp_path, Fernet.generate_key().decode())
+    monkeypatch.setattr(anon, "ANON_CONFIG", path)
+    with pytest.raises(anon.AnonServiceError):
+        anon.lookup_real_ids(["1001"])
+
+
+def test_broken_config_file_fails_even_with_working_plain_env_set(monkeypatch, tmp_path):
+    """ANON_CONFIG's precedence isn't just 'wins when valid' -- a broken
+    config file must fail even though the module-level ANON_DB_* vars
+    (still set from module import above, and individually valid) could
+    otherwise have connected fine. No silent fallback."""
+    monkeypatch.setattr(anon, "ANON_CONFIG", "/nonexistent/anon_config.xml")
+    assert anon.ANON_DB_HOST  # sanity: the plain env vars are indeed set
+    with pytest.raises(anon.AnonServiceError):
+        anon.lookup_real_ids(["1001"])
+
+
 def test_connection_kwargs_ssl_opts_still_apply_with_config_file(monkeypatch, tmp_path):
     path = _write_config(tmp_path, anon.ANON_CONFIG_KEY)
     monkeypatch.setattr(anon, "ANON_CONFIG", path)
