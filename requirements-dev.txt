@@ -5,7 +5,7 @@
 # in the repo today. Versions pinned to what's already validated working in
 # this repo's own .venv.
 -r requirements.txt
-
+regex==2025.11.3
 Django==6.0.7
 django-cotton==2.7.2
 
