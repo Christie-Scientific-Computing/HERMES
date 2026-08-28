@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Run the whole HERMES dev stack (backend + one worker + the Django
-# frontend) with a single command, instead of three terminals.
+# Run the whole HERMES dev stack (backend + one worker + the frontend) with
+# a single command, instead of three terminals.
+#
+# Post-Phase-5-cutover, "the frontend" here means frontend_fastapi/ (the
+# production frontend now) -- not frontend/ (Django), which is kept around
+# only for the Phase 6 decommission burn-in period. Set
+# HERMES_DEV_USE_DJANGO_FRONTEND=1 to run the legacy Django frontend
+# instead, e.g. to compare behavior against it during that window.
 #
 # Usage:
 #   ./scripts/dev-up.sh
@@ -21,8 +27,12 @@
 #     start one. See README.md for a throwaway `docker run postgres:16-alpine`
 #     one-liner, or docker-compose.dev.yml for the full containerised stack
 #     (which already does all of this via Docker Compose instead).
-#   - frontend/ is a checkout with its own migrations applied at least once
-#     (this script runs `manage.py migrate` itself, so a fresh checkout is fine).
+#   - frontend_fastapi/ migrates its own (separate, HERMES_FRONTEND_DATABASE_URL)
+#     local DB itself on startup (main.py's lifespan) -- no separate migrate
+#     step needed here, unlike the legacy Django path below.
+#   - HERMES_DEV_USE_DJANGO_FRONTEND=1 only: frontend/ is a checkout with its
+#     own migrations applied at least once (this script runs `manage.py
+#     migrate` itself in that case, so a fresh checkout is fine).
 #
 # Ctrl-C stops everything (backend, worker(s), frontend, and the proxy when
 # HERMES_DEV_USE_PROXY=1) together.
@@ -58,6 +68,11 @@ FRONTEND_PORT="${HERMES_DEV_FRONTEND_PORT:-8010}"
 # straight at the backend -- see ./scripts/dev-up-gateway.sh.
 USE_PROXY="${HERMES_DEV_USE_PROXY:-0}"
 PROXY_PORT="${HERMES_DEV_PROXY_PORT:-8001}"
+
+# Default is frontend_fastapi/ (the production frontend post-cutover); set
+# to 1 to run the legacy Django frontend/ instead during the Phase 6
+# burn-in period.
+USE_DJANGO_FRONTEND="${HERMES_DEV_USE_DJANGO_FRONTEND:-0}"
 
 # kill 0 sends the signal to this script's whole process group -- every
 # background job started below, in one shot -- rather than tracking PIDs by
@@ -114,12 +129,13 @@ for i in $(seq 1 "$WORKER_COUNT"); do
   (python -m backend.worker 2>&1 | sed -u "s/^/[worker-$i]  /") &
 done
 
-# Frontend's backend calls (BACKEND_URI/BACKEND_PORT, read at Django
-# settings-load time -- see frontend/hermes_frontend/settings.py) point
-# straight at the backend by default; USE_PROXY re-targets them at the
-# proxy instead, once it's up. HERMES_URL/proxy's own .env, if present, are
-# overridden here rather than relied on, so this works the same regardless
-# of what's (or isn't) configured in proxy/.env.
+# Frontend's backend calls (BACKEND_URI/BACKEND_PORT, read at settings-load
+# time -- see frontend_fastapi/settings.py, or frontend/hermes_frontend/
+# settings.py for the Django path) point straight at the backend by
+# default; USE_PROXY re-targets them at the proxy instead, once it's up.
+# HERMES_URL/proxy's own .env, if present, are overridden here rather than
+# relied on, so this works the same regardless of what's (or isn't)
+# configured in proxy/.env.
 #
 # FRONTEND_BACKEND_PORT is explicitly $BACKEND_PORT (this script's own
 # resolved value, from HERMES_DEV_BACKEND_PORT or its 8000 default -- see
@@ -167,11 +183,19 @@ if [ "$USE_PROXY" = "1" ]; then
   FRONTEND_BACKEND_PORT="$PROXY_PORT"
 fi
 
-# Django's own migrate is idempotent -- safe to run every time, and means a
-# fresh checkout works without a separate manual step first.
-(cd frontend && python manage.py migrate --noinput) 2>&1 | sed -u "s/^/[frontend]  /"
-(cd frontend && BACKEND_URI="$FRONTEND_BACKEND_URI" BACKEND_PORT="$FRONTEND_BACKEND_PORT" \
-  python -m uvicorn hermes_frontend.asgi:application --reload --port "$FRONTEND_PORT" 2>&1 | sed -u "s/^/[frontend]  /") &
+if [ "$USE_DJANGO_FRONTEND" = "1" ]; then
+  # Legacy path, Phase 6 burn-in only. Django's own migrate is idempotent --
+  # safe to run every time, and means a fresh checkout works without a
+  # separate manual step first.
+  (cd frontend && python manage.py migrate --noinput) 2>&1 | sed -u "s/^/[frontend]  /"
+  (cd frontend && BACKEND_URI="$FRONTEND_BACKEND_URI" BACKEND_PORT="$FRONTEND_BACKEND_PORT" \
+    python -m uvicorn hermes_frontend.asgi:application --reload --port "$FRONTEND_PORT" 2>&1 | sed -u "s/^/[frontend]  /") &
+else
+  # frontend_fastapi/ migrates its own local DB itself on startup (see the
+  # header comment above) -- no separate migrate step needed here.
+  (BACKEND_URI="$FRONTEND_BACKEND_URI" BACKEND_PORT="$FRONTEND_BACKEND_PORT" \
+    python -m uvicorn frontend_fastapi.main:app --reload --port "$FRONTEND_PORT" 2>&1 | sed -u "s/^/[frontend]  /") &
+fi
 
 echo "All processes started. Frontend: http://localhost:$FRONTEND_PORT/  Backend: http://localhost:$BACKEND_PORT/$( [ "$USE_PROXY" = "1" ] && echo "  Proxy: http://localhost:$PROXY_PORT/ (frontend routed through here)" )  (Ctrl-C to stop everything)"
 echo ""
