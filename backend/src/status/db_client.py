@@ -128,6 +128,60 @@ class StatusDB:
             row = cur.fetchone()
             return dict(row) if row else None
 
+    def list_recent_jobs_with_counts(self, limit: int = 50) -> list[dict]:
+        """
+        The most recent `limit` jobs, each with the same
+        imported_count/submitted_count/exported_count/export_attempted_count
+        figures count_imported_patients/count_exported_patients compute per
+        job -- but as one JOIN+GROUP BY round trip, not N separate calls.
+        Backs the admin dashboard's recent-jobs table (Phase 4).
+
+        LEFT JOINs (not INNER) so a job with no patients/events yet (just
+        submitted, nothing has run) still appears with zero counts rather
+        than being silently dropped. COUNT(DISTINCT ...) mirrors each
+        underlying query's own dedup-by-mrn semantics exactly.
+        """
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    j.job_id, j.created_at, j.created_by, j.description, j.cancelled, j.project_id,
+                    COUNT(DISTINCT p.mrn) AS submitted_count,
+                    COUNT(DISTINCT CASE WHEN e.stage = 'retrieve' AND e.event_type = 'success'
+                                          AND e.details ->> 'imported' = 'true' THEN e.mrn END) AS imported_count,
+                    COUNT(DISTINCT CASE WHEN e.stage = 'export' THEN e.mrn END) AS export_attempted_count,
+                    COUNT(DISTINCT CASE WHEN e.stage = 'export' AND e.event_type = 'success'
+                                          THEN e.mrn END) AS exported_count
+                FROM jobs j
+                LEFT JOIN patients p ON p.job_id = j.job_id
+                LEFT JOIN events e ON e.job_id = j.job_id
+                GROUP BY j.job_id, j.created_at, j.created_by, j.description, j.cancelled, j.project_id
+                ORDER BY j.created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def mark_job_notified(self, job_id: str) -> bool:
+        """
+        Race-safe "has a job-completion notification already been created
+        for this job" marker (Phase 4) -- the same guarded-UPDATE idiom
+        TasksDB.mark_succeeded/mark_failed already use for exactly this
+        reason. Multiple worker processes can each independently notice a
+        job just became complete (backend/worker.py calls this after every
+        terminal task write); only the caller whose UPDATE actually flips
+        completed_notified_at from NULL should go on to create the
+        notification. Returns True exactly once per job, for whichever
+        caller's UPDATE wins the race; False for every other/later caller.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET completed_notified_at = %s WHERE job_id = %s AND completed_notified_at IS NULL",
+                (datetime.now(timezone.utc), job_id),
+            )
+            return cur.rowcount > 0
+
     def get_latest_retrieve_details(self, job_id: str) -> dict[str, dict]:
         """
         Most recent retrieve-stage success `details` per patient in a job --

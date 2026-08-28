@@ -240,6 +240,31 @@ class ProjectsDB:
             )
             return [dict(r) for r in cur.fetchall()]
 
+    def list_expiring_projects(self, within_days: int = 30) -> list[dict]:
+        """
+        Every approved project (across ALL members, not scoped to one user)
+        whose expiry_date falls within the next `within_days` days --
+        backs the admin dashboard's project-wide expiring-soon list
+        (Phase 4). Deliberately a different query from
+        list_user_active_projects above: that one is scoped to a single
+        user's own memberships (the nav banner / per-user notification use
+        case), this one is project-wide (the administrative overview).
+        A project with no expiry_date (open-ended approval) never
+        qualifies -- there's nothing to warn about.
+        """
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM research_projects
+                WHERE status = 'approved'
+                  AND expiry_date IS NOT NULL
+                  AND expiry_date BETWEEN now() AND now() + make_interval(days => %s)
+                ORDER BY expiry_date
+                """,
+                (within_days,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     # ---- Jobs (traceability) ----
 
     def list_project_jobs(self, project_id: str) -> list[dict]:

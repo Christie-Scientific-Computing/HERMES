@@ -340,3 +340,19 @@ async def stream_sse(path: str) -> AsyncIterator[bytes]:
                 raise BackendError(resp.status_code, detail or "backend request failed")
             async for chunk in resp.aiter_bytes():
                 yield chunk
+
+
+# ---- Admin dashboard + notifications (Phase 4) ----
+
+async def admin_overview(within_days: int = 30, limit: int = 50) -> dict:
+    return await _get("/admin/overview", params={"within_days": within_days, "limit": limit})
+
+
+async def list_notifications(username: str, unread_only: bool = False, limit: int = 20) -> list[dict]:
+    return (await _get("/notifications", params={
+        "username": username, "unread_only": unread_only, "limit": limit,
+    }))["notifications"]
+
+
+async def mark_notification_read(notification_id: int, username: str) -> dict:
+    return await _post(f"/notifications/{notification_id}/read", params={"username": username})

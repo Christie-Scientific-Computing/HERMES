@@ -11,6 +11,8 @@ from backend.src.database import setup_status_db
 from backend.src.results.endpoints import router as results_router
 from backend.src.studies.endpoints import router as studies_router
 from backend.src.projects.endpoints import router as projects_router
+from backend.src.admin.endpoints import router as admin_router
+from backend.src.notifications.endpoints import router as notifications_router
 
 load_dotenv()
 
@@ -39,3 +41,5 @@ app.include_router(export_router)
 app.include_router(results_router)
 app.include_router(studies_router)
 app.include_router(projects_router)
+app.include_router(admin_router)
+app.include_router(notifications_router)
