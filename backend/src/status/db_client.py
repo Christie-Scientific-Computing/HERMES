@@ -3,7 +3,7 @@ Status DB client helper for writing job/patient events.
 
 Backed by PostgreSQL (see backend/src/db.py for the shared connection pool).
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from psycopg2.extras import RealDictCursor, Json
@@ -181,6 +181,46 @@ class StatusDB:
                 (datetime.now(timezone.utc), job_id),
             )
             return cur.rowcount > 0
+
+    def list_completed_jobs_missing_notification(self, older_than_minutes: int = 30) -> list[dict]:
+        """
+        Jobs with at least one task, all of them in a terminal state, whose
+        LAST task finished more than `older_than_minutes` ago, but with
+        completed_notified_at still NULL -- i.e. a job that finished
+        without worker.py's _maybe_notify_job_complete hook ever having run
+        for it (Phase 5 cutover's "confirm, don't just merge" check, see
+        backend/scripts/check_worker_health.py). `older_than_minutes` gives
+        an in-flight job's own terminal-write-then-notify step a grace
+        window rather than flagging it while it's still mid-flight.
+
+        Deliberately keyed on the last task's finished_at, not jobs.created_at
+        -- a job that's legitimately still running (a large batch, well past
+        older_than_minutes since it was CREATED but not yet finished) would
+        otherwise be flagged the instant it finally does finish, even with a
+        working, instant notification hook. created_at only bounds how old
+        the job itself is, not how long ago it actually completed.
+
+        Deliberately raw SQL, not mark_job_notified reused in a loop --
+        this is a read-only diagnostic, not something that should itself
+        race against or mutate the marker it's checking.
+        """
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT j.job_id, j.created_at
+                FROM jobs j
+                WHERE j.completed_notified_at IS NULL
+                  AND EXISTS (SELECT 1 FROM tasks t WHERE t.job_id = j.job_id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM tasks t
+                      WHERE t.job_id = j.job_id AND t.state IN ('queued', 'claimed', 'running')
+                  )
+                  AND (SELECT MAX(t.finished_at) FROM tasks t WHERE t.job_id = j.job_id) < %s
+                ORDER BY j.created_at
+                """,
+                (datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes),),
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     def get_latest_retrieve_details(self, job_id: str) -> dict[str, dict]:
         """
