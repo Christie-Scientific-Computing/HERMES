@@ -77,28 +77,12 @@ jobs:
         # inaccessible/secret unset) must not fail the JOB though, only
         # leave that directory empty for those guards to catch.
         #
-        # Deliberately NOT also installing PinnacleExport's own
-        # requirements.txt (~70 packages: pymedphys, scipy, matplotlib,
-        # etc.) even when checkout succeeds -- tried that on this workflow's
-        # own second real run, and it traded one problem for a worse one:
-        # `import regex` (PinnacleExport's own, otherwise-uninstalled
-        # dependency, imported several layers deep inside retrieve/logic.py
-        # -- outside every importorskip guard, since those only check the
-        # shallow "is the top package importable" case) got fixed, but
-        # pymedphys/its dependency tree then hit a `TypeError: Too few
-        # arguments for typing.Generator` incompatibility under this
-        # runner's Python 3.12 that doesn't reproduce locally, and made
-        # MORE tests fail than the original gap (12 collection errors, up
-        # from 6; 315 passed, down from 315+the-6-that-would-have-run).
-        # Chasing a private, third-party repo's own dependency/Python-version
-        # compatibility is out of scope for this PII-boundary work --
-        # `--continue-on-collection-errors` below is the actual fix for the
-        # failure mode that matters here (one missing/broken dependency
-        # aborting the ENTIRE run), and is sufficient on its own. Whether
-        # PinnacleExport-dependent tests can run in THIS CI environment
-        # remains an open question, same as checkout access itself
-        # (docs/plans/pii-boundary-test-suite.md §E) -- not determinable or
-        # fixable from inside this repo.
+        # PinnacleExport also needs `regex` (requirements-dev.txt) and
+        # Python 3.13 (below) to actually import cleanly -- see that
+        # step's own comment for the second half of this story. Earlier
+        # versions of this workflow tried to sidestep both by not bothering
+        # (accepting these ~7 files as permanently uncollectable in CI) --
+        # traded away needlessly once the real cause was found.
         env:
           PINNACLE_EXPORT_PAT: ${{ secrets.PINNACLE_EXPORT_PAT }}
         run: |
@@ -112,9 +96,26 @@ jobs:
           fi
 
       - name: Set up Python
+        # 3.13, not 3.12 (Dockerfile.dev's version, the closest existing
+        # convention) -- PinnacleExport's own code
+        # (src/to_dicom/subclasses/base.py) declares
+        # `Generator[tuple[str, str]]`, the single-type-argument shorthand
+        # for typing.Generator. That shorthand only works where
+        # typing.Generator's own type parameters carry defaults, a stdlib
+        # change that landed in 3.13 -- on 3.12, the exact same import
+        # raises `TypeError: Too few arguments for typing.Generator;
+        # actual 1, expected 3`. Confirmed directly: this reproduces on a
+        # real 3.12 CI run and does NOT reproduce locally in this repo's
+        # own dev environment, which happens to run 3.13 already -- nothing
+        # to do with which packages are installed (an earlier version of
+        # this workflow misdiagnosed it as a pymedphys/dependency-tree
+        # conflict while chasing it with only a 3.12 runner available to
+        # test against). Not something HERMES's own code can fix -- it's
+        # PinnacleExport's source, a separate private repo -- so matching
+        # the Python version it actually needs is the fix on this side.
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
@@ -132,13 +133,13 @@ jobs:
       - name: Run pytest
         # --continue-on-collection-errors: without this flag, pytest aborts
         # the ENTIRE run (every test in every file, not just the affected
-        # ones) the moment any single test file fails to import --
-        # confirmed on this workflow's own first real run, where
-        # PinnacleExport's own missing `regex` dependency (see the fetch
-        # step's comment above) turned ~7 files' import failures into a
-        # 0-tests-ran, whole-job abort rather than a handful of reported
-        # errors alongside everything else still passing/failing on its own
-        # merits. With this flag, a PinnacleExport-dependent file that can't
-        # import shows up as its own error in the results, but doesn't take
-        # the rest of the suite's signal down with it.
+        # ones) the moment any single test file fails to import -- confirmed
+        # on an earlier run of this workflow, back when PinnacleExport
+        # wasn't actually importable yet (see the fetch step's and Python
+        # setup step's comments for what that took), where one missing
+        # dependency turned ~7 files' import failures into a 0-tests-ran,
+        # whole-job abort. Kept as defense in depth now that PinnacleExport
+        # itself imports cleanly -- a different, genuinely-missing
+        # dependency in the future still shouldn't be able to take the
+        # entire suite's signal down to nothing the same way.
         run: python -m pytest backend/tests/ -v --continue-on-collection-errors
