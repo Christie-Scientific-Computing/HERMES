@@ -1,5 +1,4 @@
-# Dependencies for the local dev docker-compose stack (docker-compose.dev.yml)
-# AND for running the test suite (backend/tests/, incl. .github/workflows/test.yml).
+# Dependencies for the local dev docker-compose stack (docker-compose.dev.yml).
 # Everything backend/ and frontend_fastapi/ need, per the root requirements.txt,
 # plus frontend/ (Django) -- which has no dependency file of its own anywhere
 # in the repo today. Versions pinned to what's already validated working in
@@ -8,13 +7,3 @@
 regex==2025.11.3
 Django==6.0.7
 django-cotton==2.7.2
-
-# Test suite (backend/tests/, frontend_fastapi/tests/) -- installed but
-# previously undeclared anywhere in the repo, so CI would otherwise pull in
-# whatever's latest/absent rather than a validated version.
-pytest==9.1.1
-pytest-asyncio==1.4.0
-httpx==0.28.1  # httpx is already in requirements.txt for app use; pinned
-               # explicitly here too since fastapi.testclient.TestClient
-               # depends on it and a future app-side bump shouldn't
-               # silently also change what the test suite runs against
