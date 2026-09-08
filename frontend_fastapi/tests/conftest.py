@@ -199,6 +199,7 @@ def app(SessionFactory):
             "has_user": ctx["user"] is not None,
             "csrf_token": ctx["csrf_token"],
             "nav_active_projects": ctx["nav_active_projects"],
+            "backend_health": ctx["backend_health"],
         }
 
     return test_app

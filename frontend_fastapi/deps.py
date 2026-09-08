@@ -159,6 +159,13 @@ async def get_template_context(
     """
     nav_active_projects: list[dict] = []
     nav_notifications: list[dict] = []
+    try:
+        backend_health = await backend_client.get_backend_health()
+    except (backend_client.BackendError, httpx.HTTPError):
+        # Unreachable backend -- the status badge shows this distinctly
+        # from "reachable but not anonymising" rather than taking the page
+        # down, same reasoning as nav_active_projects below.
+        backend_health = None
     if user is not None:
         try:
             nav_active_projects = await backend_client.list_user_active_projects(user.username)
@@ -188,4 +195,5 @@ async def get_template_context(
         # rows): this is live-computed on every render, same as
         # research_projects.py's own expiring-soon banner.
         "nav_expiring_soon": expiring_soon(nav_active_projects),
+        "backend_health": backend_health,
     }

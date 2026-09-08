@@ -68,6 +68,17 @@
           {% endif %}
         </div>
         <div class="flex items-center space-x-4">
+          {# Backend reachability + anonymisation status -- see deps.py's
+             get_template_context (backend_health). Distinguishes "backend
+             down" from "reachable but not anonymising" so users know
+             whether patient data crossing this UI is anonymised. #}
+          {% if backend_health is none %}
+            <span class="inline-flex items-center rounded-full bg-gray-600 text-white text-xs px-2 py-1">Backend unreachable</span>
+          {% elif backend_health.anonymisation_active %}
+            <span class="inline-flex items-center rounded-full bg-green-600 text-white text-xs px-2 py-1">Anonymised</span>
+          {% else %}
+            <span class="inline-flex items-center rounded-full bg-amber-500 text-white text-xs px-2 py-1">Not anonymised (internal)</span>
+          {% endif %}
           {% if user %}
             {# Plain <details>/<summary> dropdown -- no JS needed, matching
                research_projects/_macros.html's audit_trail's identical
