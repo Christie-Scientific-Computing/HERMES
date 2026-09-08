@@ -231,7 +231,7 @@ def seed_anon_db() -> None:
                 CREATE TABLE IF NOT EXISTS key_value (
                     id SERIAL PRIMARY KEY,
                     patient_id BIGINT NOT NULL,
-                    key_value BIGINT NOT NULL,
+                    key_value VARCHAR NOT NULL,
                     key_type_id INT NOT NULL,
                     date_perturbation INT
                 )

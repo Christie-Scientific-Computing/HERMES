@@ -40,7 +40,7 @@ pip install -r requirements-dev.txt
 
 **Fastest path to a full local stack**: `docker compose -f docker-compose.dev.yml up` brings up both Postgres databases, the backend, a worker, `frontend_fastapi/` (port 8010, the production frontend), and `frontend/` (port 8011, legacy Django, kept for the Phase 6 burn-in period) together, with dev users pre-seeded. See that file's comments for details.
 
-**Already have Postgres running and just want backend + worker + frontend without Docker?** `./scripts/dev-up.sh` starts backend + worker(s) + `frontend_fastapi/` (one worker by default — set `HERMES_DEV_WORKERS=3` for more) in a single terminal, interleaved and prefixed by process, and stops all of them together on Ctrl-C. Set `HERMES_DEV_USE_DJANGO_FRONTEND=1` to run the legacy Django frontend instead. The manual steps below are the alternative if you want to run pieces individually.
+**Already have Postgres running and just want backend + worker + frontend without Docker?** `./scripts/dev-up.sh` (or `make dev-up`) starts backend + worker(s) + `frontend_fastapi/` (one worker by default — set `HERMES_DEV_WORKERS=3` for more) in a single terminal, interleaved and prefixed by process, and stops all of them together on Ctrl-C. Set `HERMES_DEV_USE_DJANGO_FRONTEND=1` to run the legacy Django frontend instead. `make dev-up-gateway` (`./scripts/dev-up-gateway.sh`) is the same, plus `proxy/`, with the frontend's backend calls routed through it — for exercising the DMZ-facing proxy hop locally, e.g. the anonymisation boundary. The manual steps below are the alternative if you want to run pieces individually.
 
 ### 1. Configure
 
@@ -77,6 +77,15 @@ python -m uvicorn frontend_fastapi.main:app --reload
 ```
 
 (Migrations for its own local DB run automatically on startup — no separate migrate step.)
+
+Coming from `frontend/` (Django) and want its existing users/`ProjectDocument` rows carried over? `frontend_fastapi/scripts/migrate_from_django.py` does that — dry-run by default, safe to rerun:
+
+```bash
+python -m frontend_fastapi.scripts.migrate_from_django          # dry run: reports what it would do
+python -m frontend_fastapi.scripts.migrate_from_django --apply  # actually writes
+```
+
+Passwords aren't carried over (Django's hash format can't be verified by this project's `argon2` — see the script's own docstring); each migrated user instead gets a fresh activation link printed to stdout, to distribute the same way an invite link is distributed today.
 
 **`frontend/`** (Django) is the legacy frontend it replaced, kept running only for the Phase 6 decommission burn-in period:
 

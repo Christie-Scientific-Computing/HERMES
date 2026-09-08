@@ -1,11 +1,41 @@
 import os
 import uuid
+from urllib.parse import urlparse
 
 import pytest
 
 TEST_DATABASE_URL = os.environ.setdefault(
     "DATABASE_URL", "postgresql://postgres:test@localhost:55432/hermes_test"
 )
+
+# This suite runs destructive DDL (DROP SCHEMA ... CASCADE, DELETE FROM ...)
+# against whatever DATABASE_URL points at. setdefault() above only supplies
+# the safe throwaway default when DATABASE_URL is UNSET -- if it's already
+# set (e.g. exported from this repo's own .env, which points at a real
+# shared dev instance), that value wins untouched, and pytest happily runs
+# schema-dropping fixtures against it. That's exactly what happened on
+# 2026-09-07, twice within one session: pinnacle_index and then
+# pinnacle_export (a separate, externally-owned schema in the same
+# database) were both destroyed this way, recoverable only because a
+# same-day pg_dump backup happened to exist. This check makes that
+# structurally impossible to repeat by accident, rather than relying on
+# whoever runs pytest to remember to check first -- see the "never run
+# tests against .env DATABASE_URL" memory for the incident this closes.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def pytest_configure(config):
+    host = urlparse(TEST_DATABASE_URL).hostname
+    if host not in _LOOPBACK_HOSTS and not os.environ.get("HERMES_TESTS_ALLOW_REMOTE_DB"):
+        raise pytest.UsageError(
+            f"DATABASE_URL resolves to a non-local host ({host!r}) -- refusing to run "
+            "backend/tests/, which runs destructive DDL (DROP SCHEMA ... CASCADE, etc.) "
+            "against it. Point DATABASE_URL at a throwaway container instead, e.g.:\n\n"
+            "  docker run --rm -d -e POSTGRES_PASSWORD=test -e POSTGRES_DB=hermes_test "
+            "-p 55432:5432 postgres:16-alpine\n\n"
+            "or, if you are certain this host is safe to run destructive tests against, "
+            "set HERMES_TESTS_ALLOW_REMOTE_DB=1 to override."
+        )
 
 
 @pytest.fixture(scope="session", autouse=True)

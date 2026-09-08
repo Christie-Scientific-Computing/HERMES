@@ -75,21 +75,37 @@ PROXY_PORT="${HERMES_DEV_PROXY_PORT:-8001}"
 USE_DJANGO_FRONTEND="${HERMES_DEV_USE_DJANGO_FRONTEND:-0}"
 
 # kill 0 sends the signal to this script's whole process group -- every
-# background job started below, in one shot -- rather than tracking PIDs by
-# hand. Runs on Ctrl-C, on `kill`, and on normal exit alike, so a crash in
-# one process (e.g. the frontend failing to boot) still tears the rest down
-# instead of leaving orphaned backend/worker processes behind.
+# background job started below (backend/worker(s)/proxy/frontend, plus
+# uvicorn --reload's own reload-supervisor children, which stay in this same
+# group) -- in one shot, rather than tracking PIDs by hand. Runs on Ctrl-C,
+# on `kill`, and on normal exit alike, so a crash in one process (e.g. the
+# frontend failing to boot) still tears the rest down instead of leaving
+# orphaned backend/worker processes behind. Also trapped on HUP: closing the
+# terminal (rather than Ctrl-C) sends SIGHUP, which -- before this trapped
+# it -- meant cleanup never ran at all, leaving every job (including a
+# reload supervisor) running disconnected until something reaped it, still
+# bound to its port; the next `make dev-up`/`dev-up-gateway` run then failed
+# with "address already in use" and no obvious culprit.
+#
+# Backstop regardless of signal: after giving everything a moment to exit
+# gracefully, force-kill whatever's still actually bound to the ports this
+# script itself started, so nothing can outlive the script that spawned it.
 cleanup() {
   # Clear the trap first: kill 0 below signals this script's own process
   # too (it's part of its own process group), which would otherwise
   # re-enter cleanup on that self-delivered signal before the process
   # actually exits.
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM HUP
   echo ""
   echo "Stopping HERMES dev stack..."
   kill 0 2>/dev/null || true
+
+  sleep 1
+  for port in "$BACKEND_PORT" "$FRONTEND_PORT" "$PROXY_PORT"; do
+    fuser -k -KILL "${port}/tcp" 2>/dev/null || true
+  done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 if [ "$USE_PROXY" = "1" ]; then
   echo "Starting HERMES dev stack: backend (:$BACKEND_PORT), $WORKER_COUNT worker(s), proxy (:$PROXY_PORT), frontend (:$FRONTEND_PORT, routed via proxy)"

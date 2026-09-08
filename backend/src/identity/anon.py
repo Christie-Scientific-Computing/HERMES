@@ -111,7 +111,12 @@ ANON_LOOKUP_WARN_WINDOW_SECONDS = int(
 # ── Production schema, confirmed by the Christie team ────────────────────────
 # `key_value` is a multi-purpose table; key_type_id = 1 selects the
 # patient-ID mapping rows specifically. Confusingly, the `key_value` *column*
-# holds the real ID and `patient_id` holds the anon ID.
+# holds the real ID and `patient_id` holds the anon ID. The two columns
+# don't share a type: `patient_id` (anon id) is bigint, but `key_value`
+# (real id) is character varying, so only the patient_id-filtered query
+# below casts its input array to bigint[] -- the two key_value-filtered
+# queries cast to text[] instead, or Postgres raises "operator does not
+# exist: character varying = bigint".
 _SQL_ANON_TO_REAL = """
     SELECT patient_id as anon_id, key_value as real_id
     FROM   key_value
@@ -120,12 +125,12 @@ _SQL_ANON_TO_REAL = """
 _SQL_REAL_TO_ANON = """
     SELECT key_value as real_id, patient_id as anon_id
     FROM   key_value
-    WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
+    WHERE  key_value = ANY(%s::text[]) AND key_type_id = 1
 """
 _SQL_DATE_PERTURBATION = """
     SELECT key_value as real_id, date_perturbation
     FROM   key_value
-    WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
+    WHERE  key_value = ANY(%s::text[]) AND key_type_id = 1
 """
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -220,6 +225,8 @@ def _connection_kwargs() -> dict:
         kwargs["sslmode"] = ANON_DB_SSLMODE
     if ANON_DB_SSLROOTCERT:
         kwargs["sslrootcert"] = ANON_DB_SSLROOTCERT
+
+    logger.info(f"Connecting to: {kwargs}")
     return kwargs
 
 
@@ -279,6 +286,23 @@ def _to_bigints(ids: list[str]) -> dict[str, int]:
     return out
 
 
+def _safe_db_error_text(exc: Exception) -> str:
+    """A DB error's str() can echo the literal failing SQL -- psycopg2 does
+    client-side parameter binding, so a query built via ANY(%s::...[]) sends
+    the server a single string with every value already substituted in
+    (e.g. "ANY(ARRAY[500123,500456,...])"), and a server-side error on that
+    query (e.g. a type mismatch) copies that same text back verbatim into
+    str(exc)/.pgerror -- including any real patient IDs bound into it. Every
+    AnonServiceError message reaches this module's callers' HTTPException
+    `detail=str(e)` directly (see e.g. results/endpoints.py), so str(exc)
+    must never be used here. psycopg2.Error's .diag.message_primary carries
+    the same DB-side error description without the echoed SQL/values."""
+    diag = getattr(exc, "diag", None)
+    if diag is not None and diag.message_primary:
+        return diag.message_primary
+    return type(exc).__name__
+
+
 def _query(sql: str, values: list[int]) -> list[tuple]:
     if not values:
         return []
@@ -286,7 +310,8 @@ def _query(sql: str, values: list[int]) -> list[tuple]:
         pool = _get_pool()
         conn = pool.getconn()
     except Exception as exc:
-        raise AnonServiceError(f"Cannot reach anonymisation DB: {exc}") from exc
+        logger.exception("Could not reach anonymisation DB")
+        raise AnonServiceError(f"Cannot reach anonymisation DB: {_safe_db_error_text(exc)}") from exc
     try:
         try:
             with conn.cursor() as cur:
@@ -295,7 +320,8 @@ def _query(sql: str, values: list[int]) -> list[tuple]:
             conn.commit()
             return rows
         except Exception as exc:
-            raise AnonServiceError(f"Anonymisation DB query failed: {exc}") from exc
+            logger.exception("Anonymisation DB query failed")
+            raise AnonServiceError(f"Anonymisation DB query failed: {_safe_db_error_text(exc)}") from exc
     finally:
         pool.putconn(conn)
 
