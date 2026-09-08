@@ -85,6 +85,7 @@ def _best_effort_error_context(request: Request) -> dict:
         "nav_active_projects": [],
         "nav_notifications": [],
         "nav_expiring_soon": [],
+        "backend_health": None,
     }
 
 

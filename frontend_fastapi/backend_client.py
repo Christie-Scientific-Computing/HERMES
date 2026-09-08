@@ -74,6 +74,19 @@ async def _delete(path: str, params: Optional[dict] = None) -> dict:
     return resp.json()
 
 
+# ---- Health (nav status badge) ----
+
+async def get_backend_health() -> dict:
+    # Own short timeout, not the shared client's 30s default -- this call
+    # now runs on EVERY page render including anonymous visitors (the login
+    # page previously made zero backend calls), so a hung-but-not-refusing
+    # backend must not stall app-wide page loads for 30s just to paint a
+    # status badge.
+    resp = await client.get("/health", timeout=3)
+    _raise_for_status(resp)
+    return resp.json()
+
+
 # ---- Projects (research_projects, ported in Phase 2) ----
 
 async def create_project(title: str, created_by: str, description: str = "", ethics_reference: str = "") -> dict:

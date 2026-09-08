@@ -62,3 +62,21 @@ def test_template_context_survives_backend_being_unreachable(client, make_user, 
     client.post("/test/login", data={"username": "alice", "remember": "true", "csrf_token": csrf_token})
     ctx = client.get("/test/context").json()
     assert ctx["nav_active_projects"] == []
+
+
+def test_template_context_reports_backend_health(client, monkeypatch):
+    async def _fake_health():
+        return {"status": "ok", "anonymisation_active": True}
+
+    monkeypatch.setattr(backend_client, "get_backend_health", _fake_health)
+    ctx = client.get("/test/context").json()
+    assert ctx["backend_health"] == {"status": "ok", "anonymisation_active": True}
+
+
+def test_template_context_backend_health_is_none_when_unreachable(client, monkeypatch):
+    async def _raise():
+        raise backend_client.BackendError(503, "backend down")
+
+    monkeypatch.setattr(backend_client, "get_backend_health", _raise)
+    ctx = client.get("/test/context").json()
+    assert ctx["backend_health"] is None
