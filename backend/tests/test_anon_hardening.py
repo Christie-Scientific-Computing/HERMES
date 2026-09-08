@@ -10,6 +10,15 @@ additions --
 2. Application-side lookup-volume monitoring: a rolling in-process counter
    that logs a warning once lookups exceed a configurable threshold within
    a configurable window.
+3. §D (2026-09-08 incident): _query()'s DB-error messages must never embed
+   str(exc) -- psycopg2 does client-side parameter binding, so a failing
+   query's server-side error text echoes the query with every bound value
+   already substituted in (e.g. "ANY(ARRAY[500123,500456,...])"), and every
+   AnonServiceError message reaches an HTTPException `detail=str(e)`
+   directly at each call site (results/studies/retrieve/export endpoints).
+   That's exactly how a live type-mismatch bug (key_value cast to the wrong
+   type) leaked real patient IDs into an HTTP error response. See
+   _safe_db_error_text.
 """
 import logging
 import os
@@ -205,3 +214,56 @@ def test_lookup_volume_counts_even_when_ids_are_unknown(monkeypatch, caplog):
                 anon.lookup_real_ids([f"unknown-{i}-999999"])
 
     assert any("lookup volume" in r.message for r in caplog.records)
+
+
+# ── §D: DB-error messages must never leak queried values (2026-09-08) ──────
+
+class _FakeDiag:
+    def __init__(self, message_primary):
+        self.message_primary = message_primary
+
+
+class _FakeDbError(Exception):
+    """Stands in for a psycopg2.Error subclass -- has a .diag attribute,
+    but str(self) is deliberately something a real driver error also does:
+    embed the full failing query, values included."""
+
+    def __init__(self, message_primary, full_text):
+        super().__init__(full_text)
+        self.diag = _FakeDiag(message_primary)
+
+
+def test_safe_db_error_text_uses_diag_message_primary_when_available():
+    exc = _FakeDbError(
+        "operator does not exist: character varying = bigint",
+        "operator does not exist: character varying = bigint\n"
+        "LINE 1: ...WHERE key_value = ANY(ARRAY[500123,500456])",
+    )
+    text = anon._safe_db_error_text(exc)
+    assert text == "operator does not exist: character varying = bigint"
+    assert "500123" not in text
+    assert "500456" not in text
+
+
+def test_safe_db_error_text_falls_back_to_class_name_without_diag():
+    exc = ConnectionError("connection to server at 500123.internal failed")
+    text = anon._safe_db_error_text(exc)
+    assert text == "ConnectionError"
+    assert "500123" not in text
+
+
+def test_query_error_message_never_contains_queried_real_ids():
+    """End-to-end against the real (throwaway) anon-test DB: deliberately
+    reintroduce the exact type-mismatch bug that caused the 2026-09-08 leak
+    (casting the varchar key_value column to bigint) and confirm the
+    resulting AnonServiceError -- the message every call site puts straight
+    into an HTTPException's `detail` -- contains neither queried real id."""
+    bad_sql = "SELECT key_value FROM key_value WHERE key_value = ANY(%s::bigint[]) AND key_type_id = 1"
+
+    with pytest.raises(anon.AnonServiceError) as exc_info:
+        anon._query(bad_sql, [500123, 500456])
+
+    message = str(exc_info.value)
+    assert "500123" not in message
+    assert "500456" not in message
+    assert "operator does not exist" in message  # still diagnostic, just not value-bearing

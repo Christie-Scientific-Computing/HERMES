@@ -47,7 +47,7 @@ def _set_perturbation(real_mrn: str, value) -> None:
         with conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE key_value SET date_perturbation = %s WHERE key_value = %s AND key_type_id = 1",
-                (value, int(real_mrn)),
+                (value, real_mrn),
             )
     finally:
         conn.close()

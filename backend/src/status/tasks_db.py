@@ -278,6 +278,28 @@ class TasksDB:
             )
             return bool(cur.fetchone()[0])
 
+    def job_is_complete(self, job_id: str) -> bool:
+        """
+        True iff every task belonging to this job has reached a terminal
+        state (succeeded/failed/cancelled) -- i.e. nothing is queued,
+        claimed, or running. Backs the job-completion notification hook
+        (backend/worker.py, Phase 4): must be re-checked after EVERY
+        terminal task write, not decided once, since a combined
+        import->export job's task set can still be growing
+        (_maybe_chain_export enqueues export tasks one at a time as imports
+        succeed) -- "no pending tasks right now" can flip back to "pending"
+        the moment the next chained export is enqueued.
+
+        A job with zero tasks at all (e.g. an empty CSV) is trivially
+        "complete" -- there's nothing left to wait for.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT NOT EXISTS(SELECT 1 FROM tasks WHERE job_id = %s AND state IN ('queued', 'claimed', 'running'))",
+                (job_id,),
+            )
+            return bool(cur.fetchone()[0])
+
     def get_task(self, task_id: int) -> Optional[dict]:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM tasks WHERE task_id=%s", (task_id,))

@@ -12,9 +12,9 @@
 #   docker compose -f docker-compose.dev.yml exec backend python -m backend.scripts.dev_seed
 #
 # Then:
-#   frontend/ (Django, full-featured)        -> http://localhost:8010
-#   frontend_fastapi/ (rewrite, Phase 1 only) -> http://localhost:8020
-#   backend API docs                          -> http://localhost:8000/docs
+#   frontend_fastapi/ (production frontend, post Phase 5 cutover) -> http://localhost:8010
+#   frontend/ (Django, kept for the Phase 6 burn-in period only)  -> http://localhost:8011
+#   backend API docs                                               -> http://localhost:8000/docs
 #
 # Seeded logins (both frontends): admin/admin123 (staff+superuser),
 # alice/alice123 (regular user, also seeded as a project member in HermesDB
@@ -122,9 +122,10 @@ services:
     restart: unless-stopped
 
   frontend:
-    # The full-featured production frontend (Django) -- jobs,
-    # research_projects, accounts. Most functionality is only testable
-    # through this app today; frontend_fastapi (below) is still Phase 1.
+    # The legacy Django frontend -- superseded by frontend_fastapi (below)
+    # as of Phase 5's cutover. Kept running here only for the Phase 6
+    # decommission burn-in period (side-by-side comparison, rollback if
+    # needed); not the sole caller of the backend any more.
     build:
       context: .
       dockerfile: Dockerfile.dev
@@ -135,7 +136,7 @@ services:
              python manage.py dev_seed_users &&
              python -m uvicorn hermes_frontend.asgi:application --host 0.0.0.0 --port 8000 --reload"
     ports:
-      - "8010:8000"
+      - "8011:8000"
     environment:
       BACKEND_URI: backend
       BACKEND_PORT: "8000"
@@ -150,9 +151,9 @@ services:
     restart: unless-stopped
 
   frontend_fastapi:
-    # The in-progress FastAPI+Jinja2 rewrite -- Phase 1 (accounts) only so
-    # far. Run alongside frontend/ above so this branch's actual new work
-    # can be reviewed directly, not just read.
+    # The production frontend (FastAPI+Jinja2), as of Phase 5's cutover --
+    # the sole caller of the backend now. frontend/ (above) stays running
+    # alongside it only for the Phase 6 decommission burn-in period.
     build:
       context: .
       dockerfile: Dockerfile.dev
@@ -162,7 +163,7 @@ services:
       sh -c "python -m frontend_fastapi.scripts.dev_seed &&
              python -m uvicorn frontend_fastapi.main:app --host 0.0.0.0 --port 8000 --reload"
     ports:
-      - "8020:8000"
+      - "8010:8000"
     environment:
       BACKEND_URI: backend
       BACKEND_PORT: "8000"

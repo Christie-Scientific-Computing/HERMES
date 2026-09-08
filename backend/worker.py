@@ -19,6 +19,7 @@ import socket
 import sys
 import time
 import logging
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -33,13 +34,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from backend.src.db import init_pool
+from backend.src.status.audit_chain_db import AuditChainDB
 from backend.src.status.tasks_db import TasksDB
 from backend.src.status.db_client import StatusDB
+from backend.src.notifications.db_client import NotificationsDB
 from backend.src.projects import enforcement
 from backend.src.common.sse import BatchItem
 from backend.src.retrieve.logic import Importer
 from backend.src.retrieve.endpoints import Response as ImportResponse
 from backend.src.export import endpoints as export_endpoints
+from backend.scripts.verify_audit_chain import fetch_events_in_order, fetch_chain_state, verify_chain
 
 logging.basicConfig(
     filename=None,
@@ -194,7 +198,49 @@ def _maybe_chain_export(tasks_db: TasksDB, status_db: StatusDB, task: dict, deta
                       chained_from_task_id=task["task_id"])
 
 
-def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
+def _maybe_notify_job_complete(
+    tasks_db: TasksDB, status_db: StatusDB, notifications_db: NotificationsDB, job_id: str,
+) -> None:
+    """
+    Called after every terminal task write in _handle_one below (a task
+    reaching succeeded/failed/cancelled). Job completion must be
+    re-checked every time, not decided once and cached: a combined
+    import->export job's task set can still be growing
+    (_maybe_chain_export enqueues export tasks one at a time as imports
+    succeed), so "nothing pending" can flip back to "pending" the moment
+    the next chained export is enqueued -- see TasksDB.job_is_complete's
+    own docstring.
+
+    StatusDB.mark_job_notified is the race-safe guarded UPDATE that makes
+    "exactly one notification per job" hold even when multiple terminal
+    writes -- for different tasks in the same job, quite possibly on
+    different worker processes -- each notice completion at roughly the
+    same moment: only the one write that actually flips
+    completed_notified_at from NULL goes on to create the notification.
+    """
+    if not tasks_db.job_is_complete(job_id):
+        return
+    if not status_db.mark_job_notified(job_id):
+        return
+    job = status_db.get_job(job_id)
+    if job and job.get("created_by"):
+        notifications_db.create(
+            job["created_by"], kind="job_complete", message=f"Job {job_id} has finished.",
+            job_id=job_id, project_id=job.get("project_id"),
+        )
+
+
+def _handle_one(
+    tasks_db: TasksDB, status_db: StatusDB, task: dict, notifications_db: Optional[NotificationsDB] = None,
+) -> None:
+    # Defaulted rather than required so every existing call site (tests,
+    # mainly) that predates the Phase 4 notification hook keeps working
+    # unchanged -- NotificationsDB, like every other *DB client in this
+    # codebase, is stateless (a connection is only borrowed per method
+    # call), so building one here when the caller didn't supply one costs
+    # nothing until a notification is actually created.
+    notifications_db = notifications_db or NotificationsDB()
+
     job_id, task_id, stage = task["job_id"], task["task_id"], task["stage"]
     status_mrn, display_id = task["status_mrn"], task["display_id"]
     params = task["params"]
@@ -222,6 +268,7 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
             error_message="project membership revoked or could not be verified",
             attempt=attempt, task_id=task_id,
         )
+        _maybe_notify_job_complete(tasks_db, status_db, notifications_db, job_id)
         return
 
     if not tasks_db.mark_running(task_id, worker_id):
@@ -243,6 +290,8 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
                 job_id, status_mrn, stage=stage, event_type="failure",
                 error_message=str(e), attempt=attempt, task_id=task_id,
             )
+        if outcome == "failed":  # terminal -- "requeued"/"unchanged" are not
+            _maybe_notify_job_complete(tasks_db, status_db, notifications_db, job_id)
         return
 
     if task["kind"] == "import":
@@ -269,6 +318,25 @@ def _handle_one(tasks_db: TasksDB, status_db: StatusDB, task: dict) -> None:
             job_id, status_mrn, stage=stage, event_type="success",
             details=details, attempt=attempt, task_id=task_id,
         )
+        _maybe_notify_job_complete(tasks_db, status_db, notifications_db, job_id)
+
+
+def _run_audit_chain_check(audit_chain_db: AuditChainDB) -> None:
+    """
+    Recompute and verify the events hash chain from scratch, persisting the
+    outcome (backend/src/status/audit_chain_db.py). Reuses backend/scripts/
+    verify_audit_chain.py's own pure functions directly rather than
+    reimplementing them, so there remains exactly one way this chain is
+    ever verified/recomputed. Runs on a much longer timer than
+    reap_stale_claims (see main()) -- a full-table scan of `events` isn't
+    cheap at scale, and unlike stale-claim recovery this isn't time-critical.
+    """
+    rows = fetch_events_in_order()
+    chain_state_last_hash = fetch_chain_state()
+    ok, bad_row, reason = verify_chain(rows, chain_state_last_hash=chain_state_last_hash)
+    audit_chain_db.record_check(ok, bad_event_id=bad_row["id"] if bad_row else None, reason=reason)
+    if not ok:
+        logger.error("Audit chain verification FAILED: %s", reason)
 
 
 def main() -> None:
@@ -286,10 +354,15 @@ def main() -> None:
 
     tasks_db = TasksDB()
     status_db = StatusDB()
+    notifications_db = NotificationsDB()
+    audit_chain_db = AuditChainDB()
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     poll_interval = float(os.getenv("HERMES_WORKER_POLL_INTERVAL", "2"))
     stale_seconds = int(os.getenv("HERMES_TASK_STALE_SECONDS", "1800"))
     reap_interval_seconds = 60.0
+    # Daily by default -- see _run_audit_chain_check's docstring for why
+    # this doesn't need reap_stale_claims' much shorter cadence.
+    audit_check_interval_seconds = float(os.getenv("HERMES_AUDIT_CHECK_INTERVAL_SECONDS", str(24 * 60 * 60)))
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
@@ -300,6 +373,7 @@ def main() -> None:
     )
 
     last_reap = 0.0
+    last_audit_check = 0.0
     while not _SHUTDOWN:
         now = time.monotonic()
         if now - last_reap > reap_interval_seconds:
@@ -307,6 +381,13 @@ def main() -> None:
             if reaped:
                 logger.warning("Reaped %d stale claim(s)", reaped)
             last_reap = now
+
+        if now - last_audit_check > audit_check_interval_seconds:
+            try:
+                _run_audit_chain_check(audit_chain_db)
+            except Exception:
+                logger.exception("Audit chain check itself failed to run (not the same as a failed verification)")
+            last_audit_check = now
 
         task = tasks_db.claim(worker_id)
         if task is None:
@@ -317,7 +398,7 @@ def main() -> None:
             "Worker %s claimed task %s (job %s, kind=%s, display_id=%s)",
             worker_id, task["task_id"], task["job_id"], task["kind"], task["display_id"],
         )
-        _handle_one(tasks_db, status_db, task)
+        _handle_one(tasks_db, status_db, task, notifications_db=notifications_db)
 
     logger.info("Worker %s shutting down", worker_id)
 

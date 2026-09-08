@@ -175,3 +175,69 @@ def test_audit_log_records_lifecycle_actions(db, owner):
 
 def project_ids(projects: list[dict]) -> set:
     return {p["project_id"] for p in projects}
+
+
+# ---- list_expiring_projects (Phase 4 admin dashboard) ----
+
+def _approved_project(db, owner, expiry_date):
+    project_id = _make_project(db, owner)
+    db.submit_project(project_id, owner)
+    db.review_project(project_id, approved=True, reviewer="admin", expiry_date=expiry_date)
+    return project_id
+
+
+def test_list_expiring_projects_includes_one_inside_the_window(db, owner):
+    soon = datetime.now(timezone.utc) + timedelta(days=10)
+    project_id = _approved_project(db, owner, soon)
+
+    result = project_ids(db.list_expiring_projects(within_days=30))
+
+    assert project_id in result
+
+
+def test_list_expiring_projects_excludes_one_outside_the_window(db, owner):
+    far = datetime.now(timezone.utc) + timedelta(days=90)
+    project_id = _approved_project(db, owner, far)
+
+    result = project_ids(db.list_expiring_projects(within_days=30))
+
+    assert project_id not in result
+
+
+def test_list_expiring_projects_includes_one_exactly_at_the_boundary(db, owner):
+    # A few seconds INSIDE the 30-day window (not exactly +30d): the query's
+    # own now() runs slightly after this now(), so a value timed to land
+    # exactly on +30d would non-deterministically fall just outside the
+    # window depending on that gap -- this asserts the boundary is honored
+    # without being sensitive to that inherent skew.
+    at_boundary = datetime.now(timezone.utc) + timedelta(days=30) - timedelta(seconds=5)
+    project_id = _approved_project(db, owner, at_boundary)
+
+    result = project_ids(db.list_expiring_projects(within_days=30))
+
+    assert project_id in result
+
+
+def test_list_expiring_projects_excludes_open_ended_approval(db, owner):
+    """No expiry_date at all -- nothing to warn about, never qualifies."""
+    project_id = _approved_project(db, owner, None)
+
+    result = project_ids(db.list_expiring_projects(within_days=30))
+
+    assert project_id not in result
+
+
+def test_list_expiring_projects_excludes_non_approved_projects(db, owner):
+    """A draft project with no expiry_date can't accidentally qualify --
+    and a revoked project (which may still carry a future expiry_date from
+    its now-void approval) must not appear either."""
+    draft_id = _make_project(db, owner)
+
+    soon = datetime.now(timezone.utc) + timedelta(days=10)
+    revoked_id = _approved_project(db, owner, soon)
+    db.revoke_project(revoked_id, revoked_by="admin")
+
+    result = project_ids(db.list_expiring_projects(within_days=30))
+
+    assert draft_id not in result
+    assert revoked_id not in result

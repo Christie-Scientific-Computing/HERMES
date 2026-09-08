@@ -5,6 +5,16 @@ One-shot, idempotent seeder for the anon-mapping test database
 (backend/src/identity/anon.py's `key_value` table) that
 backend/tests/test_*_anon_boundary.py and friends run against.
 
+`key_value` (the column, holding the real id -- see anon.py's own comment on
+the confusing patient_id/key_value naming) is VARCHAR here, matching the
+real anon DB's actual schema (confirmed directly against a live deployment
+on 2026-09-07 -- `patient_id`/anon id is bigint, but `key_value`/real id is
+character varying). anon.py's `_SQL_REAL_TO_ANON`/`_SQL_DATE_PERTURBATION`
+cast their input array to `::text[]` to match; seeding this column as
+BIGINT instead would make those queries fail here the same way they failed
+in production before that fix (`operator does not exist: character varying
+= bigint`, just with the operand types reversed).
+
 This is the piece docs/plans/pii-boundary-test-suite.md §E calls out as
 missing: today's anon_test Postgres (port 55433) has no in-repo seed script
 at all -- every test file that needs it (see the `os.environ["ANON_DB_*"]`
@@ -62,7 +72,7 @@ def seed(conn) -> None:
             CREATE TABLE IF NOT EXISTS key_value (
                 id SERIAL PRIMARY KEY,
                 patient_id BIGINT NOT NULL,
-                key_value BIGINT NOT NULL,
+                key_value VARCHAR NOT NULL,
                 key_type_id INT NOT NULL,
                 date_perturbation INT
             )

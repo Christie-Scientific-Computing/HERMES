@@ -32,7 +32,6 @@ plus additionally restricted to the uploader or staff specifically, since a
 delete is more consequential than a read.
 """
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
@@ -42,7 +41,13 @@ from sqlalchemy.orm import Session as DBSession
 
 from frontend_fastapi import backend_client
 from frontend_fastapi.database import get_db
-from frontend_fastapi.deps import get_session, get_template_context, require_data_custodian, require_login
+from frontend_fastapi.deps import (
+    expiring_soon,
+    get_session,
+    get_template_context,
+    require_data_custodian,
+    require_login,
+)
 from frontend_fastapi.flash import flash
 from frontend_fastapi.forms.research_projects import AddMemberForm, CreateProjectForm, ReviewProjectForm
 from frontend_fastapi.models import ProjectDocument, Session, User
@@ -51,7 +56,6 @@ from frontend_fastapi.templating import templates
 
 router = APIRouter(prefix="/projects", tags=["research_projects"])
 
-EXPIRING_SOON_WITHIN_DAYS = 30
 _DOCUMENTS_SUBDIR = "ethics_documents"
 _MAX_DOCUMENT_SIZE_BYTES = 50 * 1024 * 1024  # generous for a PDF ethics certificate, bounds a careless/hostile upload
 _COPY_CHUNK_SIZE = 1024 * 1024
@@ -63,34 +67,6 @@ class _DocumentTooLargeError(Exception):
 
 def _is_member(project: dict, username: str) -> bool:
     return any(m["username"] == username for m in project["members"])
-
-
-def _expiring_soon(active_projects: list[dict], within_days: int = EXPIRING_SOON_WITHIN_DAYS) -> list[dict]:
-    """Filters a list of projects down to ones that are currently approved,
-    non-revoked, and whose expiry_date falls within the next `within_days`
-    days. Explicitly re-checks `status == "approved"` itself rather than
-    trusting the caller to have pre-filtered -- list.html's call site
-    passes get_template_context's nav_active_projects (already
-    approved+non-expired, via backend_client.list_user_active_projects),
-    but detail.html's passes a single project of ANY status, which might
-    have a future expiry_date left over from a since-revoked approval. An
-    open-ended approval (expiry_date is None) never qualifies -- there's
-    nothing to warn about. Each returned dict gains a `days_remaining` key."""
-    now = datetime.now(timezone.utc)
-    soon = []
-    for project in active_projects:
-        if project.get("status") != "approved":
-            continue
-        expiry = project.get("expiry_date")
-        if not expiry:
-            continue
-        expiry_dt = datetime.fromisoformat(expiry) if isinstance(expiry, str) else expiry
-        if expiry_dt.tzinfo is None:
-            expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
-        days_remaining = (expiry_dt - now).days
-        if 0 <= days_remaining <= within_days:
-            soon.append({**project, "days_remaining": days_remaining})
-    return soon
 
 
 async def _get_project_or_flash(session: Session, project_id: str) -> dict | None:
@@ -118,7 +94,7 @@ async def project_list(request: Request, status: str = "", user: User = Depends(
         projects = []
     return templates.TemplateResponse(request, "research_projects/list.html", {
         **ctx, "projects": projects, "status": status_filter, "backend_error": backend_error,
-        "expiring_soon": _expiring_soon(ctx["nav_active_projects"]),
+        "expiring_soon": expiring_soon(ctx["nav_active_projects"]),
     })
 
 
@@ -194,7 +170,7 @@ async def project_detail(
     # isn't otherwise invested in it.
     days_remaining = None
     if is_member:
-        matches = _expiring_soon([project])
+        matches = expiring_soon([project])
         if matches:
             days_remaining = matches[0]["days_remaining"]
 

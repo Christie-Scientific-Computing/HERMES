@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% from "jobs/_macros.html" import job_progress, combined_job_progress, no_projects_notice %}
+{% block title %}Submit a job — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-4">Submit a job</h1>
+
+<div class="grid gap-6 lg:grid-cols-2">
+  <div class="max-w-md">
+    {% if has_projects %}
+    <form method="post" enctype="multipart/form-data" class="space-y-5 bg-white border border-gray-200 rounded-lg p-6">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if form.form_errors %}
+      <p class="text-sm text-red-600">{{ form.form_errors|join("; ") }}</p>
+      {% endif %}
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700">{{ form.project_id.label }}</label>
+        {{ form.project_id() }}
+        {% if form.project_id.errors %}<p class="text-xs text-red-600 mt-1">{{ form.project_id.errors|join("; ") }}</p>{% endif %}
+      </div>
+
+      <div>
+        <span class="block text-sm font-medium text-gray-700 mb-1">Scope</span>
+        <div class="flex gap-4 text-sm">
+          {% for subfield in form.scope %}
+          <label class="inline-flex items-center gap-1.5">{{ subfield() }} {{ subfield.label.text }}</label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div id="field-mrn">
+        <label class="block text-sm font-medium text-gray-700">{{ form.mrn.label }}</label>
+        {{ form.mrn() }}
+        {% if form.mrn.errors %}<p class="text-xs text-red-600 mt-1">{{ form.mrn.errors|join("; ") }}</p>{% endif %}
+      </div>
+      <div id="field-file">
+        <label class="block text-sm font-medium text-gray-700">CSV file (patient_id column)</label>
+        <input type="file" name="file" id="file">
+        {% if form.file_errors %}<p class="text-xs text-red-600 mt-1">{{ form.file_errors|join("; ") }}</p>{% endif %}
+      </div>
+
+      <div class="border-t border-gray-100 pt-4 space-y-3">
+        <label class="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+          {{ form.do_import() }} Import
+        </label>
+        <div id="field-import_level" class="pl-6">
+          <label class="block text-sm font-medium text-gray-700">{{ form.import_level.label }}</label>
+          {{ form.import_level() }}
+        </div>
+      </div>
+
+      <div class="border-t border-gray-100 pt-4 space-y-3">
+        <label class="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+          {{ form.do_export() }} Also export
+        </label>
+        <p class="text-xs text-gray-400 pl-6 -mt-2">{{ form.do_export.description }}</p>
+
+        <div id="export-options" class="pl-6 space-y-3">
+          <div class="flex gap-4 text-sm">
+            {% for subfield in form.export_kind %}
+            <label class="inline-flex items-center gap-1.5">{{ subfield() }} {{ subfield.label.text }}</label>
+            {% endfor %}
+          </div>
+          {% if form.export_kind.errors %}<p class="text-xs text-red-600">{{ form.export_kind.errors|join("; ") }}</p>{% endif %}
+
+          <div id="field-dicom" class="space-y-3">
+            {% if modalities_error %}
+            <div class="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">
+              Could not load available Orthanc destinations: {{ modalities_error }}
+            </div>
+            {% endif %}
+            <div>
+              <label class="block text-sm font-medium text-gray-700">{{ form.destination.label }}</label>
+              {{ form.destination() }}
+              {% if form.destination.errors %}<p class="text-xs text-red-600 mt-1">{{ form.destination.errors|join("; ") }}</p>{% endif %}
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700">{{ form.message_id.label }}</label>
+              {{ form.message_id() }}
+              <p class="text-xs text-gray-400 mt-1">{{ form.message_id.description }}</p>
+              {% if form.message_id.errors %}<p class="text-xs text-red-600 mt-1">{{ form.message_id.errors|join("; ") }}</p>{% endif %}
+            </div>
+          </div>
+
+          <div id="field-proknow">
+            {% if collections_error %}
+            <div class="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">
+              Could not load available ProKnow collections: {{ collections_error }}
+            </div>
+            {% endif %}
+            <div>
+              <label class="block text-sm font-medium text-gray-700">{{ form.collection.label }}</label>
+              {{ form.collection() }}
+              {% if form.collection.errors %}<p class="text-xs text-red-600 mt-1">{{ form.collection.errors|join("; ") }}</p>{% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+        Start job
+      </button>
+    </form>
+    {% else %}
+    {{ no_projects_notice() }}
+    {% endif %}
+  </div>
+
+  {% if job_id %}
+  <div>
+    {% if is_combined %}
+    {{ combined_job_progress(job_id, csrf_token) }}
+    {% else %}
+    {{ job_progress(job_id, csrf_token) }}
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<script>
+function hermesUpdateVisibility() {
+  var scopeEl = document.querySelector('input[name="scope"]:checked');
+  var scope = scopeEl ? scopeEl.value : 'single';
+  document.getElementById('field-mrn').classList.toggle('hidden', scope !== 'single');
+  document.getElementById('field-file').classList.toggle('hidden', scope !== 'batch');
+
+  var doImportEl = document.getElementById('do_import');
+  var doImport = doImportEl ? doImportEl.checked : false;
+  document.getElementById('field-import_level').classList.toggle('hidden', !doImport);
+
+  var doExportEl = document.getElementById('do_export');
+  var doExport = doExportEl ? doExportEl.checked : false;
+  document.getElementById('export-options').classList.toggle('hidden', !doExport);
+
+  var exportKindEl = document.querySelector('input[name="export_kind"]:checked');
+  var exportKind = exportKindEl ? exportKindEl.value : null;
+  document.getElementById('field-dicom').classList.toggle('hidden', exportKind !== 'dicom_move');
+  document.getElementById('field-proknow').classList.toggle('hidden', exportKind !== 'proknow_upload');
+}
+
+document.querySelectorAll('input[name="scope"], input[name="export_kind"], #do_import, #do_export')
+  .forEach(function (el) { el.addEventListener('change', hermesUpdateVisibility); });
+hermesUpdateVisibility();
+</script>
+{% endblock %}

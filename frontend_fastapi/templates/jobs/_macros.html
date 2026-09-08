@@ -1,0 +1,366 @@
+{# Jinja2 macro equivalents of frontend/templates/cotton/{source_badges,patient_table,
+   job_progress,combined_job_progress,no_projects_notice}.html -- this project has no
+   cotton-style component system, so these are plain {% macro %} includes instead. #}
+
+{% macro source_badges(mosaiq=none, pinnacle=none, proknow=none, mosaiq_reason=none, pinnacle_reason=none, proknow_reason=none) %}
+<div class="flex items-center gap-3 text-xs whitespace-nowrap">
+  <span class="flex items-center gap-1 text-gray-600">
+    Mosaiq
+    {% if mosaiq == True %}<span class="text-green-600 font-bold">&#10003;</span>
+    {% elif mosaiq == False %}<span class="text-red-600 font-bold" {% if mosaiq_reason %}title="{{ mosaiq_reason }}"{% endif %}>&times;</span>
+    {% else %}<span class="text-gray-400">&mdash;</span>{% endif %}
+  </span>
+  <span class="flex items-center gap-1 text-gray-600">
+    Pinnacle
+    {% if pinnacle == True %}<span class="text-green-600 font-bold">&#10003;</span>
+    {% elif pinnacle == False %}<span class="text-red-600 font-bold" {% if pinnacle_reason %}title="{{ pinnacle_reason }}"{% endif %}>&times;</span>
+    {% else %}<span class="text-gray-400">&mdash;</span>{% endif %}
+  </span>
+  <span class="flex items-center gap-1 text-gray-600">
+    ProKnow
+    {% if proknow == True %}<span class="text-green-600 font-bold">&#10003;</span>
+    {% elif proknow == False %}<span class="text-red-600 font-bold" {% if proknow_reason %}title="{{ proknow_reason }}"{% endif %}>&times;</span>
+    {% else %}<span class="text-gray-400">&mdash;</span>{% endif %}
+  </span>
+</div>
+{% endmacro %}
+
+{% macro patient_table(rows, pills, job_id="", total=0, base_query="") %}
+{% if pills %}
+<div class="flex flex-wrap gap-2 mb-4">
+  {% for pill in pills %}
+  <a href="?{{ base_query }}filter={{ pill.key }}"
+     class="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border
+       {% if pill.active %}bg-hermes-700 text-white border-hermes-700{% else %}bg-white text-gray-600 border-gray-200 hover:border-hermes-300{% endif %}">
+    {{ pill.label }}
+    <span class="{% if pill.active %}text-hermes-100{% else %}text-gray-400{% endif %} tabular-nums">{{ pill.count }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="overflow-x-auto">
+  <table class="min-w-full text-sm divide-y divide-gray-100">
+    <thead><tr>
+      <th class="text-left py-1 font-medium text-gray-500">Patient</th>
+      <th class="text-left py-1 font-medium text-gray-500">Sources</th>
+      <th class="text-left py-1 font-medium text-gray-500">Import</th>
+      <th class="text-left py-1 font-medium text-gray-500">Export</th>
+    </tr></thead>
+    <tbody class="divide-y divide-gray-50">
+      {% for row in rows %}
+      <tr>
+        <td class="py-2 pr-4">
+          {% if job_id %}
+          <a class="text-hermes-700 hover:underline font-mono" href="/jobs/{{ job_id }}/patients/{{ row.mrn }}">{{ row.mrn }}</a>
+          {% else %}
+          <span class="font-mono">{{ row.mrn }}</span>
+          {% endif %}
+        </td>
+        <td class="py-2 pr-4">
+          {{ source_badges(row.in_mosaiq, row.in_pinnacle, row.in_proknow, row.mosaiq_reason, row.pinnacle_reason, row.proknow_reason) }}
+        </td>
+        <td class="py-2 pr-4">
+          {% if row.import_outcome == "success" %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800">Success</span>
+          {% elif row.import_outcome == "failure" %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800">Failed</span>
+            {% if row.import_error_message %}
+            <p class="text-xs text-red-600 mt-1 max-w-md break-words">{{ row.import_error_message }}</p>
+            {% endif %}
+          {% elif row.import_outcome == "running" %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800">In progress</span>
+          {% else %}
+            <span class="text-gray-400">&mdash;</span>
+          {% endif %}
+        </td>
+        <td class="py-2">
+          {% if row.export_outcome == "success" %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800">Success</span>
+          {% elif row.export_outcome == "failure" %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800">Failed</span>
+            {% if row.export_error_message %}
+            <p class="text-xs text-red-600 mt-1 max-w-md break-words">{{ row.export_error_message }}</p>
+            {% endif %}
+          {% elif row.export_outcome == "running" %}
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800">In progress</span>
+          {% elif row.import_outcome == "success" and row.imported == False %}
+            <span class="text-gray-400 text-xs">Not found &mdash; nothing to export</span>
+          {% else %}
+            <span class="text-gray-400">&mdash;</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="py-6 text-center text-gray-400">
+        {% if total %}No patients match this filter.{% else %}No patients recorded.{% endif %}
+      </td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endmacro %}
+
+{% macro no_projects_notice() %}
+<div class="max-w-md rounded-md bg-yellow-50 border border-yellow-200 p-4 text-sm text-yellow-800">
+  No active project &mdash; nothing to submit this under yet.
+  <a href="/projects/new" class="underline font-medium">Request one</a> to get started.
+</div>
+{% endmacro %}
+
+{% macro job_progress(job_id, csrf_token) %}
+<div class="bg-white border border-gray-200 rounded-lg p-6">
+  <div class="flex items-center justify-between mb-2">
+    <span id="status-label-{{ job_id }}" class="text-sm font-medium text-gray-700">Starting&hellip;</span>
+    <form method="post" action="/jobs/{{ job_id }}/cancel" onsubmit="return confirm('Cancel this job? Items already in progress will finish, but no further items will start.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="text-xs text-red-600 hover:underline">Cancel</button>
+    </form>
+  </div>
+  <div class="w-full bg-gray-100 rounded-full h-2 mb-4">
+    <div id="progress-bar-{{ job_id }}" class="bg-hermes-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+  </div>
+  <p id="progress-count-{{ job_id }}" class="text-xs text-gray-400 mb-4">0 / 0</p>
+
+  <ul id="event-log-{{ job_id }}" class="divide-y divide-gray-100 text-sm max-h-96 overflow-y-auto"></ul>
+</div>
+
+<script>
+(function () {
+  const streamUrl = "/jobs/{{ job_id }}/stream";
+  const es = new EventSource(streamUrl);
+  const statusLabel = document.getElementById('status-label-{{ job_id }}');
+  const progressBar = document.getElementById('progress-bar-{{ job_id }}');
+  const progressCount = document.getElementById('progress-count-{{ job_id }}');
+  const eventLog = document.getElementById('event-log-{{ job_id }}');
+  let total = 0, done = 0;
+
+  function addRow(text, colorClass) {
+    const li = document.createElement('li');
+    li.className = 'py-1.5 ' + (colorClass || 'text-gray-600');
+    li.textContent = text;
+    eventLog.prepend(li);
+  }
+
+  function updateProgress() {
+    progressCount.textContent = done + ' / ' + total;
+    if (total > 0) {
+      progressBar.style.width = Math.min(100, Math.round((done / total) * 100)) + '%';
+    }
+  }
+
+  es.addEventListener('start', (e) => {
+    const data = JSON.parse(e.data);
+    total = data.total || 0;
+    statusLabel.textContent = 'Running (' + total + ' item' + (total === 1 ? '' : 's') + ')';
+    updateProgress();
+  });
+
+  es.addEventListener('progress', (e) => {
+    const data = JSON.parse(e.data);
+    addRow('Working on ' + data.current + '…', 'text-gray-500');
+  });
+
+  es.addEventListener('success', (e) => {
+    const data = JSON.parse(e.data);
+    done += 1;
+    addRow('✓ ' + data.mrn + (data.status ? ' — ' + data.status : ''), 'text-green-700');
+    updateProgress();
+  });
+
+  es.addEventListener('error', (e) => {
+    const data = JSON.parse(e.data);
+    done += 1;
+    addRow('✗ ' + (data.mrn || '') + ' — ' + (data.error || 'failed'), 'text-red-700');
+    updateProgress();
+  });
+
+  es.addEventListener('cancelled', () => {
+    statusLabel.textContent = 'Cancelled';
+    addRow('Job cancelled — no further items will start.', 'text-yellow-700 font-medium');
+  });
+
+  es.addEventListener('done', () => {
+    statusLabel.textContent = 'Finished';
+    es.close();
+  });
+
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {
+      statusLabel.textContent = statusLabel.textContent === 'Finished' ? 'Finished' : 'Connection closed';
+    }
+  };
+})();
+</script>
+{% endmacro %}
+
+{% macro combined_job_progress(job_id, csrf_token) %}
+{#
+Two-stage progress for a combined import->export job (routers/jobs.py's
+submit_job) -- not a reuse of job_progress, which is single-stage by
+design. Listens to the same SSE vocabulary
+(backend/src/results/endpoints.py's _observe_job), just routes
+progress/success/error events into an Import or Export bar by their
+"stage" field, and tracks a growing export total via the "total" event
+(chained export tasks are enqueued one at a time as imports succeed, so
+the export total isn't known upfront the way the import total is).
+#}
+<div class="bg-white border border-gray-200 rounded-lg p-6">
+  <div class="flex items-center justify-between mb-4">
+    <span id="status-label-{{ job_id }}" class="text-sm font-medium text-gray-700">Starting&hellip;</span>
+    <form method="post" action="/jobs/{{ job_id }}/cancel" onsubmit="return confirm('Cancel this job? Items already in progress will finish, but no further items will start.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="text-xs text-red-600 hover:underline">Cancel</button>
+    </form>
+  </div>
+
+  <div class="mb-4">
+    <p class="text-xs font-medium text-gray-500 mb-1">Import</p>
+    <div class="w-full bg-gray-100 rounded-full h-2 mb-1">
+      <div id="import-bar-{{ job_id }}" class="bg-hermes-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+    </div>
+    <p id="import-count-{{ job_id }}" class="text-xs text-gray-400">0 / 0</p>
+  </div>
+
+  <div class="mb-4">
+    <p class="text-xs font-medium text-gray-500 mb-1">Export</p>
+    <div class="w-full bg-gray-100 rounded-full h-2 mb-1">
+      <div id="export-bar-{{ job_id }}" class="bg-hermes-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+    </div>
+    <p id="export-count-{{ job_id }}" class="text-xs text-gray-400">0 / 0 &mdash; grows as imports finish</p>
+  </div>
+
+  <ul id="event-log-{{ job_id }}" class="divide-y divide-gray-100 text-sm max-h-96 overflow-y-auto"></ul>
+</div>
+
+<script>
+(function () {
+  const streamUrl = "/jobs/{{ job_id }}/stream";
+  const es = new EventSource(streamUrl);
+  const statusLabel = document.getElementById('status-label-{{ job_id }}');
+  const importBar = document.getElementById('import-bar-{{ job_id }}');
+  const importCount = document.getElementById('import-count-{{ job_id }}');
+  const exportBar = document.getElementById('export-bar-{{ job_id }}');
+  const exportCount = document.getElementById('export-count-{{ job_id }}');
+  const eventLog = document.getElementById('event-log-{{ job_id }}');
+
+  // import_total/export_total come straight from the server (start/total
+  // events) rather than being inferred client-side -- backend/worker.py's
+  // _maybe_chain_export grows export_total over the job's lifetime as
+  // imports succeed, and a fresh connection (page refresh, a colleague
+  // joining, EventSource's own auto-reconnect) can open after some exports
+  // have already been chained in, when there'd be no reliable way to
+  // recover "the import-only total at the moment the stream first opened"
+  // by subtracting on this end.
+  //
+  // importDone/exportDone, by contrast, are still accumulated client-side
+  // and reset to 0 on every 'start' (i.e. every fresh connection) -- this
+  // only stays correct because _observe_job (backend/src/results/
+  // endpoints.py) starts each new connection with an empty last-seen-state
+  // map, so a reconnect replays a success/error event for every
+  // already-finished task, not just new ones. Don't "fix" the reset
+  // without accounting for that replay, or a reconnect would silently
+  // undercount.
+  let importTotal = 0, importDone = 0;
+  let exportTotal = 0, exportDone = 0;
+
+  function addRow(text, colorClass) {
+    const li = document.createElement('li');
+    li.className = 'py-1.5 ' + (colorClass || 'text-gray-600');
+    li.textContent = text;
+    eventLog.prepend(li);
+  }
+
+  function updateImport() {
+    importCount.textContent = importDone + ' / ' + importTotal;
+    if (importTotal > 0) {
+      importBar.style.width = Math.min(100, Math.round((importDone / importTotal) * 100)) + '%';
+    }
+  }
+
+  function updateExport() {
+    // Once every import has reached a terminal state, no further export
+    // tasks will ever be chained in (backend/worker.py's _maybe_chain_export
+    // only runs on a successful import) -- exportTotal is final at that
+    // point, so the "still growing" caveat no longer applies.
+    const stillGrowing = importDone < importTotal;
+    exportCount.textContent = exportDone + ' / ' + exportTotal + (stillGrowing ? ' — grows as imports finish' : '');
+    if (exportTotal > 0) {
+      exportBar.style.width = Math.min(100, Math.round((exportDone / exportTotal) * 100)) + '%';
+    }
+  }
+
+  es.addEventListener('start', (e) => {
+    const data = JSON.parse(e.data);
+    importTotal = data.import_total || 0;
+    exportTotal = data.export_total || 0;
+    statusLabel.textContent = 'Running (' + importTotal + ' patient' + (importTotal === 1 ? '' : 's') + ')';
+    updateImport();
+    updateExport();
+  });
+
+  es.addEventListener('total', (e) => {
+    const data = JSON.parse(e.data);
+    importTotal = data.import_total || 0;
+    exportTotal = data.export_total || 0;
+    updateImport();
+    updateExport();
+  });
+
+  es.addEventListener('progress', (e) => {
+    const data = JSON.parse(e.data);
+    const label = data.stage === 'export' ? 'Exporting ' : 'Importing ';
+    addRow(label + data.current + '…', 'text-gray-500');
+  });
+
+  es.addEventListener('success', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.stage === 'export') {
+      exportDone += 1;
+      addRow('✓ Exported ' + data.mrn, 'text-green-700');
+      updateExport();
+    } else {
+      importDone += 1;
+      if (data.imported === false) {
+        // Ground truth from Importer.handle_patient: nothing was found for
+        // this patient, so no export task will ever exist for it -- a real,
+        // expected terminal state, not a stuck spinner.
+        addRow('– ' + data.mrn + ' — not found, nothing to export', 'text-gray-500');
+      } else {
+        addRow('✓ Imported ' + data.mrn, 'text-green-700');
+      }
+      updateImport();
+    }
+  });
+
+  es.addEventListener('error', (e) => {
+    const data = JSON.parse(e.data);
+    const label = data.stage === 'export' ? 'Export failed: ' : 'Import failed: ';
+    if (data.stage === 'export') {
+      exportDone += 1;
+      updateExport();
+    } else {
+      importDone += 1;
+      updateImport();
+    }
+    addRow('✗ ' + label + (data.mrn || '') + ' — ' + (data.error || 'failed'), 'text-red-700');
+  });
+
+  es.addEventListener('cancelled', () => {
+    statusLabel.textContent = 'Cancelled';
+    addRow('Job cancelled — no further items will start.', 'text-yellow-700 font-medium');
+  });
+
+  es.addEventListener('done', () => {
+    statusLabel.textContent = 'Finished';
+    es.close();
+  });
+
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {
+      statusLabel.textContent = statusLabel.textContent === 'Finished' ? 'Finished' : 'Connection closed';
+    }
+  };
+})();
+</script>
+{% endmacro %}

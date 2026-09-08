@@ -56,16 +56,68 @@
           </a>
           {% if user %}
           <div class="hidden md:flex items-center gap-4 text-sm">
+            <a href="/" class="text-hermes-200 hover:text-white">Dashboard</a>
             <a href="/projects" class="text-hermes-200 hover:text-white">Projects</a>
+            <a href="/results" class="text-hermes-200 hover:text-white">Results</a>
             {% if user.is_staff %}
               <a href="/projects/review" class="text-hermes-200 hover:text-white">Review Queue</a>
               <a href="/accounts/users" class="text-hermes-200 hover:text-white">Users</a>
+              <a href="/admin" class="text-hermes-200 hover:text-white">Admin</a>
             {% endif %}
           </div>
           {% endif %}
         </div>
         <div class="flex items-center space-x-4">
           {% if user %}
+            {# Plain <details>/<summary> dropdown -- no JS needed, matching
+               research_projects/_macros.html's audit_trail's identical
+               approach to a disclosure widget in this codebase. #}
+            <details class="relative">
+              <summary class="list-none cursor-pointer text-gray-300 hover:text-white text-sm">
+                Notifications
+                {% set badge_count = nav_notifications|length + nav_expiring_soon|length %}
+                {% if badge_count %}<span class="inline-flex items-center justify-center rounded-full bg-red-600 text-white text-xs px-1.5 py-0.5 ml-1">{{ badge_count }}</span>{% endif %}
+              </summary>
+              <div class="absolute right-0 mt-2 w-80 bg-white border border-gray-200 rounded-md shadow-lg z-10 text-sm">
+                {% if nav_expiring_soon %}
+                {# The "live" section (computed fresh on every render from the
+                   user's own active projects, not a persisted row) --
+                   visually distinct (amber) from the persisted notifications
+                   below, since it isn't something to "mark read": it simply
+                   stops appearing once the project is no longer expiring
+                   soon. #}
+                <ul class="divide-y divide-amber-100 bg-amber-50">
+                  {% for project in nav_expiring_soon %}
+                  <li class="p-3">
+                    <p class="text-amber-800">
+                      <a class="hover:underline font-medium" href="/projects/{{ project.project_id }}">{{ project.title }}</a>
+                      expires in {{ project.days_remaining }} day{{ "s" if project.days_remaining != 1 else "" }}.
+                    </p>
+                  </li>
+                  {% endfor %}
+                </ul>
+                {% endif %}
+                {% if nav_notifications %}
+                <ul class="divide-y divide-gray-100 max-h-96 overflow-y-auto">
+                  {% for n in nav_notifications %}
+                  <li class="p-3">
+                    <p class="text-gray-700">{{ n.message }}</p>
+                    <div class="flex items-center justify-between mt-1">
+                      <span class="text-xs text-gray-400">{{ n.created_at }}</span>
+                      <form method="post" action="/notifications/{{ n.id }}/read">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="text-xs text-hermes-700 hover:underline">Mark read</button>
+                      </form>
+                    </div>
+                  </li>
+                  {% endfor %}
+                </ul>
+                {% endif %}
+                {% if not nav_expiring_soon and not nav_notifications %}
+                <p class="p-3 text-gray-400">No new notifications.</p>
+                {% endif %}
+              </div>
+            </details>
             <span class="text-gray-300 text-sm">{{ user.first_name ~ " " ~ user.last_name if user.first_name else user.username }}</span>
             <form method="post" action="/accounts/logout" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

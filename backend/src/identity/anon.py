@@ -10,12 +10,31 @@ its `key_value` table -- there is no write path, by construction.
 This is a completely separate database from HermesDB (backend/src/db.py) --
 never conflate the two, never point them at the same instance.
 
-Configuration (backend .env):
-    ANON_DB_HOST, ANON_DB_PORT, ANON_DB_NAME, ANON_DB_USER, ANON_DB_PASS
+Configuration (backend .env) -- two alternative credential-sourcing
+mechanisms; a given deployment uses exactly one:
 
-If ANON_DB_HOST is not set, is_configured() returns False and callers should
-operate in passthrough mode (no anonymisation) -- e.g. internal-only
-deployments that don't need this at all.
+    ANON_DB_HOST, ANON_DB_PORT, ANON_DB_NAME, ANON_DB_USER, ANON_DB_PASS
+        Plain env vars, read directly. The default, first-class mode --
+        used by CI, this module's own test suite, and
+        backend/scripts/dev_seed.py.
+
+    ANON_CONFIG
+        Filesystem path to an XML config file, for deployments that already
+        have one -- the format this module's predecessor (gateway/anon.py's
+        AnonDatabase, pre-dating this module's env-var rewrite) read.
+        <dataBaseUserName>/<dataBasePassword> are Fernet-encrypted at rest;
+        ANON_CONFIG_KEY decrypts them, defaulting to the historical
+        hardcoded key so config files already encrypted under it keep
+        decrypting unmodified -- override only if a deployment's files were
+        (re-)encrypted under a different key. That default is NOT a secret
+        (it's committed to source) -- treat it as a compatibility shim, not
+        real key secrecy. When ANON_CONFIG is set it takes precedence over
+        the plain ANON_DB_* vars above outright, not merged field-by-field.
+        See _load_config_file_credentials.
+
+If neither ANON_DB_HOST nor ANON_CONFIG is set, is_configured() returns
+False and callers should operate in passthrough mode (no anonymisation) --
+e.g. internal-only deployments that don't need this at all.
 
 `key_value` also carries a `date_perturbation INT` column (one value per
 key_type_id=1 row, alongside the id mapping) -- a per-patient day offset,
@@ -27,7 +46,8 @@ between a patient's scans while breaking the link to real calendar dates.
 
 Optional hardening (see docs/safety-plan.md §B1), both opt-in and unset by
 default -- matching this module's existing idiom of "unset means today's
-behavior, unchanged":
+behavior, unchanged", and orthogonal to which credential-sourcing mechanism
+above supplied host/user/password:
     ANON_DB_SSLMODE      -- standard libpq sslmode (e.g. "require",
                             "verify-full"). This is standard TLS opt-in, NOT
                             certificate pinning -- normal PKI validation
@@ -53,6 +73,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import psycopg2
+import xmltodict
+from cryptography.fernet import Fernet
 from psycopg2.pool import SimpleConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -62,6 +84,18 @@ ANON_DB_PORT = int(os.getenv("ANON_DB_PORT", "5432"))
 ANON_DB_NAME = os.getenv("ANON_DB_NAME", "")
 ANON_DB_USER = os.getenv("ANON_DB_USER", "")
 ANON_DB_PASS = os.getenv("ANON_DB_PASS", "")
+
+# Path to an XML config file with Fernet-encrypted credentials -- see module
+# docstring above. Unset by default; when set, takes precedence over the
+# plain ANON_DB_* vars above.
+ANON_CONFIG = os.getenv("ANON_CONFIG")
+# Historical hardcoded key from gateway/anon.py's AnonDatabase, kept as the
+# default so config files already encrypted under it keep decrypting
+# unmodified -- see module docstring for why this is a compatibility shim,
+# not real key secrecy.
+ANON_CONFIG_KEY = os.getenv(
+    "ANON_CONFIG_KEY", "RNLMk5u0H8Ns4Avewnmf2XzsuNmu0yhMmSgiCvtHy9o="
+)
 
 # Standard TLS opt-in -- NOT certificate pinning. Both unset by default,
 # preserving today's behavior unchanged. See module docstring above.
@@ -77,7 +111,12 @@ ANON_LOOKUP_WARN_WINDOW_SECONDS = int(
 # ── Production schema, confirmed by the Christie team ────────────────────────
 # `key_value` is a multi-purpose table; key_type_id = 1 selects the
 # patient-ID mapping rows specifically. Confusingly, the `key_value` *column*
-# holds the real ID and `patient_id` holds the anon ID.
+# holds the real ID and `patient_id` holds the anon ID. The two columns
+# don't share a type: `patient_id` (anon id) is bigint, but `key_value`
+# (real id) is character varying, so only the patient_id-filtered query
+# below casts its input array to bigint[] -- the two key_value-filtered
+# queries cast to text[] instead, or Postgres raises "operator does not
+# exist: character varying = bigint".
 _SQL_ANON_TO_REAL = """
     SELECT patient_id as anon_id, key_value as real_id
     FROM   key_value
@@ -86,12 +125,12 @@ _SQL_ANON_TO_REAL = """
 _SQL_REAL_TO_ANON = """
     SELECT key_value as real_id, patient_id as anon_id
     FROM   key_value
-    WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
+    WHERE  key_value = ANY(%s::text[]) AND key_type_id = 1
 """
 _SQL_DATE_PERTURBATION = """
     SELECT key_value as real_id, date_perturbation
     FROM   key_value
-    WHERE  key_value = ANY(%s::bigint[]) AND key_type_id = 1
+    WHERE  key_value = ANY(%s::text[]) AND key_type_id = 1
 """
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -126,26 +165,68 @@ class AnonServiceError(Exception):
 
 
 def is_configured() -> bool:
-    """Return True if the anonymisation DB is configured in the environment."""
-    return bool(ANON_DB_HOST)
+    """Return True if the anonymisation DB is configured in the environment,
+    via either credential-sourcing mechanism (ANON_DB_HOST or ANON_CONFIG)."""
+    return bool(ANON_DB_HOST or ANON_CONFIG)
+
+
+def _load_config_file_credentials(path: str) -> dict:
+    """Read host/port/dbname/user/password from the XML config file at
+    ANON_CONFIG, decrypting the username/password fields with Fernet.
+
+    This is the credential format gateway/anon.py's AnonDatabase read before
+    this module's env-var-only rewrite -- some deployments already have a
+    file in this shape on disk. dataBaseServer (a separate hostname field
+    the old code parsed but never actually connected with -- only
+    dataBaseIP) is deliberately not read here.
+
+    No try/except here: any failure (missing file, malformed XML, missing
+    field, wrong key/corrupted ciphertext) propagates up through
+    _get_pool() into _query()'s existing `except Exception` wrapper, which
+    already turns it into AnonServiceError -- the same failure mode as an
+    unreachable plain ANON_DB_HOST.
+    """
+    with open(path, encoding="utf-8") as fd:
+        doc = xmltodict.parse(fd.read())
+    root = next(iter(doc))  # root element name is arbitrary, only its content matters
+    node = doc[root]["keyDataBase"]
+
+    fernet = Fernet(ANON_CONFIG_KEY)
+    return {
+        "host": node["dataBaseIP"],
+        "port": int(node["dataBasePort"]),
+        "dbname": node["dataBaseName"],
+        "user": fernet.decrypt(node["dataBaseUserName"]).decode("utf-8"),
+        "password": fernet.decrypt(node["dataBasePassword"]).decode("utf-8"),
+    }
 
 
 def _connection_kwargs() -> dict:
     """Build the kwargs passed to psycopg2 for the anon DB connection.
 
-    Split out from _get_pool so it's independently testable: sslmode/
-    sslrootcert must be present only when their env vars are actually set --
-    psycopg2 should never see e.g. sslmode=None, matching how ANON_DB_HOST
-    unset already means passthrough elsewhere in this module.
+    Credentials come from one of two mutually-exclusive sources -- ANON_CONFIG
+    (an XML file with Fernet-encrypted credentials, see
+    _load_config_file_credentials) if set, else the plain ANON_DB_* env vars.
+    ANON_CONFIG wins outright when both are set; the two are never merged
+    field-by-field.
+
+    sslmode/sslrootcert are added on afterwards regardless of which source
+    supplied host/user/password, and only when their env vars are actually
+    set -- psycopg2 should never see e.g. sslmode=None.
     """
-    kwargs = {
-        "host": ANON_DB_HOST, "port": ANON_DB_PORT, "dbname": ANON_DB_NAME,
-        "user": ANON_DB_USER, "password": ANON_DB_PASS, "connect_timeout": 5,
-    }
+    if ANON_CONFIG:
+        kwargs = {**_load_config_file_credentials(ANON_CONFIG), "connect_timeout": 5}
+    else:
+        kwargs = {
+            "host": ANON_DB_HOST, "port": ANON_DB_PORT, "dbname": ANON_DB_NAME,
+            "user": ANON_DB_USER, "password": ANON_DB_PASS, "connect_timeout": 5,
+        }
     if ANON_DB_SSLMODE:
         kwargs["sslmode"] = ANON_DB_SSLMODE
     if ANON_DB_SSLROOTCERT:
         kwargs["sslrootcert"] = ANON_DB_SSLROOTCERT
+
+    logger.info(f"Connecting to: {kwargs}")
     return kwargs
 
 
@@ -205,6 +286,23 @@ def _to_bigints(ids: list[str]) -> dict[str, int]:
     return out
 
 
+def _safe_db_error_text(exc: Exception) -> str:
+    """A DB error's str() can echo the literal failing SQL -- psycopg2 does
+    client-side parameter binding, so a query built via ANY(%s::...[]) sends
+    the server a single string with every value already substituted in
+    (e.g. "ANY(ARRAY[500123,500456,...])"), and a server-side error on that
+    query (e.g. a type mismatch) copies that same text back verbatim into
+    str(exc)/.pgerror -- including any real patient IDs bound into it. Every
+    AnonServiceError message reaches this module's callers' HTTPException
+    `detail=str(e)` directly (see e.g. results/endpoints.py), so str(exc)
+    must never be used here. psycopg2.Error's .diag.message_primary carries
+    the same DB-side error description without the echoed SQL/values."""
+    diag = getattr(exc, "diag", None)
+    if diag is not None and diag.message_primary:
+        return diag.message_primary
+    return type(exc).__name__
+
+
 def _query(sql: str, values: list[int]) -> list[tuple]:
     if not values:
         return []
@@ -212,7 +310,8 @@ def _query(sql: str, values: list[int]) -> list[tuple]:
         pool = _get_pool()
         conn = pool.getconn()
     except Exception as exc:
-        raise AnonServiceError(f"Cannot reach anonymisation DB: {exc}") from exc
+        logger.exception("Could not reach anonymisation DB")
+        raise AnonServiceError(f"Cannot reach anonymisation DB: {_safe_db_error_text(exc)}") from exc
     try:
         try:
             with conn.cursor() as cur:
@@ -221,7 +320,8 @@ def _query(sql: str, values: list[int]) -> list[tuple]:
             conn.commit()
             return rows
         except Exception as exc:
-            raise AnonServiceError(f"Anonymisation DB query failed: {exc}") from exc
+            logger.exception("Anonymisation DB query failed")
+            raise AnonServiceError(f"Anonymisation DB query failed: {_safe_db_error_text(exc)}") from exc
     finally:
         pool.putconn(conn)
 

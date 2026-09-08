@@ -496,3 +496,48 @@ def test_add_event_task_id_does_not_perturb_the_hash_chain(tasks_db, status_db, 
         row["event_type"], row["ts"], row["attempt"], row["error_message"], row["details"],
     )
     assert recomputed == row["row_hash"]
+
+
+# ---- job_is_complete (Phase 4 job-completion notification hook) ----
+
+def test_job_is_complete_true_for_a_job_with_no_tasks_at_all(tasks_db, job_id):
+    """An empty CSV, or a job that was created but never had anything
+    enqueued -- trivially complete, nothing left to wait for."""
+    assert tasks_db.job_is_complete(job_id) is True
+
+
+def test_job_is_complete_false_while_a_task_is_queued(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    assert tasks_db.job_is_complete(job_id) is False
+
+
+def test_job_is_complete_false_while_a_task_is_running(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_running(task["task_id"], "worker-1")
+    assert tasks_db.job_is_complete(job_id) is False
+
+
+def test_job_is_complete_true_once_every_task_is_terminal(tasks_db, job_id):
+    tasks_db.enqueue(job_id, _items(2), kind="import", stage="retrieve", params={})
+    t1 = tasks_db.claim("worker-1")
+    tasks_db.mark_succeeded(t1["task_id"], "worker-1", {"ok": True})
+    assert tasks_db.job_is_complete(job_id) is False  # one task still queued
+
+    t2 = tasks_db.claim("worker-1")
+    tasks_db.mark_failed(t2["task_id"], "worker-1", "boom")  # max_attempts=1 default -> terminal
+    assert tasks_db.job_is_complete(job_id) is True
+
+
+def test_job_is_complete_flips_back_to_false_once_a_chained_task_is_enqueued(tasks_db, job_id):
+    """The scenario TasksDB.job_is_complete's own docstring warns about: a
+    combined import->export job whose task set grows mid-flight. Must be
+    re-checked live, not decided once and cached."""
+    tasks_db.enqueue(job_id, _items(1), kind="import", stage="retrieve", params={})
+    task = tasks_db.claim("worker-1")
+    tasks_db.mark_succeeded(task["task_id"], "worker-1", {"imported": True})
+    assert tasks_db.job_is_complete(job_id) is True
+
+    tasks_db.enqueue(job_id, _items(1), kind="dicom_move", stage="export", params={},
+                      chained_from_task_id=task["task_id"])
+    assert tasks_db.job_is_complete(job_id) is False

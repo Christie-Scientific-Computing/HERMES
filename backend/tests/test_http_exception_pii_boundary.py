@@ -167,13 +167,20 @@ def test_projects_create_exception_is_redacted(monkeypatch):
 def test_anon_service_error_propagated_through_results_is_redacted(monkeypatch):
     """
     identity/anon.py's own AnonServiceError, raised when the anon-mapping DB
-    itself is unreachable, wraps whatever the underlying psycopg2 error says
-    -- which routinely includes a host:port (backend/src/common/pii_patterns.py's
-    SECRET_LIKE_PATTERNS). results/endpoints.py's patient_plans converts it
-    straight into `HTTPException(503, detail=str(e))`, the same as every
-    other anon.AnonServiceError call site -- proving the handler catches an
-    exception that originates in anon.py, not just ones raised directly in
-    an endpoint module.
+    itself is unreachable, used to wrap whatever the underlying psycopg2
+    error said -- which routinely includes a host:port, and (per the
+    2026-09-08 incident, see test_anon_hardening.py's §D section) could
+    include real patient IDs echoed back from a failing query's own error
+    text. anon._safe_db_error_text now stops that at the source (never uses
+    str(exc) in a message that might reach an HTTP response), so this test
+    now proves the connection detail never even reaches the response body
+    -- not just that the handler's generic pii_patterns.redact() floor would
+    have caught it if it had. results/endpoints.py's patient_plans converts
+    the resulting AnonServiceError straight into
+    `HTTPException(503, detail=str(e))`, the same as every other
+    anon.AnonServiceError call site -- proving this holds for an exception
+    that originates in anon.py, not just ones raised directly in an
+    endpoint module.
     """
     from backend.src.results import endpoints as results_endpoints
 
@@ -200,4 +207,4 @@ def test_anon_service_error_propagated_through_results_is_redacted(monkeypatch):
     assert resp.status_code == 503
     detail = resp.json()["detail"]
     assert "db.internal:5432" not in detail
-    assert "[redacted]" in detail
+    assert detail == "Cannot reach anonymisation DB: RuntimeError"

@@ -34,6 +34,11 @@ proknow
 # PostgreSQL (anonymisation DB)
 psycopg2-binary
 
+# ANON_CONFIG credential file (backend/src/identity/anon.py) -- XML parsing
+# + Fernet decryption
+xmltodict
+cryptography
+
 # Database migrations (backend/'s HermesDB, and frontend_fastapi/'s own local DB)
 alembic
 SQLAlchemy

@@ -17,6 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from backend.src.notifications.db_client import NotificationsDB
 from backend.src.projects.db_client import ProjectsDB, ProjectNotFoundError
 from backend.src.projects.enforcement import verify_internal_key
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(verify_internal_key)])
 
 projects_db = ProjectsDB()
+notifications_db = NotificationsDB()
 
 
 class CreateProjectRequest(BaseModel):
@@ -91,7 +93,23 @@ async def review_project(project_id: str, body: ReviewProjectRequest):
         )
     except ProjectNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return projects_db.get_project(project_id)
+    project = projects_db.get_project(project_id)
+    # Notify every CURRENT member (not just whoever created/submitted it) --
+    # membership can change between submission and review, and anyone
+    # currently on the project needs to know its access just changed.
+    # Best-effort: a notification-write failure must not undo or mask an
+    # already-committed review decision.
+    decision = "approved" if body.approved else "rejected"
+    for member in projects_db.list_members(project_id):
+        try:
+            notifications_db.create(
+                member["username"], kind="project_reviewed",
+                message=f"Project {project.get('title', project_id)!r} was {decision}.",
+                project_id=project_id,
+            )
+        except Exception:
+            logger.exception("Failed to notify %r of project %r review decision", member["username"], project_id)
+    return project
 
 
 @router.post("/{project_id}/revoke")

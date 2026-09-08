@@ -6,16 +6,18 @@ import re
 import tempfile
 import shutil
 import logging
-import sqlite3
 import polars as pl
 import requests
 from datetime import datetime, timezone
 from proknow import ProKnow
 from collections import defaultdict
+from psycopg2 import sql
+from psycopg2.extras import RealDictCursor
 from pyorthanc import Orthanc, Modality, find_series, find_studies, upload
 from dotenv import load_dotenv
 from pathlib import Path
 
+from backend.src.db import get_conn
 from backend.src.retrieve.PinnacleExport.entrypoint import entry as pinn_entry
 from backend.src.retrieve.PinnacleExport.src.database import ExportRequest
 from backend.src.plans.db_client import PlansDB
@@ -34,7 +36,11 @@ PULL_MODALITY_AET_TWO = os.getenv('PULL_MODALITY_AET_TWO')
 PATH_TO_CERT = os.getenv('PATH_TO_CERT')
 PATH_TO_KEY = os.getenv('PATH_TO_KEY')
 
-PINN_DB = os.getenv('PINN_DB')
+# Postgres schema (inside DATABASE_URL's database) holding the Pinnacle
+# export index -- replaced the standalone pinn_db.sqlite file this used to
+# read directly. Not HERMES-owned; same read-only posture as PINNACLE_SCHEMA
+# (backend/src/plans/db_client.py).
+PINNACLE_INDEX_SCHEMA = os.getenv('PINNACLE_INDEX_SCHEMA', 'pinnacle_index')
 
 # Destination the Pinnacle export submodule pushes to (was hardcoded)
 PINNACLE_PUSH_HOST = os.getenv('PINNACLE_PUSH_HOST')
@@ -51,7 +57,6 @@ class Importer():
     def __init__(self, import_level:str | None = None):
         self.pk: ProKnow = None # Defining here for clarity
         self.ot: Orthanc = None
-        self.pinn_db: sqlite3.Connection = None
         self._init_connections() # This populates above
         self.dicom_sources = [PULL_MODALITY_AET_ONE, PULL_MODALITY_AET_TWO]
 
@@ -416,8 +421,8 @@ class Importer():
 
     def search_pinnacle_db(self, mrn: int) -> tuple[bool, str | None]:
         """
-        Is this patient's export request indexed in Pinnacle's own
-        pinn_db.sqlite, and (if so) what does PinnacleExport's own
+        Is this patient's export request indexed in the pinnacle_index
+        schema's `entries` table, and (if so) what does PinnacleExport's own
         pinnacle_export.status/errors record about the actual DICOM
         reconstruction it performs afterward?
 
@@ -439,18 +444,16 @@ class Importer():
             not polled/blocked on: a slow Pinnacle job must not stall the
             rest of a batch.
         """
+        query = sql.SQL("SELECT * FROM {schema}.entries WHERE medicalrecordnumber = %s").format(
+            schema=sql.Identifier(PINNACLE_INDEX_SCHEMA)
+        )
         try:
-            conn = sqlite3.connect(PINN_DB)
-            conn.row_factory = sqlite3.Row
+            with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, (str(mrn),))
+                entries = cur.fetchall()
         except Exception as exc:
-            logger.error(f"Failed to connect to Pinnacle database ({PINN_DB}): {exc}")
+            logger.error(f"Failed to query Pinnacle index ({PINNACLE_INDEX_SCHEMA}.entries): {exc}")
             raise
-
-        try:
-            cursor = conn.cursor()
-            entries = cursor.execute("SELECT * FROM entries WHERE MedicalRecordNumber = ?", (mrn,)).fetchall()
-        finally:
-            conn.close()
 
         if not entries:
             logger.debug("Patient (%s) not found in Pinnacle DB", mrn)
@@ -498,20 +501,21 @@ class Importer():
         """
         Given MRN, will return a list of export requests (for all paths & Pinnacle IDs found)
         """
+        query = sql.SQL("SELECT * FROM {schema}.entries WHERE medicalrecordnumber = %s").format(
+            schema=sql.Identifier(PINNACLE_INDEX_SCHEMA)
+        )
         try:
-            conn = sqlite3.connect(PINN_DB)
-            conn.row_factory = sqlite3.Row
+            with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, (str(mrn),))
+                entries = cur.fetchall()
         except Exception as exc:
-            logger.error(f"Failed to connect to Pinnacle database (./db/pinn_db.sqlite): {exc}")
+            logger.error(f"Failed to query Pinnacle index ({PINNACLE_INDEX_SCHEMA}.entries): {exc}")
             raise
-        cursor = conn.cursor()
-        entries = cursor.execute("SELECT * FROM entries WHERE MedicalRecordNumber = ?", (mrn,)).fetchall()
 
         requests = []
         for entry in entries:
-            request = ExportRequest(mrn=mrn, patient_id=entry['PinnacleID'], path=Path(entry['Path']))
+            request = ExportRequest(mrn=mrn, patient_id=entry['pinnacleid'], path=Path(entry['path']))
             requests.append(request)
-        conn.close()
         return requests
 
     @staticmethod

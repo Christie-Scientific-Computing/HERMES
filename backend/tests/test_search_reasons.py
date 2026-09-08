@@ -2,15 +2,17 @@
 §E: search_mosaiq/search_pinnacle_db/search_proknow now each return
 (found, reason) instead of a bare bool, and find_patient stitches the three
 reasons into its returned dict. These are pure Importer-logic tests -- no
-Postgres/Orthanc/ProKnow network calls -- so, like test_cleanup_orthanc.py,
-they build Importer via object.__new__ to skip __init__ (which eagerly
-connects to ProKnow/Orthanc) and fake only what each method touches.
+Orthanc/ProKnow network calls -- so, like test_cleanup_orthanc.py, they build
+Importer via object.__new__ to skip __init__ (which eagerly connects to
+ProKnow/Orthanc) and fake only what each method touches. The
+search_pinnacle_db tests are the exception: they need a real Postgres
+(DATABASE_URL) to seed pinnacle_index.entries, same as every other test in
+this suite per CLAUDE.md's Testing section.
 
 Skips gracefully if the PinnacleExport submodule isn't checked out, since
 retrieve/logic.py imports from it at module load time (see CLAUDE.md's Git
 Submodule section) -- same convention as test_cleanup_orthanc.py.
 """
-import sqlite3
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -18,6 +20,7 @@ import pytest
 
 pytest.importorskip("backend.src.retrieve.PinnacleExport", reason="PinnacleExport submodule not checked out")
 
+from backend.src.db import get_conn
 from backend.src.retrieve import logic as retrieve_logic
 from backend.src.retrieve.logic import Importer
 
@@ -200,31 +203,34 @@ class FakePlansDB:
         return self.result
 
 
-def _patch_pinn_db(monkeypatch, indexed_mrns):
-    """Fakes sqlite3.connect(PINN_DB) with a real in-memory sqlite DB seeded
-    with `entries` rows for the given mrns, mirroring the real schema.
-
-    `retrieve_logic.sqlite3` is the exact same module object as this file's
-    own `sqlite3` import (module caching in sys.modules) -- so the original
-    `connect` must be captured BEFORE patching. Calling `sqlite3.connect`
-    from inside `_connect` after patching would resolve to the patched
-    attribute on that same shared module and recurse on itself forever.
-    """
-    real_connect = sqlite3.connect
-
-    def _connect(_path):
-        conn = real_connect(":memory:")
-        conn.execute("CREATE TABLE entries (MedicalRecordNumber TEXT, PinnacleID TEXT, Path TEXT)")
+def _seed_pinnacle_index(indexed_mrns):
+    """Seeds pinnacle_index.entries (Postgres, same DB as DATABASE_URL) with
+    rows for the given mrns, mirroring the real schema -- this replaced a
+    standalone pinn_db.sqlite file that search_pinnacle_db/
+    get_pinn_export_requests used to read directly (see retrieve/logic.py's
+    PINNACLE_INDEX_SCHEMA)."""
+    schema = retrieve_logic.PINNACLE_INDEX_SCHEMA
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cur.execute(f"CREATE SCHEMA {schema}")
+        cur.execute(f"CREATE TABLE {schema}.entries (medicalrecordnumber TEXT, pinnacleid TEXT, path TEXT)")
         for mrn in indexed_mrns:
-            conn.execute("INSERT INTO entries VALUES (?, ?, ?)", (str(mrn), "PID1", "/pinnacle/path"))
-        conn.commit()
-        return conn
-    monkeypatch.setattr(retrieve_logic.sqlite3, "connect", _connect)
+            cur.execute(
+                f"INSERT INTO {schema}.entries VALUES (%s, %s, %s)",
+                (str(mrn), "PID1", "/pinnacle/path"),
+            )
 
 
-def test_search_pinnacle_db_not_indexed(monkeypatch):
+@pytest.fixture
+def pinnacle_index_schema():
+    yield
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {retrieve_logic.PINNACLE_INDEX_SCHEMA} CASCADE")
+
+
+def test_search_pinnacle_db_not_indexed(pinnacle_index_schema):
     imp = make_importer(plans_db=FakePlansDB())
-    _patch_pinn_db(monkeypatch, indexed_mrns=[])
+    _seed_pinnacle_index(indexed_mrns=[])
 
     found, reason = imp.search_pinnacle_db("MRN1")
 
@@ -232,9 +238,9 @@ def test_search_pinnacle_db_not_indexed(monkeypatch):
     assert reason == "Not found in Pinnacle export index"
 
 
-def test_search_pinnacle_db_indexed_no_status_row_yet_is_pending(monkeypatch):
+def test_search_pinnacle_db_indexed_no_status_row_yet_is_pending(pinnacle_index_schema):
     imp = make_importer(plans_db=FakePlansDB(result=None))
-    _patch_pinn_db(monkeypatch, indexed_mrns=["MRN1"])
+    _seed_pinnacle_index(indexed_mrns=["MRN1"])
 
     found, reason = imp.search_pinnacle_db("MRN1")
 
@@ -242,9 +248,9 @@ def test_search_pinnacle_db_indexed_no_status_row_yet_is_pending(monkeypatch):
     assert reason == "Pinnacle reconstruction pending"
 
 
-def test_search_pinnacle_db_indexed_status_shows_failure(monkeypatch):
+def test_search_pinnacle_db_indexed_status_shows_failure(pinnacle_index_schema):
     imp = make_importer(plans_db=FakePlansDB(result={"status": "failed", "error_message": "no RTSTRUCT"}))
-    _patch_pinn_db(monkeypatch, indexed_mrns=["MRN1"])
+    _seed_pinnacle_index(indexed_mrns=["MRN1"])
 
     found, reason = imp.search_pinnacle_db("MRN1")
 
@@ -252,9 +258,9 @@ def test_search_pinnacle_db_indexed_status_shows_failure(monkeypatch):
     assert reason == "Could not reconstruct DICOM: no RTSTRUCT"
 
 
-def test_search_pinnacle_db_indexed_status_shows_success(monkeypatch):
+def test_search_pinnacle_db_indexed_status_shows_success(pinnacle_index_schema):
     imp = make_importer(plans_db=FakePlansDB(result={"status": "exported", "error_message": None}))
-    _patch_pinn_db(monkeypatch, indexed_mrns=["MRN1"])
+    _seed_pinnacle_index(indexed_mrns=["MRN1"])
 
     found, reason = imp.search_pinnacle_db("MRN1")
 
@@ -262,11 +268,11 @@ def test_search_pinnacle_db_indexed_status_shows_success(monkeypatch):
     assert reason is None
 
 
-def test_search_pinnacle_db_status_lookup_failure_falls_back_to_pending(monkeypatch):
+def test_search_pinnacle_db_status_lookup_failure_falls_back_to_pending(pinnacle_index_schema):
     """A status-lookup hiccup (e.g. transient DB error) must not make an
     otherwise-indexed patient look unfound."""
     imp = make_importer(plans_db=FakePlansDB(raise_exc=RuntimeError("pool exhausted")))
-    _patch_pinn_db(monkeypatch, indexed_mrns=["MRN1"])
+    _seed_pinnacle_index(indexed_mrns=["MRN1"])
 
     found, reason = imp.search_pinnacle_db("MRN1")
 
