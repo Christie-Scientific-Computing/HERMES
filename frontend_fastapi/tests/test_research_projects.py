@@ -28,7 +28,7 @@ PROJECT_ID = "proj-1"
 def _project(
     project_id=PROJECT_ID, title="Test Project", status="draft", created_by="alice",
     members=None, ethics_reference=None, description="A test project.",
-    expiry_date=None, audit_log=None,
+    expiry_date=None, audit_log=None, destinations=None, message_id=None, pending_message_id=None,
 ):
     return {
         "project_id": project_id,
@@ -45,6 +45,9 @@ def _project(
         "created_at": "2026-01-01T00:00:00+00:00",
         "members": members if members is not None else [{"username": created_by, "role": "owner"}],
         "audit_log": audit_log if audit_log is not None else [],
+        "destinations": destinations if destinations is not None else [],
+        "message_id": message_id,
+        "pending_message_id": pending_message_id,
     }
 
 
@@ -60,12 +63,17 @@ def mock_backend(monkeypatch):
         "list_projects", "get_project", "create_project", "submit_project",
         "review_project", "revoke_project", "add_member", "remove_member",
         "list_project_jobs", "list_user_active_projects",
+        "get_orthanc_modalities", "get_proknow_collections", "add_requested_patients",
+        "propose_amendment", "approve_amendment", "reject_amendment", "list_pending_amendments",
     ):
         m = AsyncMock()
         monkeypatch.setattr(backend_client, name, m)
         mocks[name] = m
     mocks["list_user_active_projects"].return_value = []
     mocks["list_project_jobs"].return_value = []
+    mocks["get_orthanc_modalities"].return_value = ["AE1"]
+    mocks["get_proknow_collections"].return_value = ["Collection1"]
+    mocks["list_pending_amendments"].return_value = []
     return mocks
 
 
@@ -176,6 +184,7 @@ def test_create_submits_and_redirects_to_detail(client, make_user, login, csrf_t
     assert resp.headers["location"] == f"http://localhost/projects/{PROJECT_ID}"
     mock_backend["create_project"].assert_awaited_once_with(
         title="New Project", created_by="alice", description="desc", ethics_reference="",
+        destinations=[], message_id=None,
     )
 
 
@@ -194,10 +203,253 @@ def test_create_backend_error_shown_inline(client, make_user, login, csrf_token,
     login("alice")
     mock_backend["create_project"].side_effect = backend_client.BackendError(500, "boom")
 
-    resp = client.post("/projects/new", data={"title": "New Project", "csrf_token": csrf_token()})
+    resp = client.post("/projects/new", data={
+        "title": "New Project", "description": "desc", "csrf_token": csrf_token(),
+    })
 
     assert resp.status_code == 400
     assert "boom" in resp.text
+
+
+def test_create_requires_a_description(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+
+    resp = client.post("/projects/new", data={"title": "New Project", "csrf_token": csrf_token()})
+
+    assert resp.status_code == 400
+    mock_backend["create_project"].assert_not_awaited()
+
+
+def test_create_with_dicom_destination_selected_but_none_chosen_is_rejected(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+
+    resp = client.post("/projects/new", data={
+        "title": "New Project", "description": "desc", "use_dicom": "y", "csrf_token": csrf_token(),
+    })
+
+    assert resp.status_code == 400
+    mock_backend["create_project"].assert_not_awaited()
+
+
+def test_create_with_destinations_and_message_id(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["create_project"].return_value = {"project_id": PROJECT_ID}
+    mock_backend["get_orthanc_modalities"].return_value = ["AE1", "AE2"]
+    mock_backend["get_proknow_collections"].return_value = ["Coll1"]
+
+    resp = client.post("/projects/new", data={
+        "title": "New Project", "description": "desc",
+        "use_dicom": "y", "dicom_destinations": "AE1",
+        "use_proknow": "y", "proknow_destinations": "Coll1",
+        "message_id": "42", "csrf_token": csrf_token(),
+    }, follow_redirects=False)
+
+    assert resp.status_code == 303
+    kwargs = mock_backend["create_project"].call_args.kwargs
+    assert kwargs["message_id"] == 42
+    assert {(d["destination_type"], d["destination_value"]) for d in kwargs["destinations"]} == {
+        ("dicom", "AE1"), ("proknow", "Coll1"),
+    }
+
+
+def test_create_without_a_patient_list_flashes_a_non_blocking_warning(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["create_project"].return_value = {"project_id": PROJECT_ID}
+
+    resp = client.post("/projects/new", data={
+        "title": "New Project", "description": "desc", "csrf_token": csrf_token(),
+    }, follow_redirects=False)
+
+    assert resp.status_code == 303  # not blocked
+    mock_backend["add_requested_patients"].assert_not_awaited()
+
+
+def test_create_with_a_patient_list_file_uploads_parsed_mrns(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["create_project"].return_value = {"project_id": PROJECT_ID}
+
+    resp = client.post(
+        "/projects/new",
+        data={"title": "New Project", "description": "desc", "csrf_token": csrf_token()},
+        files={"requested_patients_file": ("patients.csv", b"patient_id\nMRN1\nMRN2\nMRN1\n", "text/csv")},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    mock_backend["add_requested_patients"].assert_awaited_once_with(PROJECT_ID, ["MRN1", "MRN2"], added_by="alice")
+
+
+def test_create_with_a_patient_list_that_fails_backend_does_not_500(client, make_user, login, csrf_token, mock_backend):
+    """The project itself was already created successfully by this point
+    (e.g. the backend's own anon-resolution 422 for an unmapped id) -- a
+    failure saving the patient list must not 500 the whole request or hide
+    that the project exists."""
+    make_user(username="alice")
+    login("alice")
+    mock_backend["create_project"].return_value = {"project_id": PROJECT_ID}
+    mock_backend["add_requested_patients"].side_effect = backend_client.BackendError(422, "unknown id")
+
+    resp = client.post(
+        "/projects/new",
+        data={"title": "New Project", "description": "desc", "csrf_token": csrf_token()},
+        files={"requested_patients_file": ("patients.csv", b"patient_id\nMRN1\n", "text/csv")},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"http://localhost/projects/{PROJECT_ID}"
+
+
+# ---- _parse_requested_patients_sync (core parsing logic) ----
+
+def test_parse_requested_patients_skips_header_and_dedupes():
+    import io
+
+    from frontend_fastapi.routers.research_projects import _parse_requested_patients_sync
+
+    source = io.BytesIO(b"patient_id\nMRN1\n MRN2 \n\nMRN1\nMRN3,\n")
+    assert _parse_requested_patients_sync(source) == ["MRN1", "MRN2", "MRN3"]
+
+
+def test_parse_requested_patients_rejects_an_oversized_file():
+    import io
+
+    from frontend_fastapi.routers.research_projects import (
+        _DocumentTooLargeError,
+        _MAX_REQUESTED_PATIENTS_FILE_BYTES,
+        _parse_requested_patients_sync,
+    )
+
+    source = io.BytesIO(b"x" * (_MAX_REQUESTED_PATIENTS_FILE_BYTES + 1))
+    with pytest.raises(_DocumentTooLargeError):
+        _parse_requested_patients_sync(source)
+
+
+# ---- amendments ----
+
+def test_amend_form_requires_membership(client, make_user, login, mock_backend):
+    make_user(username="mallory")
+    login("mallory")
+    mock_backend["get_project"].return_value = _project(members=[{"username": "alice", "role": "owner"}])
+
+    resp = client.get(f"/projects/{PROJECT_ID}/amend")
+    assert resp.status_code == 403
+
+
+def test_amend_form_prefills_current_destinations_and_message_id(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["get_project"].return_value = _project(
+        members=[{"username": "alice", "role": "owner"}],
+        destinations=[{"destination_type": "dicom", "destination_value": "OLD_AE", "status": "active"}],
+        message_id=7,
+    )
+    mock_backend["get_orthanc_modalities"].return_value = ["OLD_AE"]  # still a live choice
+
+    resp = client.get(f"/projects/{PROJECT_ID}/amend")
+
+    assert resp.status_code == 200
+    assert "OLD_AE" in resp.text
+    assert 'value="7"' in resp.text
+
+
+def test_amend_submit_proposes_and_redirects(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["get_project"].return_value = _project(members=[{"username": "alice", "role": "owner"}])
+    mock_backend["get_orthanc_modalities"].return_value = ["AE1"]
+
+    resp = client.post(f"/projects/{PROJECT_ID}/amend", data={
+        "use_dicom": "y", "dicom_destinations": "AE1", "message_id": "9", "csrf_token": csrf_token(),
+    }, follow_redirects=False)
+
+    assert resp.status_code == 303
+    kwargs = mock_backend["propose_amendment"].call_args.kwargs
+    assert kwargs["proposed_by"] == "alice"
+    assert kwargs["message_id"] == 9
+    assert kwargs["destinations"] == [{"destination_type": "dicom", "destination_value": "AE1"}]
+
+
+def test_amend_submit_rejects_an_empty_proposal(client, make_user, login, csrf_token, mock_backend):
+    """Nothing checked, no message ID -- must not silently 'succeed' with
+    an amendment that proposes no actual change."""
+    make_user(username="alice")
+    login("alice")
+    mock_backend["get_project"].return_value = _project(members=[{"username": "alice", "role": "owner"}])
+
+    resp = client.post(f"/projects/{PROJECT_ID}/amend", data={"csrf_token": csrf_token()})
+
+    assert resp.status_code == 400
+    assert "Propose at least one" in resp.text
+    mock_backend["propose_amendment"].assert_not_awaited()
+
+
+def test_amendment_decide_requires_staff(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice", is_staff=False)
+    login("alice")
+
+    resp = client.post(f"/projects/{PROJECT_ID}/amendment/decide", data={
+        "decision": "approve", "csrf_token": csrf_token(),
+    })
+    assert resp.status_code == 403
+
+
+def test_amendment_decide_approve_calls_backend(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    resp = client.post(f"/projects/{PROJECT_ID}/amendment/decide", data={
+        "decision": "approve", "comment": "fine", "csrf_token": csrf_token(),
+    }, follow_redirects=False)
+
+    assert resp.status_code == 303
+    mock_backend["approve_amendment"].assert_awaited_once_with(PROJECT_ID, reviewed_by="admin", comment="fine")
+    mock_backend["reject_amendment"].assert_not_awaited()
+
+
+def test_amendment_decide_reject_calls_backend(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    resp = client.post(f"/projects/{PROJECT_ID}/amendment/decide", data={
+        "decision": "reject", "csrf_token": csrf_token(),
+    }, follow_redirects=False)
+
+    assert resp.status_code == 303
+    mock_backend["reject_amendment"].assert_awaited_once()
+    mock_backend["approve_amendment"].assert_not_awaited()
+
+
+def test_detail_shows_pending_amendment_banner_and_hides_amend_link(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["get_project"].return_value = _project(
+        status="approved", members=[{"username": "alice", "role": "owner"}],
+        destinations=[{"destination_type": "dicom", "destination_value": "NEW_AE", "status": "proposed"}],
+    )
+
+    resp = client.get(f"/projects/{PROJECT_ID}")
+
+    assert resp.status_code == 200
+    assert "amendment is pending" in resp.text
+    assert f'href="/projects/{PROJECT_ID}/amend"' not in resp.text
+
+
+def test_review_queue_shows_pending_amendments_section(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_pending_amendments"].return_value = [_project(status="approved", title="Amended One")]
+
+    resp = client.get("/projects/review")
+
+    assert resp.status_code == 200
+    assert "Amended One" in resp.text
+    assert "pending amendment" in resp.text
 
 
 # ---- review_queue ----

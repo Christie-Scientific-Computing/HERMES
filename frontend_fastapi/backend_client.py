@@ -89,11 +89,19 @@ async def get_backend_health() -> dict:
 
 # ---- Projects (research_projects, ported in Phase 2) ----
 
-async def create_project(title: str, created_by: str, description: str = "", ethics_reference: str = "") -> dict:
-    return await _post("/projects", json={
+async def create_project(
+    title: str, created_by: str, description: str = "", ethics_reference: str = "",
+    destinations: Optional[list[dict]] = None, message_id: Optional[int] = None,
+) -> dict:
+    body = {
         "title": title, "created_by": created_by,
         "description": description or None, "ethics_reference": ethics_reference or None,
-    })
+    }
+    if destinations:
+        body["destinations"] = destinations
+    if message_id is not None:
+        body["message_id"] = message_id
+    return await _post("/projects", json=body)
 
 
 async def submit_project(project_id: str, username: str) -> dict:
@@ -135,6 +143,33 @@ async def add_member(project_id: str, username: str, added_by: str, role: str = 
 
 async def remove_member(project_id: str, username: str, removed_by: str) -> dict:
     return await _delete(f"/projects/{project_id}/members/{username}", params={"removed_by": removed_by})
+
+
+async def add_requested_patients(project_id: str, mrns: list[str], added_by: str) -> dict:
+    return await _post(f"/projects/{project_id}/requested_patients", json={"added_by": added_by, "mrns": mrns})
+
+
+async def propose_amendment(
+    project_id: str, proposed_by: str, destinations: Optional[list[dict]] = None, message_id: Optional[int] = None,
+) -> dict:
+    body = {"proposed_by": proposed_by}
+    if destinations:
+        body["destinations"] = destinations
+    if message_id is not None:
+        body["message_id"] = message_id
+    return await _post(f"/projects/{project_id}/amendments", json=body)
+
+
+async def approve_amendment(project_id: str, reviewed_by: str, comment: str = "") -> dict:
+    return await _post(f"/projects/{project_id}/amendments/approve", json={"reviewed_by": reviewed_by, "comment": comment or None})
+
+
+async def reject_amendment(project_id: str, reviewed_by: str, comment: str = "") -> dict:
+    return await _post(f"/projects/{project_id}/amendments/reject", json={"reviewed_by": reviewed_by, "comment": comment or None})
+
+
+async def list_pending_amendments() -> list[dict]:
+    return (await _get("/projects/pending_amendments"))["projects"]
 
 
 async def list_project_jobs(project_id: str) -> list[dict]:
