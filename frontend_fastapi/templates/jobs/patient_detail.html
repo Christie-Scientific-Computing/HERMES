@@ -104,7 +104,8 @@
   <div class="overflow-x-auto">
     <table class="min-w-full text-sm divide-y divide-gray-100">
       <thead><tr>
-        <th class="text-left py-1 pr-4 font-medium text-gray-500">When</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Start Time</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">End Time</th>
         <th class="text-left py-1 pr-4 font-medium text-gray-500">Stage</th>
         <th class="text-left py-1 pr-4 font-medium text-gray-500">Event</th>
         <th class="text-left py-1 pr-4 font-medium text-gray-500">Attempt</th>
@@ -113,18 +114,24 @@
       <tbody class="divide-y divide-gray-50">
         {% for e in events %}
         <tr>
-          <td class="py-1 pr-4 whitespace-nowrap text-gray-500">{{ e.ts }}</td>
+          <td class="py-1 pr-4 whitespace-nowrap text-gray-500">{{ e.start_ts | hermes_timestamp }}</td>
+          <td class="py-1 pr-4 whitespace-nowrap text-gray-500">
+            {% if e.end_ts %}{{ e.end_ts | hermes_timestamp }}
+            {% elif e.outcome == "cancelled" %}—
+            {% else %}In progress{% endif %}
+          </td>
           <td class="py-1 pr-4">{{ e.stage }}</td>
           <td class="py-1 pr-4">
-            {% if e.event_type == "success" %}<span class="text-green-700">success</span>
-            {% elif e.event_type == "failure" %}<span class="text-red-700">failure</span>
-            {% else %}<span class="text-gray-500">{{ e.event_type }}</span>{% endif %}
+            {% if e.outcome == "success" %}<span class="text-green-700">success</span>
+            {% elif e.outcome == "failure" %}<span class="text-red-700">failure</span>
+            {% elif e.outcome == "cancelled" %}<span class="text-gray-500">cancelled</span>
+            {% else %}<span class="text-amber-600">in progress</span>{% endif %}
           </td>
           <td class="py-1 pr-4 tabular-nums">{{ e.attempt }}</td>
           <td class="py-1 text-red-600 break-words max-w-md">{{ e.error_message or "" }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="py-6 text-center text-gray-400">No events found for this patient in this job.</td></tr>
+        <tr><td colspan="6" class="py-6 text-center text-gray-400">No events found for this patient in this job.</td></tr>
         {% endfor %}
       </tbody>
     </table>

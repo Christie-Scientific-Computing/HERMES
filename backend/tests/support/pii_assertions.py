@@ -18,7 +18,13 @@ from backend.src.common import pii_patterns
 # Operational/job timestamps -- describe HERMES's own timeline, not the
 # patient's clinical history, so the generic date-*pattern* ban is skipped
 # for these field names (decision 5 in docs/plans/pii-boundary-test-suite.md).
-ALLOWED_TIMESTAMP_FIELDS = {"created_at", "submitted_at", "approved_at", "reviewed_at", "ts", "expiry_date"}
+ALLOWED_TIMESTAMP_FIELDS = {
+    "created_at", "submitted_at", "approved_at", "reviewed_at", "ts", "expiry_date",
+    # results/endpoints.py's _pair_attempts (the patient timeline) renamed
+    # the per-event "ts" above into a start/end pair -- same operational-
+    # timestamp category, not a patient clinical date.
+    "start_ts", "end_ts",
+}
 
 # A date-shaped string is *expected* here (the shifted value, see
 # backend/src/identity/anon.py's shift_date) -- correctness for these is

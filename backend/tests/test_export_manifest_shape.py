@@ -249,17 +249,26 @@ def _seed_export_success_event(job_id: str) -> None:
     )
 
 
-def test_patient_timeline_strips_uids_from_details_but_db_keeps_them(results_client):
+def test_patient_timeline_never_exposes_details_but_db_keeps_them(results_client):
+    """
+    The paired timeline response (results/endpoints.py's _pair_attempts)
+    carries no `details` field at all -- only {mrn, stage, attempt,
+    start_ts, end_ts, outcome, error_message} -- so the real DICOM
+    UIDs/checksums a worker recorded there can't leak through this endpoint
+    regardless of _scrub_json/to_public_details (which this test file's own
+    other cases already cover independently: test_observe_job_strips_uids_
+    from_sse_but_not_from_the_task_row, test_proknow_upload_patient_strips_
+    uids_but_db_keeps_them, test_single_import_strips_study_uids_but_db_
+    keeps_them). `events.details` itself keeps full fidelity in the DB.
+    """
     job_id = f"timeline-shape-{uuid.uuid4()}"
     _seed_export_success_event(job_id)
 
     resp = results_client.get(f"/results/patient/{job_id}/{ANON_MRN}")
     assert resp.status_code == 200
     body = resp.json()
-    success_event = next(e for e in body["events"] if e.get("event_type") == "success")
-    assert "study_uids" not in success_event["details"]
-    assert "series_uids" not in success_event["details"]
-    assert success_event["details"]["checksums"] == ["0ddba11"]
+    success_event = next(e for e in body["events"] if e.get("outcome") == "success")
+    assert "details" not in success_event
     assert REAL_MRN not in resp.text
     assert "1.2.840.study.timeline" not in resp.text
     assert "1.2.840.series.timeline" not in resp.text
@@ -273,29 +282,28 @@ def test_patient_timeline_strips_uids_from_details_but_db_keeps_them(results_cli
     assert db_details["checksums"] == {"1.2.840.sop.timeline": "0ddba11"}
 
 
-def test_patient_timeline_all_jobs_strips_uids(results_client):
+def test_patient_timeline_all_jobs_never_exposes_details(results_client):
     # REAL_MRN is a fixed id shared across many test files, and this
-    # endpoint aggregates across every job for that mrn -- filter to this
-    # test's own job_id rather than assuming the first "success" event is
-    # the one just seeded.
+    # endpoint aggregates across every job for that mrn, accumulated over
+    # the whole session-long test DB -- paired records carry no job_id to
+    # filter on (that's the very thing under test), but the query orders
+    # by ts ascending, so the event this test just inserted is always the
+    # LAST success record, not just any of possibly many.
     job_id = f"timeline-all-shape-{uuid.uuid4()}"
     _seed_export_success_event(job_id)
 
     resp = results_client.get(f"/results/patient/timeline/{ANON_MRN}/all")
     assert resp.status_code == 200
     body = resp.json()
-    success_event = next(
-        e for e in body["events"] if e.get("event_type") == "success" and e.get("job_id") == job_id
-    )
-    assert "study_uids" not in success_event["details"]
-    assert "series_uids" not in success_event["details"]
-    assert success_event["details"]["checksums"] == ["0ddba11"]
+    success_events = [e for e in body["events"] if e.get("outcome") == "success"]
+    assert success_events
+    assert "details" not in success_events[-1]
 
 
-def test_patient_timeline_preserves_none_details_as_none(results_client):
-    # A 'start' event has no details at all -- must stay None, not become
-    # {} as a side effect of the UID-stripping fix.
-    job_id = f"timeline-none-{uuid.uuid4()}"
+def test_patient_timeline_unresolved_attempt_is_in_progress(results_client):
+    # A 'start' event with no terminal event yet -- the paired attempt has
+    # no end_ts and is still in progress, not a stray leftover dict key.
+    job_id = f"timeline-in-progress-{uuid.uuid4()}"
     status_db = StatusDB()
     status_db.create_job(job_id)
     status_db.add_event(job_id, REAL_MRN, stage="retrieve", event_type="start")
@@ -303,4 +311,6 @@ def test_patient_timeline_preserves_none_details_as_none(results_client):
     resp = results_client.get(f"/results/patient/{job_id}/{ANON_MRN}")
     assert resp.status_code == 200
     event = resp.json()["events"][0]
-    assert event["details"] is None
+    assert event["outcome"] == "in_progress"
+    assert event["end_ts"] is None
+    assert event["error_message"] is None

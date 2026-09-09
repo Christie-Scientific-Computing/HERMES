@@ -382,7 +382,9 @@ def test_patient_timeline_translates_inbound_and_outbound(client, job_id):
     body = resp.json()
 
     assert body["mrn"] == ANON_MRN
-    assert [e["mrn"] for e in body["events"]] == [ANON_MRN, ANON_MRN]
+    # One paired attempt (the start+success pair collapses to one record).
+    assert [e["mrn"] for e in body["events"]] == [ANON_MRN]
+    assert body["events"][0]["outcome"] == "success"
     assert_no_pii(resp.text, real_ids=[REAL_MRN], context="patient_timeline")
 
 
@@ -398,105 +400,28 @@ def test_patient_timeline_all_jobs_boundary(client, job_id):
     assert_no_pii(resp.text, real_ids=[REAL_MRN], context="patient_timeline_all")
 
 
-def test_timeline_scrubs_the_real_mrn_out_of_error_message_and_details(client, job_id):
+def test_timeline_scrubs_the_real_mrn_out_of_error_message(client, job_id):
     """
     Translating only the structured `mrn` column isn't enough: error_message is
-    str(exception) from a worker and routinely quotes the MRN, and details is
-    whatever the worker returned. Both must be scrubbed too.
+    str(exception) from a worker and routinely quotes the MRN, so it must be
+    scrubbed too. (The paired timeline record carries no `details` field at
+    all -- see _pair_attempts/_anonymize_events in results/endpoints.py --
+    so there's nothing else here to scrub; UID/checksum-stripping from
+    `details` is covered independently by test_export_manifest_shape.py's
+    `to_public_details`/observer-stream/single-item tests.)
     """
     status_db.create_job(job_id)
     status_db.add_event(
         job_id, REAL_MRN, stage="retrieve", event_type="failure",
         error_message=f"no studies found for {REAL_MRN}",
-        details={"searched": [f"mosaiq:{REAL_MRN}"], "nested": {"id": REAL_MRN}},
     )
 
     resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
     assert resp.status_code == 200
     event = resp.json()["events"][0]
 
+    assert event["outcome"] == "failure"
     assert event["error_message"] == f"no studies found for {ANON_MRN}"
-    assert event["details"]["searched"] == [f"mosaiq:{ANON_MRN}"]
-    assert event["details"]["nested"]["id"] == ANON_MRN
-
-
-def test_timeline_preserves_multiple_distinct_checksums_entries(client, job_id):
-    """
-    _scrub_json walks string LEAVES only, never dict keys, before
-    to_public_details re-keys `checksums` (dict[SOPInstanceUID, hash]) down
-    to a plain list[str] of hash values (backend/src/common/sse.py) -- the
-    real DICOM UID keys themselves must never cross this boundary at all
-    (docs/plans/pii-boundary-test-suite.md decision 6), not just get
-    substituted. Had _scrub_json instead serialized `details` to a JSON
-    string, run it through pii_patterns.redact() (whose generic UID-pattern
-    floor would turn every UID-shaped key into the same placeholder
-    string), and re-parsed the result, multiple checksum entries would
-    silently collapse into one via a dict-key collision on re-parse before
-    to_public_details even got a chance to run -- a real risk considered and
-    rejected while choosing this implementation. This test guards the
-    structural-walk design directly: two genuinely distinct SOPInstanceUIDs
-    here must both survive as far as to_public_details's own reshape.
-    """
-    status_db.create_job(job_id)
-    status_db.add_event(
-        job_id, REAL_MRN, stage="export", event_type="success",
-        details={
-            "checksums": {
-                "1.2.840.10008.5.1.4.1.1.481.1": "aaa111",
-                "1.2.840.10008.5.1.4.1.1.481.2": "bbb222",
-            },
-        },
-    )
-
-    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
-    assert resp.status_code == 200
-    event = resp.json()["events"][0]
-    # A plain list of hash values, not the dict[SOPInstanceUID, hash] shape
-    # events.details keeps in the DB -- to_public_details' own contract.
-    assert set(event["details"]["checksums"]) == {"aaa111", "bbb222"}
-    assert_no_pii(resp.text, real_ids=[REAL_MRN], context="timeline checksums")
-
-
-def test_timeline_preserves_date_shaped_destination_field(client, job_id):
-    """
-    destination/destination_type/submitted_by (an Orthanc AE title, a
-    ProKnow collection name, a username) are operational config, never
-    patient data -- _scrub_json must not let the generic date/UID pattern
-    floor mangle one that happens to look date-shaped, the same protection
-    redact_dict's default `exclude` gives the synchronous run_batch_job
-    path. This is the timeline endpoint's own copy of that same fix.
-    """
-    status_db.create_job(job_id)
-    status_db.add_event(
-        job_id, REAL_MRN, stage="export", event_type="success",
-        details={"destination": "Trial_2024-01-15_Cohort", "destination_type": "proknow_collection"},
-    )
-
-    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
-    assert resp.status_code == 200
-    event = resp.json()["events"][0]
-    assert event["details"]["destination"] == "Trial_2024-01-15_Cohort"
-    assert event["details"]["destination_type"] == "proknow_collection"
-
-
-def test_timeline_preserves_date_shaped_destination_nested_in_a_list(client, job_id):
-    """
-    _scrub_json's recursive walk must propagate the parent key into list
-    items, not just dict items -- otherwise a protected field shaped as a
-    list of strings would lose its exclusion the moment it's inside a
-    list. No current Response field is actually typed this way, but the
-    walk shouldn't rely on that.
-    """
-    status_db.create_job(job_id)
-    status_db.add_event(
-        job_id, REAL_MRN, stage="export", event_type="success",
-        details={"destination": ["Trial_2024-01-15_Cohort", "Other_2024-02-01_Cohort"]},
-    )
-
-    resp = client.get(f"/results/patient/{job_id}/{ANON_MRN}")
-    assert resp.status_code == 200
-    event = resp.json()["events"][0]
-    assert event["details"]["destination"] == ["Trial_2024-01-15_Cohort", "Other_2024-02-01_Cohort"]
 
 
 def test_plans_scrub_the_real_mrn_out_of_path_comment_and_error(client, plans_schema):
