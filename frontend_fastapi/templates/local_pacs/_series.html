@@ -1,9 +1,9 @@
 {% if error %}
-<td colspan="6" class="text-red-600 text-xs py-1">Could not load series: {{ error }}</td>
+<td colspan="{{ colspan }}" class="text-red-600 text-xs py-1">Could not load series: {{ error }}</td>
 {% elif not series %}
-<td colspan="6" class="text-gray-400 text-xs py-1">No series found.</td>
+<td colspan="{{ colspan }}" class="text-gray-400 text-xs py-1">No series found.</td>
 {% else %}
-<td colspan="6" class="py-1">
+<td colspan="{{ colspan }}" class="py-1">
   <table class="min-w-full text-xs">
     <thead><tr>
       <th class="text-left py-1 pr-4 font-medium text-gray-400">Modality</th>

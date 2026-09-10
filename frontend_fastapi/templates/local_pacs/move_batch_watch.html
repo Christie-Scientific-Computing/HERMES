@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Batch move — HERMES{% endblock %}
+{% block content %}
+<h1 class="text-xl font-semibold text-gray-900 mb-1">Moving studies to the local PACS destination</h1>
+<p class="text-sm text-gray-500 mb-6">
+  <a href="{{ back_url }}" class="text-hermes-700 hover:underline">&larr; Back to search results</a>
+</p>
+
+<div class="max-w-2xl bg-white border border-gray-200 rounded-lg p-6">
+  <div class="flex items-center justify-between mb-2">
+    <span id="batch-status-label" class="text-sm font-medium text-gray-700">Starting&hellip;</span>
+  </div>
+  <div class="w-full bg-gray-100 rounded-full h-2 mb-4">
+    <div id="batch-progress-bar" class="bg-hermes-600 h-2 rounded-full transition-all" style="width: 0%"></div>
+  </div>
+  <p id="batch-progress-count" class="text-xs text-gray-400 mb-4">0 / {{ total }}</p>
+
+  <ul id="batch-event-log" class="divide-y divide-gray-100 text-sm max-h-96 overflow-y-auto"></ul>
+</div>
+
+<script>
+(function () {
+  const streamUrl = "/local_pacs/move_batch/{{ batch_id }}/stream";
+  const es = new EventSource(streamUrl);
+  const statusLabel = document.getElementById('batch-status-label');
+  const progressBar = document.getElementById('batch-progress-bar');
+  const progressCount = document.getElementById('batch-progress-count');
+  const eventLog = document.getElementById('batch-event-log');
+  let total = {{ total }}, done = 0;
+
+  function addRow(text, colorClass) {
+    const li = document.createElement('li');
+    li.className = 'py-1.5 ' + (colorClass || 'text-gray-600');
+    li.textContent = text;
+    eventLog.prepend(li);
+  }
+
+  function updateProgress() {
+    progressCount.textContent = done + ' / ' + total;
+    if (total > 0) {
+      progressBar.style.width = Math.min(100, Math.round((done / total) * 100)) + '%';
+    }
+  }
+
+  es.addEventListener('start', (e) => {
+    const data = JSON.parse(e.data);
+    total = data.total || total;
+    statusLabel.textContent = 'Running (' + total + ' stud' + (total === 1 ? 'y' : 'ies') + ')';
+    updateProgress();
+  });
+
+  es.addEventListener('progress', (e) => {
+    const data = JSON.parse(e.data);
+    addRow('Working on ' + data.current + '…', 'text-gray-500');
+  });
+
+  es.addEventListener('success', (e) => {
+    const data = JSON.parse(e.data);
+    done += 1;
+    addRow('✓ ' + data.study + (data.status ? ' — ' + data.status : ''), 'text-green-700');
+    updateProgress();
+  });
+
+  es.addEventListener('error', (e) => {
+    const data = JSON.parse(e.data);
+    done += 1;
+    addRow('✗ ' + (data.study || '') + ' — ' + (data.error || 'failed'), 'text-red-700');
+    updateProgress();
+  });
+
+  es.addEventListener('done', () => {
+    statusLabel.textContent = 'Finished (' + done + ' / ' + total + ')';
+    es.close();
+  });
+
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {
+      statusLabel.textContent = statusLabel.textContent.startsWith('Finished') ? statusLabel.textContent : 'Connection closed';
+    }
+  };
+})();
+</script>
+{% endblock %}

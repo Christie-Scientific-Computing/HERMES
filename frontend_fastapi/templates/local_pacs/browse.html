@@ -23,6 +23,16 @@
   </div>
 </form>
 
+{% if not searched %}
+{# Round-2 F001: an automatic connectivity check, occupying the same slot
+   the results table renders into once a search actually runs -- never
+   shown alongside search results/errors (they're mutually exclusive). #}
+<div id="local-pacs-status" hx-get="/local_pacs/status" hx-trigger="load" hx-swap="innerHTML"
+  class="rounded-md p-3 bg-gray-50 text-gray-500 border border-gray-200 text-sm mb-4">
+  Checking local PACS connectivity&hellip;
+</div>
+{% endif %}
+
 {% if conquest_error %}
 <div class="rounded-md p-4 bg-red-50 text-red-800 border border-red-200 text-sm mb-4">
   Local PACS unavailable: {{ conquest_error }}
@@ -36,6 +46,29 @@
 </div>
 {% endif %}
 
+{% if can_move and patients %}
+{# Round-2 F002: applies to every checked study below via the HTML5 form=""
+   attribute -- checkboxes stay physically inside each per-study row (so
+   they line up with that row visually) while still submitting with this
+   one form, rather than needing this form to wrap the whole results table. #}
+<form method="post" action="/local_pacs/move_batch" id="batch-move-form"
+  class="bg-white border border-gray-200 rounded-lg p-4 mb-4 flex flex-wrap items-center gap-3">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% for k, v in search_query.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+  <span class="text-sm text-gray-600">Move selected studies to:</span>
+  <select name="destination_id" class="!w-auto text-sm" required {% if not destinations %}disabled{% endif %}>
+    {% if not destinations %}<option value="">No destinations configured</option>
+    {% else %}
+    {% for d in destinations %}<option value="{{ d.id }}">{{ d.display_name }}</option>{% endfor %}
+    {% endif %}
+  </select>
+  <button type="submit" {% if not destinations %}disabled{% endif %}
+    class="rounded-md bg-hermes-700 text-white px-3 py-1.5 text-sm font-medium hover:bg-hermes-800 disabled:opacity-50">
+    Move selected
+  </button>
+</form>
+{% endif %}
+
 {% if patients %}
 {% for patient_id, studies in patients.items() %}
 <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
@@ -43,6 +76,7 @@
   <div class="overflow-x-auto">
     <table class="min-w-full text-sm divide-y divide-gray-100">
       <thead><tr>
+        {% if can_move %}<th class="text-left py-1 pr-2 font-medium text-gray-500"></th>{% endif %}
         <th class="text-left py-1 pr-4 font-medium text-gray-500">Study date</th>
         <th class="text-left py-1 pr-4 font-medium text-gray-500">Description</th>
         <th class="text-left py-1 pr-4 font-medium text-gray-500">Modalities</th>
@@ -53,6 +87,12 @@
       <tbody class="divide-y divide-gray-50">
         {% for study in studies %}
         <tr>
+          {% if can_move %}
+          <td class="py-2 pr-2">
+            <input type="checkbox" name="selected" form="batch-move-form"
+              value='{{ {"study_instance_uid": study.study_instance_uid, "patient_id": patient_id, "study_description": study.study_description} | tojson }}'>
+          </td>
+          {% endif %}
           <td class="py-2 pr-4">{{ study.study_date }}</td>
           <td class="py-2 pr-4">{{ study.study_description }}</td>
           <td class="py-2 pr-4">{{ study.modalities_in_study }}</td>
@@ -86,7 +126,7 @@
             {% endif %}
           </td>
         </tr>
-        <tr id="series-{{ loop.index0 }}-{{ patient_id }}"><td colspan="6"></td></tr>
+        <tr id="series-{{ loop.index0 }}-{{ patient_id }}"><td colspan="{{ 7 if can_move else 6 }}"></td></tr>
         {% endfor %}
       </tbody>
     </table>

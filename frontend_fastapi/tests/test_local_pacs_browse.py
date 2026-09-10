@@ -140,3 +140,71 @@ def test_move_action_hidden_from_non_custodians(client, make_user, login, mock_c
     resp = client.get("/local_pacs", params={"patient_id": "ANON1", "submitted": "1"})
 
     assert b"name=\"destination_id\"" not in resp.content
+
+
+# ---- Round-2 F001: connectivity indicator ----
+
+def test_landing_on_the_page_shows_the_connectivity_slot_not_results(client, make_user, login, mock_cc):
+    make_user("alice")
+    login("alice")
+
+    resp = client.get("/local_pacs")
+
+    assert resp.status_code == 200
+    assert b'hx-get="/local_pacs/status"' in resp.content
+    assert b"No results found" not in resp.content
+    assert b"Local PACS unavailable" not in resp.content
+
+
+def test_a_search_does_not_show_the_connectivity_slot(client, make_user, login, mock_cc):
+    make_user("alice")
+    login("alice")
+
+    resp = client.get("/local_pacs", params={"patient_id": "NOBODY", "submitted": "1"})
+
+    assert resp.status_code == 200
+    assert b'hx-get="/local_pacs/status"' not in resp.content
+
+
+def test_status_endpoint_requires_login(client):
+    resp = client.get("/local_pacs/status", follow_redirects=False)
+    assert resp.status_code in (302, 303, 307)
+
+
+def test_status_endpoint_reports_reachable(client, make_user, login, monkeypatch):
+    make_user("alice")
+    login("alice")
+    monkeypatch.setattr(cc, "is_configured", Mock(return_value=True))
+    monkeypatch.setattr(cc, "echo", Mock(return_value=None))
+
+    resp = client.get("/local_pacs/status")
+
+    assert resp.status_code == 200
+    assert b"Local PACS reachable" in resp.content
+    cc.echo.assert_called_once()
+
+
+def test_status_endpoint_reports_unreachable_with_the_failure_reason(client, make_user, login, monkeypatch):
+    make_user("alice")
+    login("alice")
+    monkeypatch.setattr(cc, "is_configured", Mock(return_value=True))
+    monkeypatch.setattr(cc, "echo", Mock(side_effect=cc.ConquestTimeout("Local PACS did not respond in time.")))
+
+    resp = client.get("/local_pacs/status")
+
+    assert resp.status_code == 200
+    assert b"Local PACS unavailable" in resp.content
+    assert b"did not respond in time" in resp.content
+
+
+def test_status_endpoint_reports_not_configured_without_attempting_echo(client, make_user, login, monkeypatch):
+    make_user("alice")
+    login("alice")
+    monkeypatch.setattr(cc, "is_configured", Mock(return_value=False))
+    monkeypatch.setattr(cc, "echo", Mock())
+
+    resp = client.get("/local_pacs/status")
+
+    assert resp.status_code == 200
+    assert b"not configured" in resp.content
+    cc.echo.assert_not_called()
