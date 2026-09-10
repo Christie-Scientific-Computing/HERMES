@@ -364,6 +364,27 @@ def test_list_recent_jobs_with_counts_orders_newest_first_and_respects_limit(db,
     assert rows[0]["job_id"] == job_id
 
 
+def test_list_recent_jobs_with_counts_project_id_filters_to_that_project_only(db, job_id):
+    """F011: the frontpage's per-project jobs table reuses this query scoped
+    by project_id, rather than a separate query."""
+    from backend.src.projects.db_client import ProjectsDB
+
+    other_job_id = f"{job_id}-other"
+    project_a = f"proj-a-{job_id}"
+    project_b = f"proj-b-{job_id}"
+    projects_db = ProjectsDB()
+    projects_db.create_project(project_a, "Project A", "tester")
+    projects_db.create_project(project_b, "Project B", "tester")
+    db.create_job(job_id, description="in project A", project_id=project_a)
+    db.create_job(other_job_id, description="in project B", project_id=project_b)
+
+    rows = db.list_recent_jobs_with_counts(limit=1000, project_id=project_a)
+
+    job_ids = {r["job_id"] for r in rows}
+    assert job_id in job_ids
+    assert other_job_id not in job_ids
+
+
 # ---- mark_job_notified (Phase 4 job-completion notification race guard) ----
 
 def test_mark_job_notified_returns_true_exactly_once(db, job_id):

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from backend.src.projects import endpoints as projects_endpoints
 from backend.src.notifications.db_client import NotificationsDB
+from backend.src.status.db_client import StatusDB
 
 
 @pytest.fixture
@@ -74,3 +75,31 @@ def test_review_does_not_notify_a_former_member_who_was_removed_before_review(cl
 
     assert NotificationsDB().list_for_user(former_member) == []
     assert len(NotificationsDB().list_for_user(owner)) == 1
+
+
+def test_jobs_with_counts_scopes_to_the_project_and_reports_counts(client):
+    """F011: the frontpage's recent-jobs table backing endpoint."""
+    owner = f"owner-{uuid.uuid4()}"
+    project_id = _create_and_submit(client, owner)
+    other_project_id = _create_and_submit(client, f"other-{uuid.uuid4()}")
+
+    status_db = StatusDB()
+    job_id = f"job-{uuid.uuid4()}"
+    other_job_id = f"job-{uuid.uuid4()}"
+    status_db.create_job(job_id, description="Batch import (patients.csv)", created_by=owner, project_id=project_id)
+    status_db.create_job(other_job_id, description="unrelated", created_by=owner, project_id=other_project_id)
+    status_db.add_patient(job_id, mrn="MRN1")
+    status_db.add_event(job_id, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+
+    resp = client.get(f"/projects/{project_id}/jobs_with_counts")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["project_id"] == project_id
+    job_ids = {j["job_id"] for j in body["jobs"]}
+    assert job_id in job_ids
+    assert other_job_id not in job_ids
+
+    row = next(j for j in body["jobs"] if j["job_id"] == job_id)
+    assert row["description"] == "Batch import (patients.csv)"
+    assert row["imported_count"] == 1
+    assert row["submitted_count"] == 1

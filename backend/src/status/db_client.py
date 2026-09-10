@@ -128,22 +128,25 @@ class StatusDB:
             row = cur.fetchone()
             return dict(row) if row else None
 
-    def list_recent_jobs_with_counts(self, limit: int = 50) -> list[dict]:
+    def list_recent_jobs_with_counts(self, limit: int = 50, project_id: Optional[str] = None) -> list[dict]:
         """
         The most recent `limit` jobs, each with the same
         imported_count/submitted_count/exported_count/export_attempted_count
         figures count_imported_patients/count_exported_patients compute per
         job -- but as one JOIN+GROUP BY round trip, not N separate calls.
-        Backs the admin dashboard's recent-jobs table (Phase 4).
+        Backs the admin dashboard's recent-jobs table (Phase 4) and, scoped
+        via `project_id`, the frontpage's per-project jobs table (F011).
 
         LEFT JOINs (not INNER) so a job with no patients/events yet (just
         submitted, nothing has run) still appears with zero counts rather
         than being silently dropped. COUNT(DISTINCT ...) mirrors each
         underlying query's own dedup-by-mrn semantics exactly.
         """
+        where_clause = "WHERE j.project_id = %s" if project_id is not None else ""
+        params = (project_id, limit) if project_id is not None else (limit,)
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     j.job_id, j.created_at, j.created_by, j.description, j.cancelled, j.project_id,
                     COUNT(DISTINCT p.mrn) AS submitted_count,
@@ -155,11 +158,12 @@ class StatusDB:
                 FROM jobs j
                 LEFT JOIN patients p ON p.job_id = j.job_id
                 LEFT JOIN events e ON e.job_id = j.job_id
+                {where_clause}
                 GROUP BY j.job_id, j.created_at, j.created_by, j.description, j.cancelled, j.project_id
                 ORDER BY j.created_at DESC
                 LIMIT %s
                 """,
-                (limit,),
+                params,
             )
             return [dict(r) for r in cur.fetchall()]
 

@@ -141,6 +141,13 @@ async def list_project_jobs(project_id: str) -> list[dict]:
     return (await _get(f"/projects/{project_id}/jobs"))["jobs"]
 
 
+async def list_project_jobs_with_counts(project_id: str, limit: int = 10) -> list[dict]:
+    """Same rows as list_project_jobs, plus imported_count/submitted_count/
+    exported_count/export_attempted_count -- backs the frontpage dashboard's
+    recent-jobs table (F011)."""
+    return (await _get(f"/projects/{project_id}/jobs_with_counts", params={"limit": limit}))["jobs"]
+
+
 async def list_user_active_projects(username: str) -> list[dict]:
     """Active (approved, non-expired) projects `username` belongs to -- used
     by deps.get_template_context to populate the nav's active-projects

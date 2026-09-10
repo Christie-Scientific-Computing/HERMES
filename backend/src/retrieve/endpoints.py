@@ -297,7 +297,7 @@ async def batch_import_file(
     items = _build_import_items(str(tmp_path))
 
     status_db.create_job(
-        job_id, description=f"Batch import from {tmp_path}",
+        job_id, description=f"Batch import ({file.filename})",
         created_by=username, project_id=project_id,
     )
     # add_patient/enqueue are registered here, at enqueue time, rather than

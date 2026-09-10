@@ -58,6 +58,10 @@ def test_batch_import_file_enqueues(client, active_project):
     assert resp.status_code == 200
     assert resp.json() == {"job_id": job_id, "total": 1}
 
+    # F011: description must be filename-only -- no server temp filepath.
+    job = StatusDB().get_job(job_id)
+    assert job["description"] == "Batch import (patients.csv)"
+
     tasks_db = TasksDB()
     assert tasks_db.count_tasks(job_id) == 1
     task = tasks_db.claim("integration-test-worker")
