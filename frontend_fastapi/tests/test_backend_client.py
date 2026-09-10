@@ -22,17 +22,23 @@ def _isolated_client(monkeypatch):
     return _make_client
 
 
-async def test_list_user_active_projects_requests_approved_status(_isolated_client):
+async def test_list_user_active_projects_calls_the_expiry_aware_endpoint(_isolated_client):
+    """Must hit GET /projects/active, not the generic GET ""?status=approved
+    filter -- that generic filter is status-only and would still include an
+    approved-but-expired project (see backend/src/projects/endpoints.py's
+    user_active_projects docstring for the bug this fixes)."""
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
         captured["params"] = dict(request.url.params)
         return httpx.Response(200, json={"projects": [{"project_id": "p1"}]})
 
     _isolated_client(httpx.MockTransport(handler))
     result = await backend_client.list_user_active_projects("alice")
 
-    assert captured["params"] == {"username": "alice", "status": "approved"}
+    assert captured["path"] == "/projects/active"
+    assert captured["params"] == {"username": "alice"}
     assert result == [{"project_id": "p1"}]
 
 

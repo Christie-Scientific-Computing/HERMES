@@ -188,8 +188,13 @@ async def get_project_stats(project_id: str) -> dict:
 async def list_user_active_projects(username: str) -> list[dict]:
     """Active (approved, non-expired) projects `username` belongs to -- used
     by deps.get_template_context to populate the nav's active-projects
-    banner, live, on every request (never cached)."""
-    return await list_projects(username=username, status="approved")
+    banner, and by jobs.py's submit-job form for its project choices, live,
+    on every request (never cached). Backed by GET /projects/active, NOT
+    GET /projects?status=approved -- that generic filter is status-only and
+    would still include an approved-but-expired project (previously a real
+    bug: an expired project stayed selectable on the submit form until the
+    backend's own ethics-gate rejected the job at actual submission time)."""
+    return (await _get("/projects/active", params={"username": username}))["projects"]
 
 
 # ---- Superuser bypass project (jobs/, ported from hermes_frontend) ----

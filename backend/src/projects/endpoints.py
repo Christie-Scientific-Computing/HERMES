@@ -163,6 +163,18 @@ async def pending_amendments():
     return {"projects": projects_db.list_pending_amendments()}
 
 
+@router.get("/active")
+async def user_active_projects(username: str = Query(...)):
+    # Also must stay registered before GET /{project_id}, same reasoning
+    # as pending_amendments above. Distinct from GET ""?status=approved:
+    # that generic filter is status-only (an approved-but-expired project
+    # still matches it), whereas this is the actually-usable set --
+    # approved AND not past expiry_date (ProjectsDB.list_user_active_projects).
+    # frontend_fastapi's nav banner/badges and the submit-job form's project
+    # choices all need the expiry-aware version, not the generic one.
+    return {"projects": projects_db.list_user_active_projects(username)}
+
+
 @router.get("/{project_id}")
 async def get_project(project_id: str):
     try:

@@ -43,6 +43,10 @@
       outline: 2px solid transparent; border-color: #1d6fa5;
       box-shadow: 0 0 0 3px rgba(29, 111, 165, 0.15);
     }
+    /* Slow, subtle "alive" pulse for the anonymiser-on nav badge -- a
+       gentle opacity dip, not a hard on/off blink. */
+    @keyframes hermes-slow-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
+    .hermes-slow-blink { animation: hermes-slow-blink 4s ease-in-out infinite; }
   </style>
 </head>
 <body class="h-full flex flex-col min-h-screen">
@@ -82,7 +86,7 @@
           {% if backend_health is none %}
             <span class="inline-flex items-center rounded-full bg-gray-600 text-white text-xs px-2 py-1">Backend unreachable</span>
           {% elif backend_health.anonymisation_active %}
-            <span class="inline-flex items-center rounded-full bg-green-600 text-white text-xs px-2 py-1">Anonymised</span>
+            <span class="hermes-slow-blink inline-flex items-center rounded-full bg-green-600 text-white text-xs px-2 py-1">Anonymiser: on</span>
           {% else %}
             <span class="inline-flex items-center rounded-full bg-amber-500 text-white text-xs px-2 py-1">Not anonymised (internal)</span>
           {% endif %}

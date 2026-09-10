@@ -4,7 +4,11 @@
 
 {% macro status_badge(status, expired=False) %}
   {% if expired %}
-    <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-gray-100 text-gray-600">Expired</span>
+    {# Red, not grey -- an expired approval means "no more access", the
+       same practical consequence as a rejection/revocation, so it should
+       read with the same visual weight rather than blending in with the
+       merely-inert "Draft" grey. #}
+    <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold bg-red-100 text-red-800">&#9888; Expired</span>
   {% elif status == "draft" %}
     <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-slate-100 text-slate-700">Draft</span>
   {% elif status == "submitted" %}
@@ -53,7 +57,7 @@
     </tr></thead>
     <tbody class="divide-y divide-gray-50">
       {% for project in projects %}
-      <tr>
+      <tr class="{% if is_project_expired(project) %}bg-red-50{% endif %}">
         <td class="py-2 pr-4"><a class="text-hermes-700 hover:underline font-medium" href="/projects/{{ project.project_id }}">{{ project.title }}</a></td>
         <td class="py-2 pr-4 text-gray-500 max-w-md truncate">{{ project.description or "No description." }}</td>
         <td class="py-2 pr-4 text-gray-600">{{ project.created_by }}</td>
