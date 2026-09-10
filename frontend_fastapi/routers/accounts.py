@@ -13,9 +13,11 @@ from sqlalchemy.orm import Session as DBSession
 
 from frontend_fastapi import auth, email_backend, security
 from frontend_fastapi.database import get_db
-from frontend_fastapi.deps import get_session, get_template_context, require_data_custodian
+from frontend_fastapi.deps import get_session, get_template_context, require_data_custodian, require_login
 from frontend_fastapi.flash import flash
-from frontend_fastapi.forms.accounts import ActivateForm, CreateUserForm, InviteUserForm, LoginForm
+from frontend_fastapi.forms.accounts import (
+    ActivateForm, ChangePasswordForm, CreateUserForm, InviteUserForm, LoginForm,
+)
 from frontend_fastapi.models import Session, User
 from frontend_fastapi.settings import LOGIN_REDIRECT_URL
 from frontend_fastapi.templating import templates
@@ -256,6 +258,49 @@ def _resolve_activation_token(db: DBSession, token: str) -> User | None:
     if user is None or not user.is_active or not security.account_token_matches(data, user.password_hash):
         return None
     return user
+
+
+@router.get("/me", name="account_settings")
+async def account_settings_form(user: User = Depends(require_login), ctx: dict = Depends(get_template_context)):
+    return templates.TemplateResponse(ctx["request"], "accounts/change_password.html", {**ctx, "form": ChangePasswordForm()})
+
+
+@router.post("/me")
+async def account_settings_submit(
+    request: Request, user: User = Depends(require_login), session: Session = Depends(get_session),
+    db: DBSession = Depends(get_db), ctx: dict = Depends(get_template_context),
+):
+    form = ChangePasswordForm(formdata=await request.form())
+    # form.validate() must run exactly once -- see activate_submit's
+    # identical comment for why (WTForms rebuilds Field.errors from
+    # scratch on every call, discarding anything appended since).
+    is_valid = form.validate()
+
+    if is_valid and not security.verify_password(form.old_password.data, user.password_hash):
+        form.old_password.errors.append("Current password is incorrect.")
+        is_valid = False
+
+    if is_valid:
+        strength_errors = security.password_strength_errors(
+            form.password1.data, username=user.username, email=user.email,
+            first_name=user.first_name, last_name=user.last_name,
+        )
+        form.password1.errors.extend(strength_errors)
+        is_valid = not strength_errors
+
+    if not is_valid:
+        return templates.TemplateResponse(request, "accounts/change_password.html", {**ctx, "form": form}, status_code=400)
+
+    user.password_hash = security.hash_password(form.password1.data)
+    # Sessions are hand-rolled/DB-backed here with no automatic
+    # password-tied invalidation -- a leaked/stolen session cookie must
+    # not keep working once the real user changes their password, so
+    # every OTHER session row for this user is deleted explicitly. The
+    # current session survives so this request's own redirect doesn't
+    # log the user out too.
+    db.query(Session).filter(Session.user_id == user.id, Session.id != session.id).delete()
+    flash(session, "success", "Your password has been changed. You've been signed out of your other sessions.")
+    return RedirectResponse(request.url_for("account_settings"), status_code=303)
 
 
 @router.get("/users", name="user_list")

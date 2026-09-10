@@ -16,6 +16,7 @@ from backend.src.common.sse import BatchItem, run_batch_job, build_patient_id_ba
 from backend.src.common import pii_patterns
 from backend.src.identity import anon
 from backend.src.projects import enforcement
+from backend.src.projects.db_client import ProjectsDB
 from backend.src.projects.enforcement import verify_internal_key
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ if DATABASE_URL:
     try:
         status_db = StatusDB()
         tasks_db = TasksDB()
+        projects_db = ProjectsDB()
         logger.debug("StatusDB initialized")
     except Exception as e:
         logger.error("Failed to init StatusDB: %s", e)
@@ -253,7 +255,7 @@ async def batch_import_file(
                            "import->export flow. Omit for a plain import job."),
     destination: str | None = Form(None, description="Orthanc modality AE title; required when export_kind='dicom_move'"),
     collection: str | None = Form(None, description="ProKnow collection name; required when export_kind='proknow_upload'"),
-    message_id: int | None = Form(None, ge=0, le=65535, description="Optional DICOM Message ID, dicom_move only"),
+    mu_tolerance: float | None = Form(None, description="Optional per-job MU tolerance override for the Pinnacle export; defaults to MU_TOLERANCE_DEFAULT when omitted"),
 ):
     """
     Accept a CSV file upload and enqueue it onto the tasks table for
@@ -265,13 +267,19 @@ async def batch_import_file(
     /import/batch_import (no file upload) is a separate, unconverted
     endpoint -- see its own docstring.
 
-    `export_kind`/`destination`/`collection`/`message_id` are optional and
-    additive: omitting export_kind reproduces today's exact plain-import
-    behavior. Deliberately not a separate endpoint -- the CSV-parsing/
-    anon-resolution/create_job/add_patient/enqueue sequence below is
-    identical either way; the only difference is one extra "chain_export"
-    key denormalised onto each task's params, which backend/worker.py reads
-    after a successful import.
+    `export_kind`/`destination`/`collection` are optional and additive:
+    omitting export_kind reproduces today's exact plain-import behavior.
+    Deliberately not a separate endpoint -- the CSV-parsing/anon-resolution/
+    create_job/add_patient/enqueue sequence below is identical either way;
+    the only difference is one extra "chain_export" key denormalised onto
+    each task's params, which backend/worker.py reads after a successful
+    import.
+
+    Deliberately no client-supplied `message_id` param: it drives which
+    anonymisation table a receiving DMZ node picks, so it's looked up here
+    from the project itself (ProjectsDB.get_project), never trusted from the
+    browser -- a project's message_id is a data-custodian-reviewed setting
+    (item 05), not something any job submission can freely choose.
     """
     enforcement.require_project_member(project_id, username)
 
@@ -280,8 +288,9 @@ async def batch_import_file(
         if not destination:
             raise HTTPException(status_code=422, detail="destination is required when export_kind is dicom_move")
         chain_export = {"kind": "dicom_move", "destination": destination}
-        if message_id is not None:
-            chain_export["message_id"] = message_id
+        project_message_id = projects_db.get_project(project_id).get("message_id")
+        if project_message_id is not None:
+            chain_export["message_id"] = project_message_id
     elif export_kind == "proknow_upload":
         if not collection:
             raise HTTPException(status_code=422, detail="collection is required when export_kind is proknow_upload")
@@ -315,6 +324,8 @@ async def batch_import_file(
     # way to cancel/complete it. Marking it cancelled on any failure here
     # puts it into a well-defined terminal state instead of limbo.
     params = {"import_level": import_level, "project_id": project_id, "username": username}
+    if mu_tolerance is not None:
+        params["mu_tolerance"] = mu_tolerance
     if chain_export:
         params["chain_export"] = chain_export
     try:

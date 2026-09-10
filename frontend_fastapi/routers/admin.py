@@ -32,6 +32,7 @@ async def admin_overview(
     backend_error = None
     overview = {"expiring_projects": [], "recent_jobs": [], "audit_chain_check": None}
     project_status_counts: Counter = Counter()
+    error_reports: list = []
     try:
         overview = await backend_client.admin_overview()
     except backend_client.BackendError as e:
@@ -41,7 +42,13 @@ async def admin_overview(
     except backend_client.BackendError as e:
         if backend_error is None:
             backend_error = f"Could not load project counts: {e.detail}"
+    try:
+        error_reports = await backend_client.list_error_reports()
+    except backend_client.BackendError as e:
+        if backend_error is None:
+            backend_error = f"Could not load error reports: {e.detail}"
 
     return templates.TemplateResponse(request, "admin/overview.html", {
-        **ctx, **overview, "project_status_counts": project_status_counts, "backend_error": backend_error,
+        **ctx, **overview, "project_status_counts": project_status_counts,
+        "error_reports": error_reports, "backend_error": backend_error,
     })

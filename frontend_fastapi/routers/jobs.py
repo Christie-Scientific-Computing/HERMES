@@ -159,6 +159,13 @@ async def submit_job(
             else:
                 content, filename = await upload.read(), upload.filename
 
+            # message_id is a project-level setting (item 05), never a value
+            # the job form collects -- sourced here from the project row
+            # already fetched into `projects`, for every export path that
+            # needs it, rather than from form data.
+            selected_project = next((p for p in projects if p["project_id"] == form.project_id.data), None)
+            project_message_id = selected_project.get("message_id") if selected_project else None
+
             try:
                 if is_combined:
                     job_id = await _enqueue_batch_job(
@@ -168,18 +175,19 @@ async def submit_job(
                         destination_or_collection=(
                             form.destination.data if form.export_kind.data == "dicom_move" else form.collection.data
                         ),
-                        message_id=form.message_id.data if form.export_kind.data == "dicom_move" else None,
+                        mu_tolerance=form.mu_tolerance.data,
                     )
                 elif do_import:
                     job_id = await _enqueue_batch_job(
                         backend_client.batch_import_file, content, filename,
                         form.project_id.data, user.username, import_level=form.import_level.data,
+                        mu_tolerance=form.mu_tolerance.data,
                     )
                 elif form.export_kind.data == "dicom_move":
                     job_id = await _enqueue_batch_job(
                         backend_client.dicom_move_file, content, filename,
                         form.project_id.data, user.username,
-                        destination=form.destination.data, message_id=form.message_id.data,
+                        destination=form.destination.data, message_id=project_message_id,
                     )
                 else:
                     job_id = await _enqueue_batch_job(
@@ -201,6 +209,11 @@ async def submit_job(
         **ctx, "form": form, "job_id": job_id, "is_combined": is_combined,
         "has_projects": bool(projects),
         "modalities_error": modalities_error, "collections_error": collections_error,
+        # Read-only per-project message_id lookup for the destination
+        # section (submit_job.html) -- keyed by project_id so the template's
+        # JS can show the right value as the project dropdown changes,
+        # without a second backend round trip.
+        "project_message_ids": {p["project_id"]: p.get("message_id") for p in projects},
     })
 
 

@@ -33,11 +33,18 @@ delete is more consequential than a read.
 """
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session as DBSession
+from starlette.datastructures import UploadFile as _RawUploadFile
+# ^ fastapi.UploadFile (imported above, used by upload_document's declared
+# File(...) parameter) is a DIFFERENT class from what a raw
+# `await request.form()` parse yields for a file field (used below, for the
+# same reason jobs.py's submit_job imports it this way too) -- an
+# isinstance check against the wrong one always fails.
 
 from frontend_fastapi import backend_client
 from frontend_fastapi.database import get_db
@@ -49,7 +56,13 @@ from frontend_fastapi.deps import (
     require_login,
 )
 from frontend_fastapi.flash import flash
-from frontend_fastapi.forms.research_projects import AddMemberForm, CreateProjectForm, ReviewProjectForm
+from frontend_fastapi.forms.research_projects import (
+    AddMemberForm,
+    AmendmentDecisionForm,
+    AmendProjectForm,
+    CreateProjectForm,
+    ReviewProjectForm,
+)
 from frontend_fastapi.models import ProjectDocument, Session, User
 from frontend_fastapi.settings import MEDIA_ROOT
 from frontend_fastapi.templating import templates
@@ -59,6 +72,16 @@ router = APIRouter(prefix="/projects", tags=["research_projects"])
 _DOCUMENTS_SUBDIR = "ethics_documents"
 _MAX_DOCUMENT_SIZE_BYTES = 50 * 1024 * 1024  # generous for a PDF ethics certificate, bounds a careless/hostile upload
 _COPY_CHUNK_SIZE = 1024 * 1024
+# The requested-patients list is parsed straight into project_requested_patients
+# rows (backend-owned) -- unlike ethics documents, nothing here downloads or
+# audits the raw file later, so it's read and discarded rather than saved
+# under MEDIA_ROOT via _save_document_sync's pattern. Bounds mirror that
+# function's own reasoning (a size cap enforced mid-stream, not only after
+# fully buffering); _MAX_REQUESTED_PATIENTS_ROWS additionally caps how many
+# MRN rows a single upload can add, a basic guard against a pathological
+# (or hostile) file with millions of tiny "lines".
+_MAX_REQUESTED_PATIENTS_FILE_BYTES = 5 * 1024 * 1024
+_MAX_REQUESTED_PATIENTS_ROWS = 20_000
 
 
 class _DocumentTooLargeError(Exception):
@@ -98,9 +121,34 @@ async def project_list(request: Request, status: str = "", user: User = Depends(
     })
 
 
+async def _fetch_destination_choices(username: str) -> tuple[list[str], list[str], Optional[str]]:
+    """Live Orthanc modalities + ProKnow collections for the destination
+    picker -- same two backend_client calls jobs.py's submit_job already
+    uses. Both require the caller to already have SOME active approved
+    project (backend/src/projects/enforcement.py's require_any_active_project)
+    -- a user's very first-ever project has none yet, so this degrades to
+    an error banner for them specifically, exactly like submit_job.html
+    already does when Orthanc/ProKnow itself is unreachable. Not a new gap;
+    inherited from reusing the same calls."""
+    try:
+        modalities = await backend_client.get_orthanc_modalities(username)
+    except backend_client.BackendError as e:
+        return [], [], f"Could not load destination choices: {e.detail}"
+    try:
+        collections = await backend_client.get_proknow_collections(username)
+    except backend_client.BackendError as e:
+        return modalities, [], f"Could not load destination choices: {e.detail}"
+    return modalities, collections, None
+
+
 @router.get("/new", name="project_create")
 async def project_create_form(user: User = Depends(require_login), ctx: dict = Depends(get_template_context)):
-    return templates.TemplateResponse(ctx["request"], "research_projects/create.html", {**ctx, "form": CreateProjectForm()})
+    modalities, collections, destination_error = await _fetch_destination_choices(user.username)
+    form = CreateProjectForm()
+    form.set_destination_choices(modalities, collections)
+    return templates.TemplateResponse(ctx["request"], "research_projects/create.html", {
+        **ctx, "form": form, "destination_error": destination_error,
+    })
 
 
 @router.post("/new")
@@ -108,14 +156,23 @@ async def project_create_submit(
     request: Request, user: User = Depends(require_login), session: Session = Depends(get_session),
     ctx: dict = Depends(get_template_context),
 ):
-    form = CreateProjectForm(formdata=await request.form())
+    formdata = await request.form()
+    upload = formdata.get("requested_patients_file")
+    has_file = isinstance(upload, _RawUploadFile) and bool(upload.filename)
+
+    modalities, collections, destination_error = await _fetch_destination_choices(user.username)
+    form = CreateProjectForm(formdata=formdata)
+    form.set_destination_choices(modalities, collections)
     if not form.validate():
-        return templates.TemplateResponse(request, "research_projects/create.html", {**ctx, "form": form}, status_code=400)
+        return templates.TemplateResponse(request, "research_projects/create.html", {
+            **ctx, "form": form, "destination_error": destination_error,
+        }, status_code=400)
 
     try:
         project = await backend_client.create_project(
             title=form.title.data, created_by=user.username,
             description=form.description.data or "", ethics_reference=form.ethics_reference.data or "",
+            destinations=form.destinations(), message_id=form.message_id.data,
         )
     except backend_client.BackendError as e:
         # Inline, not flash(): this re-renders the SAME response rather than
@@ -125,11 +182,32 @@ async def project_create_submit(
         # one. Same reasoning as project_list/review_queue's backend_error.
         backend_error = f"Could not create project: {e.detail}"
         return templates.TemplateResponse(
-            request, "research_projects/create.html", {**ctx, "form": form, "backend_error": backend_error}, status_code=400,
+            request, "research_projects/create.html",
+            {**ctx, "form": form, "backend_error": backend_error, "destination_error": destination_error},
+            status_code=400,
         )
+    project_id = project["project_id"]
+
+    if has_file:
+        try:
+            mrns = await run_in_threadpool(_parse_requested_patients_sync, upload.file)
+        except _DocumentTooLargeError:
+            flash(session, "error", f"Patient list too large (max {_MAX_REQUESTED_PATIENTS_FILE_BYTES // (1024 * 1024)}MB) -- project created without it.")
+        else:
+            if mrns:
+                try:
+                    await backend_client.add_requested_patients(project_id, mrns, added_by=user.username)
+                except backend_client.BackendError as e:
+                    # The project itself was already created successfully --
+                    # a failure here must not 500 the whole request or hide
+                    # that the project exists; just say the list didn't land.
+                    flash(session, "error", f"Project created, but the patient list could not be saved: {e.detail}")
+    else:
+        # FEATURES.md item 5: non-blocking -- a nudge, not a requirement.
+        flash(session, "warning", "No patient-ID list uploaded. Consider adding one so this project's usage can be tracked.")
 
     flash(session, "success", "Project created as a draft. Submit it for review when ready.")
-    return RedirectResponse(request.url_for("project_detail", project_id=project["project_id"]), status_code=303)
+    return RedirectResponse(request.url_for("project_detail", project_id=project_id), status_code=303)
 
 
 @router.get("/review", name="review_queue")
@@ -137,11 +215,12 @@ async def review_queue(request: Request, user: User = Depends(require_data_custo
     backend_error = None
     try:
         pending = await backend_client.list_projects(status="submitted")
+        amendments = await backend_client.list_pending_amendments()
     except backend_client.BackendError as e:
         backend_error = f"Could not load review queue: {e.detail}"
-        pending = []
+        pending, amendments = [], []
     return templates.TemplateResponse(request, "research_projects/review_queue.html", {
-        **ctx, "projects": pending, "backend_error": backend_error,
+        **ctx, "projects": pending, "amendments": amendments, "backend_error": backend_error,
     })
 
 
@@ -164,6 +243,11 @@ async def project_detail(
     except backend_client.BackendError:
         jobs = []
 
+    try:
+        stats = await backend_client.get_project_stats(project_id)
+    except backend_client.BackendError:
+        stats = {"requested_count": 0, "restored_count": 0, "sent_by_destination": []}
+
     # Contextual to THIS project specifically (unlike list.html's aggregate
     # banner across every project the viewer belongs to) -- only meaningful
     # for a member of an approved project, not e.g. a staff reviewer who
@@ -174,6 +258,17 @@ async def project_detail(
         if matches:
             days_remaining = matches[0]["days_remaining"]
 
+    # Unlike the banner above, the "Project overview" card's expiry
+    # colour-coding is for ANY viewer (e.g. a staff reviewer deciding
+    # whether to act on it), not gated on project membership.
+    overview_matches = expiring_soon([project])
+    overview_days_remaining = overview_matches[0]["days_remaining"] if overview_matches else None
+
+    destinations = project["destinations"]
+    active_destinations = [d for d in destinations if d["status"] == "active"]
+    proposed_destinations = [d for d in destinations if d["status"] == "proposed"]
+    pending_amendment = bool(proposed_destinations) or project["pending_message_id"] is not None
+
     return templates.TemplateResponse(request, "research_projects/detail.html", {
         **ctx,
         "project": project,
@@ -181,9 +276,15 @@ async def project_detail(
         "can_manage_documents": is_member or user.is_staff,
         "documents": documents,
         "jobs": jobs,
+        "stats": stats,
         "add_member_form": AddMemberForm(),
         "review_form": ReviewProjectForm(),
+        "amendment_decision_form": AmendmentDecisionForm(),
         "days_remaining": days_remaining,
+        "overview_days_remaining": overview_days_remaining,
+        "active_destinations": active_destinations,
+        "proposed_destinations": proposed_destinations,
+        "pending_amendment": pending_amendment,
     })
 
 
@@ -263,6 +364,88 @@ async def project_remove_member(
     return RedirectResponse(request.url_for("project_detail", project_id=project_id), status_code=303)
 
 
+@router.get("/{project_id}/amend", name="project_amend")
+async def project_amend_form(
+    request: Request, project_id: str, user: User = Depends(require_login), session: Session = Depends(get_session),
+    ctx: dict = Depends(get_template_context),
+):
+    project = await _get_project_or_flash(session, project_id)
+    if project is None:
+        return RedirectResponse(request.url_for("project_list"), status_code=303)
+    if not (_is_member(project, user.username) or user.is_staff):
+        raise HTTPException(status_code=403, detail="Only a project member may propose an amendment")
+
+    modalities, collections, destination_error = await _fetch_destination_choices(user.username)
+    form = AmendProjectForm()
+    form.set_destination_choices(modalities, collections)
+    # Prefill with the project's CURRENT active selections, not a blank
+    # form -- an amendment usually tweaks one thing, not re-picks everything.
+    active = [d for d in project["destinations"] if d["status"] == "active"]
+    form.use_dicom.data = any(d["destination_type"] == "dicom" for d in active)
+    form.dicom_destinations.data = [d["destination_value"] for d in active if d["destination_type"] == "dicom"]
+    form.use_proknow.data = any(d["destination_type"] == "proknow" for d in active)
+    form.proknow_destinations.data = [d["destination_value"] for d in active if d["destination_type"] == "proknow"]
+    form.message_id.data = project["message_id"]
+
+    return templates.TemplateResponse(request, "research_projects/amend.html", {
+        **ctx, "project": project, "form": form, "destination_error": destination_error,
+    })
+
+
+@router.post("/{project_id}/amend")
+async def project_amend_submit(
+    request: Request, project_id: str, user: User = Depends(require_login), session: Session = Depends(get_session),
+    ctx: dict = Depends(get_template_context),
+):
+    project = await _get_project_or_flash(session, project_id)
+    if project is None:
+        return RedirectResponse(request.url_for("project_list"), status_code=303)
+    if not (_is_member(project, user.username) or user.is_staff):
+        raise HTTPException(status_code=403, detail="Only a project member may propose an amendment")
+
+    modalities, collections, destination_error = await _fetch_destination_choices(user.username)
+    form = AmendProjectForm(formdata=await request.form())
+    form.set_destination_choices(modalities, collections)
+    if not form.validate():
+        return templates.TemplateResponse(request, "research_projects/amend.html", {
+            **ctx, "project": project, "form": form, "destination_error": destination_error,
+        }, status_code=400)
+
+    try:
+        await backend_client.propose_amendment(
+            project_id, proposed_by=user.username, destinations=form.destinations(), message_id=form.message_id.data,
+        )
+    except backend_client.BackendError as e:
+        flash(session, "error", f"Could not propose amendment: {e.detail}")
+    else:
+        flash(session, "success", "Amendment proposed. It stays pending until a data custodian reviews it.")
+    return RedirectResponse(request.url_for("project_detail", project_id=project_id), status_code=303)
+
+
+@router.post("/{project_id}/amendment/decide")
+async def project_amendment_decide(
+    project_id: str, request: Request, user: User = Depends(require_data_custodian), session: Session = Depends(get_session),
+):
+    """Mirrors project_review's own single-endpoint decision pattern (one
+    decision RadioField, branched on here) rather than a separate route per
+    outcome."""
+    form = AmendmentDecisionForm(formdata=await request.form())
+    if form.validate():
+        approve = form.decision.data == "approve"
+        try:
+            if approve:
+                await backend_client.approve_amendment(project_id, reviewed_by=user.username, comment=form.comment.data or "")
+            else:
+                await backend_client.reject_amendment(project_id, reviewed_by=user.username, comment=form.comment.data or "")
+        except backend_client.BackendError as e:
+            flash(session, "error", f"Could not record amendment decision: {e.detail}")
+        else:
+            flash(session, "success", f"Amendment {'approved' if approve else 'rejected'}.")
+    else:
+        flash(session, "error", "Invalid amendment decision.")
+    return RedirectResponse(request.url_for("project_detail", project_id=project_id), status_code=303)
+
+
 def _save_document_sync(source, project_id: str, original_filename: str) -> str:
     """Blocking, streaming file copy, run off the event loop -- see the
     module docstring's async-threading note. `source` is UploadFile.file (a
@@ -298,6 +481,44 @@ def _save_document_sync(source, project_id: str, original_filename: str) -> str:
         dest_path.unlink(missing_ok=True)
         raise
     return str(Path(_DOCUMENTS_SUBDIR) / project_id / stored_name)
+
+
+def _parse_requested_patients_sync(source) -> list[str]:
+    """Blocking, streaming read of an uploaded patient-ID list -- bounded
+    the same way _save_document_sync bounds a document upload (a size cap
+    enforced mid-stream), but writes nothing to disk: see this module's
+    _MAX_REQUESTED_PATIENTS_FILE_BYTES comment for why.
+
+    "Basic CSV/text content check" (per the plan): a header line
+    ('patient_id' or 'mrn', case-insensitively, alone on its line) is
+    skipped; every other non-blank line is treated as one MRN token,
+    stripped of surrounding whitespace/commas, deduplicated, and capped at
+    _MAX_REQUESTED_PATIENTS_ROWS. No MRN-shape validation -- anon/real ids
+    vary in format across deployments, and this list is only ever counted
+    (item 04's "requested" stat), never looked up against."""
+    source.seek(0)
+    read = 0
+    chunks = []
+    while chunk := source.read(_COPY_CHUNK_SIZE):
+        read += len(chunk)
+        if read > _MAX_REQUESTED_PATIENTS_FILE_BYTES:
+            raise _DocumentTooLargeError(f"Patient list exceeds the {_MAX_REQUESTED_PATIENTS_FILE_BYTES}-byte limit")
+        chunks.append(chunk)
+    text = b"".join(chunks).decode("utf-8", errors="ignore")
+
+    mrns: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        token = line.strip().strip(",")
+        if not token or token.lower() in ("patient_id", "mrn"):
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        mrns.append(token)
+        if len(mrns) >= _MAX_REQUESTED_PATIENTS_ROWS:
+            break
+    return mrns
 
 
 @router.post("/{project_id}/documents/upload")

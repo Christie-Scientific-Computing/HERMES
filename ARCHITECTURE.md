@@ -45,66 +45,77 @@ graph TD
     WORKER --> PINNACLE
 ```
 
-`frontend_fastapi`/`frontend` call `backend` directly when internal-only, or via `proxy` when externally/DMZ-reachable — both paths are the same code, just a different `BACKEND_URI`.
+`frontend_fastapi/` is the sole caller of `backend/` for real traffic (Phase 5 cutover); `frontend/` (Django) is kept running only for burn-in/rollback. `webui/` talks to `backend/` directly but its import/export routes are broken (ethics-gate 422s). `proxy/` is an optional pass-through, used only when a frontend is DMZ-facing.
 
 ## Domains
 
+Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
+
 | Domain | Path | Description | Details |
 |---|---|---|---|
-| `backend` | `backend/src/` | FastAPI app: import/export/results/studies/projects, task queue, audit trail, anonymisation boundary | [.architecture/domains/backend.md](.architecture/domains/backend.md) |
-| `worker` | `backend/worker.py` | Polls the `tasks` table, executes queued batch-job rows via the same worker factories the sync endpoints use | — |
-| `frontend_fastapi` | `frontend_fastapi/` | Production frontend (FastAPI + Jinja2): auth, ethics workflow, job submission/results, admin dashboard | [.architecture/domains/frontend_fastapi.md](.architecture/domains/frontend_fastapi.md) |
-| `frontend` (legacy) | `frontend/` | Django app `frontend_fastapi` replaced; kept running only for Phase 6 decommission burn-in, no new features | — |
-| `webui` (throwaway) | `webui/` | Minimal Django test UI, superseded by `frontend`/`frontend_fastapi`. On this branch its source (`webui/core/`) has already been removed (see the "Repo cleanup" commit) — only a stray `db.sqlite3` remains; `CLAUDE.md`'s description of it as a working (if broken-on-import/export) app is stale | — |
-| `proxy` | `proxy/` | Thin SSE-aware reverse proxy for external/DMZ access; zero business logic | — |
+| `retrieve` | `backend/src/retrieve/` | Import: Mosaiq/Pinnacle/ProKnow search, DICOM pull to Orthanc, Orthanc cleanup | — |
+| `export` | `backend/src/export/` | Export: DICOM C-MOVE to registered modalities, ProKnow SDK upload | — |
+| `studies` | `backend/src/studies/` | Read-only study/series browsing against Orthanc | — |
+| `identity` | `backend/src/identity/` | Anon ⇄ real ID translation boundary (`anon.py`) | — |
+| `plans` | `backend/src/plans/` | Read-only access to PinnacleExport's own `plans` table | — |
+| `status` | `backend/src/status/` | Job/patient/event audit log (`StatusDB`) and the `tasks` queue (`TasksDB`), plus the hash chain | — |
+| `projects` | `backend/src/projects/` | Ethics/research-project workflow: lifecycle, membership, audit log, enforcement gate | — |
+| `notifications` | `backend/src/notifications/` | Persisted job-done/approval-decision notifications | — |
+| `error_reports` | `backend/src/error_reports/` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log | — |
+| `admin` | `backend/src/admin/` | Compliance dashboard aggregate queries (project-status counts, expiring-soon, recent jobs, audit-chain status) | — |
+| `common` | `backend/src/common/` | Shared SSE batch runner, PII redaction (`pii_patterns.py`), global exception handling | — |
+
+`frontend_fastapi/` mirrors most of the same domain names as its own routers/forms (`accounts`, `research_projects`, `jobs`, `admin`, `notifications`, `error_reports`) — it is a thin UI layer over the backend API, holding no job/event/project data itself (see Frontend/backend boundaries below).
 
 ## Apps / packages
 
 | Name | Path | Description |
 |---|---|---|
-| `backend` | `backend/` | FastAPI backend + worker; `src/` holds one subpackage per feature domain (see backend sub-map) |
-| `frontend_fastapi` | `frontend_fastapi/` | FastAPI + Jinja2 frontend, its own local SQLite/Postgres DB (`HERMES_FRONTEND_DATABASE_URL`) for users/sessions/documents only |
-| `frontend` | `frontend/` | Django app: `accounts`, `research_projects`, `jobs` — legacy, burn-in only |
-| `webui` | `webui/` | Formerly a Django dev-only test UI (`webui/core/`, no auth/styling); that source is now deleted from this branch, leaving only a stray `db.sqlite3` |
-| `proxy` | `proxy/` | FastAPI, single catch-all forwarding route (`main.py`, `forward.py`) |
-| `scripts` | `scripts/` | Repo-level dev tooling, e.g. `dev-up.sh` (starts backend + worker + `frontend_fastapi` together) |
+| `backend` | `backend/` | FastAPI app, all business logic; `backend/worker.py` is a separate long-running process from the same source tree |
+| `frontend_fastapi` | `frontend_fastapi/` | FastAPI + Jinja2 app — **production frontend** as of the Phase 5 cutover; sole caller of `backend` |
+| `frontend` | `frontend/` | Django (ASGI) app — legacy frontend `frontend_fastapi` replaced; kept running for Phase 6 burn-in only, not real traffic |
+| `webui` | `webui/` | Throwaway Django dev tool for exercising `backend` directly; import/export routes broken (ethics gate) |
+| `proxy` | `proxy/` | Thin FastAPI reverse proxy for DMZ/external access; no business logic or database |
+| `docs` | `docs/` | Narrative docs and `docs/plans/` (design/implementation plan documents) |
+| `docs/agents` | `docs/agents/` | Agent-skill config: issue tracker, triage labels, domain-doc conventions (see `CLAUDE.md`'s "Agent skills" section) |
+
+`backend/src/retrieve/PinnacleExport/` is a git submodule (Pinnacle DICOM export) — not part of this repo's own source.
 
 ## Frontend / backend boundaries
 
-`frontend_fastapi/` is the sole caller of `backend/` for real traffic (as of the Phase 5 cutover); `frontend/` (Django) remains wired the same way but isn't used for live traffic during its burn-in period. Both talk to the backend exclusively through one client module each (`frontend_fastapi/backend_client.py`, `frontend/hermes_frontend/backend_client.py`) — HTTP + SSE, with an optional shared-secret header (`X-Hermes-Internal-Key`, checked by `backend/src/projects/enforcement.py`'s `verify_internal_key`) when `HERMES_INTERNAL_KEY` is set. `webui/` also calls the backend directly but has no auth of its own and its import/export pages now 422 (ethics-gate fields it never sends).
-
-`proxy/` sits between an external-facing frontend and the backend only when needed (DMZ deployments) — it is a transparent relay, never itself a caller.
-
-The backend has no authentication of its own; every import/export/project endpoint is gated by `backend/src/projects/enforcement.py` (ethics/project-membership checks), with `HERMES_INTERNAL_KEY` as the only enforcement that "only the frontend calls this" is real rather than just topological.
+`backend/` exposes one FastAPI app (`/studies`, `/import`, `/export`, `/results`, `/projects`, `/notifications`, `/error_reports`) and has no authentication of its own beyond an optional shared-secret header (`HERMES_INTERNAL_KEY`). `frontend_fastapi/` (and, before it, `frontend/`) is the only intended caller: it session-authenticates the human, then issues every backend call server-side — including SSE streams — via its own `backend_client.py`, attaching `project_id`/`username` itself rather than trusting a browser-supplied value. `frontend_fastapi/` holds only its own local concerns (`users`, `sessions`, `project_documents`) in a separate local DB; all job/event/research-project *data* is fetched fresh from the backend on every request, never cached or duplicated locally. `webui/` and `proxy/` both talk to the backend directly instead, for different reasons (dev convenience vs. DMZ relay respectively).
 
 ## Test organisation
 
-- `backend/tests/` — pytest against a real Postgres (`DATABASE_URL`, throwaway container; `conftest.py` refuses to run against a non-loopback host). Covers `StatusDB`, `ProjectsDB`/enforcement, the anon boundary, the hash chain, the `tasks` queue, the worker, the observer SSE stream, and PII-boundary-specific assertions (`backend/tests/support/pii_assertions.py`). Files needing the `PinnacleExport` submodule skip gracefully via `pytest.importorskip` if it isn't checked out.
-- `frontend_fastapi/tests/` — pytest, own local DB (SQLite in-memory or throwaway Postgres via `HERMES_FRONTEND_DATABASE_URL`). Covers sessions/CSRF, auth deps, each router, the backend client, migrations, break-glass scripts.
-- CI (`.github/workflows/test.yml`) runs only `backend/tests/` today, on Python 3.13 (required by `PinnacleExport`'s own typing), against two ephemeral Postgres containers (HermesDB + anon-DB stand-in), with `--continue-on-collection-errors`.
+- `backend/tests/` — pytest, needs a real Postgres (`DATABASE_URL`); no mocked/in-memory DB layer. `conftest.py` refuses to run against a non-loopback host as a safety guard. Some tests additionally need the `PinnacleExport` submodule or a second throwaway anon-mapping Postgres; both skip gracefully when absent.
+- `frontend_fastapi/tests/` — pytest, uses its own local DB (SQLite in-memory or throwaway Postgres via `HERMES_FRONTEND_DATABASE_URL`), separate fixtures from the backend's.
+- `frontend/*/tests.py` — Django's default per-app test module convention (`accounts/tests.py`, `jobs/tests.py`, `research_projects/tests.py`); legacy app, lower priority for new coverage.
+- CI (`.github/workflows/test.yml`) runs `backend/tests/` only, against two ephemeral Postgres 16 containers, on Python 3.13 specifically (see `CLAUDE.md` Testing section for why).
 
 ## Build / package configuration
 
-- Root `requirements.txt` / `requirements-dev.txt` cover backend + `frontend_fastapi` + the still-present Streamlit remnants.
-- `proxy/` and `webui/` have their own `pyproject.toml`/requirements; every other component pins via the root files.
-- `docker-compose.dev.yml` + `Dockerfile.dev` bring up the full local stack (both Postgres DBs, `backend`, `worker`, `frontend_fastapi`, `frontend`). `docker-compose.yml` is the production compose file and has no frontend service of its own — routing is handled outside this repo.
-- Backend DB migrations: Alembic, `backend/alembic/versions/` (run automatically on backend startup). `frontend_fastapi` migrations: `frontend_fastapi/migrations.py`, also automatic on startup.
+- `pyproject.toml` (repo root) — `pytest` config (`asyncio_mode = "auto"`) and a `[tool.fastapi]` entrypoint; no per-component `pyproject.toml` beyond `proxy/` and `webui/`.
+- `requirements.txt` / `requirements-dev.txt` (repo root) — cover `backend` + `frontend_fastapi` + Streamlit remnants; single shared dependency set.
+- `Dockerfile`, `Dockerfile.dev`, `docker-compose.yml`, `docker-compose.dev.yml` — dev compose brings up both Postgres DBs, `backend`, `worker`, `frontend_fastapi`, and `frontend` together; root compose has no frontend service of its own (production routing handled outside this repo).
+- `scripts/dev-up.sh` — starts backend + worker(s) + `frontend_fastapi` together for local dev (`HERMES_DEV_USE_DJANGO_FRONTEND=1` switches to legacy `frontend/`).
+- Alembic migrations: `backend/alembic/versions/` (HermesDB, 7 revisions) and `frontend_fastapi/alembic/versions/` (frontend's own local DB, 2 revisions) — two independently-migrated databases, never share a migration chain.
 
 ## Developer & architecture docs
 
 | Doc | Path |
 |---|---|
-| Main contributor guide (module-by-module) | `CLAUDE.md` |
+| Full module-by-module reference | `CLAUDE.md` |
 | Narrative architecture walkthrough | `docs/architecture.md` |
-| Known issues / accepted gaps | `docs/known-issues.md` |
+| Known gaps / historical governance findings | `docs/known-issues.md` |
 | PII boundary risk register | `docs/pii-boundary-safety.md` |
-| Frontend rewrite implementation plan | `docs/plans/frontend-rewrite-implementation-plan.md` |
+| Frontend rewrite phase plan | `docs/plans/frontend-rewrite-implementation-plan.md` |
 | Worker queue design | `docs/plans/worker-queue-design.md` |
-| Safety plan (audit trail, export manifest, etc.) | `docs/plans/safety-plan.md` |
-| Feature-round implementation plan (this round's items) | `docs/plans/feature-round-implementation-plan.md` |
+| Safety-plan (export governance) | `docs/plans/safety-plan.md` |
+| Current feature-round plan | `docs/plans/feature-round-implementation-plan.md` |
 
 ## Notable conventions
 
-- One feature per git branch/PR is the established pattern for this "feature round" (e.g. `feature/change-own-password`, `feature/frontpage-jobs-table`) — see `.plans/hermes-feature-round/` for the per-feature specs (`F001`-`F011`) this round is tracked against, a more granular breakdown than `docs/plans/feature-round-implementation-plan.md`'s unlabeled items.
-- Two entirely separate Postgres databases exist — HermesDB (`DATABASE_URL`, HERMES-owned) and the anon-mapping DB (`ANON_DB_*`, external, read-only) — never conflate them. A third, `PINNACLE_SCHEMA`-namespaced set of tables lives inside HermesDB's own database but is owned and migrated entirely by the separate `PinnacleExport` project; HERMES only ever `SELECT`s from it.
-- `backend/src/retrieve/PinnacleExport/` is a git submodule; several backend tests and this whole map's `backend.retrieve` domain assume it's checked out (`git submodule update --init --recursive`).
+- Two entirely separate Postgres databases exist (HermesDB and the external anon-mapping DB) plus `frontend_fastapi`'s own local DB — never conflate them; see `CLAUDE.md`'s "Environment Variables" and "Architecture" sections.
+- A third, non-HERMES-owned schema (`pinnacle_export`, default) lives inside HermesDB's own database — PinnacleExport's own tables, read-only to HERMES, never migrated by this repo's Alembic chain.
+- CSV-upload batch jobs run through a Postgres-backed `tasks` queue (`backend/worker.py`), not inline in the HTTP request; the older in-request SSE generator (`backend/src/common/sse.py`) still exists for a narrower non-file "list of MRNs" alias path.
+- `mrn` columns in HermesDB store the real patient ID; anonymisation is strictly a boundary concern at the API edge (`backend/src/identity/anon.py`), not something reflected in storage.

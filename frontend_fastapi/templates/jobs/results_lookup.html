@@ -94,7 +94,8 @@
   <h2 class="text-sm font-semibold text-gray-900 mb-4">Timeline ({{ events|length }} events)</h2>
   <table class="min-w-full text-sm divide-y divide-gray-100">
     <thead><tr>
-      <th class="text-left py-1 font-medium text-gray-500">When</th>
+      <th class="text-left py-1 font-medium text-gray-500">Start Time</th>
+      <th class="text-left py-1 font-medium text-gray-500">End Time</th>
       <th class="text-left py-1 font-medium text-gray-500">Stage</th>
       <th class="text-left py-1 font-medium text-gray-500">Event</th>
       <th class="text-left py-1 font-medium text-gray-500">Attempt</th>
@@ -103,14 +104,19 @@
     <tbody class="divide-y divide-gray-50">
       {% for e in events %}
       <tr>
-        <td class="py-1">{{ e.ts }}</td>
+        <td class="py-1">{{ e.start_ts | hermes_timestamp }}</td>
+        <td class="py-1">
+          {% if e.end_ts %}{{ e.end_ts | hermes_timestamp }}
+          {% elif e.outcome == "cancelled" %}—
+          {% else %}In progress{% endif %}
+        </td>
         <td class="py-1">{{ e.stage }}</td>
-        <td class="py-1">{{ e.event_type }}</td>
+        <td class="py-1">{{ e.outcome }}</td>
         <td class="py-1">{{ e.attempt }}</td>
         <td class="py-1 text-red-600">{{ e.error_message or "" }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="5" class="py-4 text-center text-gray-400">No events found.</td></tr>
+      <tr><td colspan="6" class="py-4 text-center text-gray-400">No events found.</td></tr>
       {% endfor %}
     </tbody>
   </table>

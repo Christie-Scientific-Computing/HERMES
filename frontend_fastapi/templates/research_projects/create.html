@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_form_field.html" import form_field %}
+{% from "research_projects/_destination_picker.html" import destination_picker %}
 {% block title %}Request a project — HERMES{% endblock %}
 {% block content %}
 <div class="max-w-lg">
@@ -11,9 +12,22 @@
   {% if backend_error %}
   <div class="rounded-md p-4 bg-red-50 text-red-800 border border-red-200 text-sm mb-4">{{ backend_error }}</div>
   {% endif %}
-  <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+  <form method="post" enctype="multipart/form-data" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    {% for field in form %}{{ form_field(field) }}{% endfor %}
+    {{ form_field(form.title) }}
+    {{ form_field(form.description) }}
+    {{ form_field(form.ethics_reference) }}
+
+    {{ destination_picker(form, destination_error) }}
+
+    <div class="border-t border-gray-100 pt-4">
+      <label class="block text-sm font-medium text-gray-700">Requested patient-ID list (optional)</label>
+      <input type="file" name="requested_patients_file" accept=".csv,.txt">
+      <p class="text-xs text-gray-400 mt-1">
+        One patient ID per line. Not required, but recommended so this project's usage can be tracked.
+      </p>
+    </div>
+
     <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
       Create draft
     </button>

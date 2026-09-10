@@ -27,6 +27,7 @@ pytest.importorskip("backend.src.retrieve.PinnacleExport", reason="PinnacleExpor
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from backend.src.db import get_conn
 from backend.src.retrieve import endpoints as retrieve_endpoints
 from backend.src.status.db_client import StatusDB
 from backend.src.status.tasks_db import TasksDB
@@ -103,15 +104,22 @@ def test_batch_import_file_with_export_kind_dicom_move_sets_chain_export(client,
     }
 
 
-def test_batch_import_file_with_export_kind_dicom_move_and_message_id(client, active_project):
+def test_batch_import_file_sources_message_id_from_the_project(client, active_project):
+    """
+    message_id drives which anonymisation table a receiving DMZ node picks
+    -- it's a project-level setting (item 05), looked up server-side here
+    via ProjectsDB.get_project, never a client-supplied value.
+    """
     project_id, username = active_project
     job_id = f"queue-test-{uuid.uuid4()}"
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE research_projects SET message_id = %s WHERE project_id = %s", (51966, project_id))
 
     resp = client.post(
         "/import/batch_import_file",
         data={
             "job_id": job_id, "project_id": project_id, "username": username,
-            "export_kind": "dicom_move", "destination": "TRIAL_AE", "message_id": "51966",
+            "export_kind": "dicom_move", "destination": "TRIAL_AE",
         },
         files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
     )
@@ -119,6 +127,63 @@ def test_batch_import_file_with_export_kind_dicom_move_and_message_id(client, ac
 
     task = TasksDB().claim("integration-test-worker")
     assert task["params"]["chain_export"] == {"kind": "dicom_move", "destination": "TRIAL_AE", "message_id": 51966}
+
+
+def test_batch_import_file_ignores_a_client_supplied_message_id(client, active_project):
+    """
+    The endpoint no longer declares a message_id Form param at all, but a
+    stray client-sent form field for the same name must still have zero
+    effect -- proving the removal actually closed the trust gap, not just
+    that the happy path (above) reads the right value.
+    """
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "export_kind": "dicom_move", "destination": "TRIAL_AE", "message_id": "99999",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    task = TasksDB().claim("integration-test-worker")
+    assert task["params"]["chain_export"] == {"kind": "dicom_move", "destination": "TRIAL_AE"}
+
+
+def test_batch_import_file_threads_mu_tolerance_into_task_params(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={
+            "job_id": job_id, "project_id": project_id, "username": username,
+            "import_level": "Planning data", "mu_tolerance": "0.5",
+        },
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    task = TasksDB().claim("integration-test-worker")
+    assert task["params"]["mu_tolerance"] == 0.5
+
+
+def test_batch_import_file_omits_mu_tolerance_from_params_when_not_given(client, active_project):
+    project_id, username = active_project
+    job_id = f"queue-test-{uuid.uuid4()}"
+
+    resp = client.post(
+        "/import/batch_import_file",
+        data={"job_id": job_id, "project_id": project_id, "username": username, "import_level": "Planning data"},
+        files={"file": ("patients.csv", _csv_bytes(ANON_MRN), "text/csv")},
+    )
+    assert resp.status_code == 200
+
+    task = TasksDB().claim("integration-test-worker")
+    assert "mu_tolerance" not in task["params"]
 
 
 def test_batch_import_file_with_export_kind_proknow_upload_sets_chain_export(client, active_project):

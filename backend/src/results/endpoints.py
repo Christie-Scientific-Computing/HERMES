@@ -43,42 +43,26 @@ else:
 
 def _anonymize_events(events: list[dict]) -> list[dict]:
     """
-    Translate every event's `mrn` field (real id) to its display (anon) id, and
-    scrub the real id out of the free-text fields alongside it.
+    Translate every paired attempt's `mrn` field (real id) to its display
+    (anon) id, and scrub the real id out of `error_message` alongside it --
+    that field is str(exception) from a worker and routinely quotes the MRN
+    it was handed, so translating only the structured `mrn` column would
+    leave the real id crossing the boundary in prose, on the timeline, which
+    is the page people read errors on.
 
-    `error_message` is str(exception) from a worker and routinely quotes the
-    MRN it was handed; `details` is a worker's own return value. Translating
-    only the structured `mrn` column left the real id crossing the boundary in
-    prose -- on the timeline, which is the page people read errors on.
-
-    `details` also goes through to_public_details (backend/src/common/sse.py)
-    -- an export-stage success event's details carries the same real
-    study_uids/series_uids/checksums the observer stream (_observe_job) and
-    every other outbound emission point strip; a DICOM UID never contains
-    the MRN, so _scrub_json's substring substitution alone never touches it.
-    This is the patient timeline, backing GET /results/patient/{job_id}/{mrn}
-    and GET /results/patient/timeline/{mrn}/all -- the same missed emission
-    point applies to both.
+    Each `events` entry here is one attempt (results/endpoints.py's
+    _pair_attempts), not a raw DB row -- no `details` field survives that
+    far (queue-driven UID/checksum-bearing details live on `tasks`, never
+    exposed by the timeline endpoints), so there's nothing else to scrub.
     """
     if not events:
         return events
     display_map = anon.to_display_ids([e["mrn"] for e in events])
-
-    def _public_details(e: dict) -> Optional[dict]:
-        # Preserves a genuine None (no details recorded for this event) as
-        # None rather than to_public_details' own None-in/{}-out contract
-        # -- unlike _observe_job's pre-existing `or {}`, this endpoint never
-        # substituted an empty dict for "no details" before, and changing
-        # that shape isn't this fix's job.
-        scrubbed = _scrub_json(e.get("details"), e["mrn"], display_map[e["mrn"]])
-        return to_public_details(scrubbed) if scrubbed is not None else None
-
     return [
         {
             **e,
             "mrn": display_map[e["mrn"]],
             "error_message": _scrub(e.get("error_message"), e["mrn"], display_map[e["mrn"]]),
-            "details": _public_details(e),
         }
         for e in events
     ]
@@ -164,6 +148,68 @@ def _scrub_json(value, real_mrn: str, display_mrn: str):
 
 # A trailing 'start' with nothing after it means the item is still in flight.
 _OUTCOME_BY_EVENT_TYPE = {"success": "success", "failure": "failure", "start": "running"}
+
+_TASK_STATE_TO_OUTCOME = {"succeeded": "success", "failed": "failure", "cancelled": "cancelled"}
+
+
+def _pair_attempts(events: list[dict], tasks_by_id: dict[int, dict], cancelled_jobs: set[str]) -> list[dict]:
+    """
+    Collapses raw `events` rows into one record per attempt:
+    {mrn, stage, attempt, start_ts, end_ts, outcome, error_message}.
+    `outcome` is success/failure/cancelled/in_progress.
+
+    Queue-driven attempts (events.task_id set) need no start/success pairing
+    at all -- `tasks_by_id` (a join the caller already did via
+    StatusDB.get_tasks_by_ids) has both timestamps and the task's own
+    terminal state directly; this just relabels that state to the outcome
+    vocabulary above (anything non-terminal becomes "in_progress").
+
+    The still-synchronous single-item path (task_id NULL) has no task row to
+    borrow from, so its 'start' event is paired with whichever
+    success/failure event shares the same (job_id, mrn, stage, attempt) --
+    the same key StatusDB.add_event already writes on. An unresolved sync
+    attempt (no terminal event yet) is "in_progress", unless its job has
+    since been cancelled (`cancelled_jobs`), in which case it never will
+    resolve.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for e in events:
+        key = ("task", e["task_id"]) if e["task_id"] is not None else ("sync", e["job_id"], e["mrn"], e["stage"], e["attempt"])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+
+    paired = []
+    for key in order:
+        group = groups[key]
+        first = group[0]
+        if key[0] == "task":
+            task = tasks_by_id.get(key[1], {})
+            paired.append({
+                "mrn": first["mrn"], "stage": first["stage"], "attempt": first["attempt"],
+                "start_ts": task.get("started_at"), "end_ts": task.get("finished_at"),
+                "outcome": _TASK_STATE_TO_OUTCOME.get(task.get("state"), "in_progress"),
+                "error_message": task.get("error_message") or first.get("error_message"),
+            })
+        else:
+            start = next((e for e in group if e["event_type"] == "start"), first)
+            terminal = next((e for e in group if e["event_type"] in ("success", "failure")), None)
+            if terminal is not None:
+                paired.append({
+                    "mrn": start["mrn"], "stage": start["stage"], "attempt": start["attempt"],
+                    "start_ts": start["ts"], "end_ts": terminal["ts"],
+                    "outcome": terminal["event_type"], "error_message": terminal.get("error_message"),
+                })
+            else:
+                paired.append({
+                    "mrn": start["mrn"], "stage": start["stage"], "attempt": start["attempt"],
+                    "start_ts": start["ts"], "end_ts": None,
+                    "outcome": "cancelled" if start["job_id"] in cancelled_jobs else "in_progress",
+                    "error_message": None,
+                })
+    return paired
 
 
 @router.get('/job/{job_id}')
@@ -587,7 +633,10 @@ async def patient_timeline(job_id: str, mrn: str):
         raise HTTPException(status_code=503, detail=str(e))
     try:
         events = status_db.get_patient_history(job_id, real_mrn)
-        return {"job_id": job_id, "mrn": mrn, "events": _anonymize_events(events)}
+        tasks_by_id = status_db.get_tasks_by_ids([e["task_id"] for e in events if e["task_id"] is not None])
+        cancelled_jobs = {job_id} if status_db.is_cancelled(job_id) else set()
+        paired = _pair_attempts(events, tasks_by_id, cancelled_jobs)
+        return {"job_id": job_id, "mrn": mrn, "events": _anonymize_events(paired)}
     except Exception as e:
         logger.exception("Failed to fetch patient timeline: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -607,7 +656,11 @@ async def patient_timeline_all(mrn: str):
         raise HTTPException(status_code=503, detail=str(e))
     try:
         events = status_db.get_patient_history_all_jobs(real_mrn)
-        return {"mrn": mrn, "events": _anonymize_events(events)}
+        tasks_by_id = status_db.get_tasks_by_ids([e["task_id"] for e in events if e["task_id"] is not None])
+        sync_job_ids = {e["job_id"] for e in events if e["task_id"] is None}
+        cancelled_jobs = {jid for jid in sync_job_ids if status_db.is_cancelled(jid)}
+        paired = _pair_attempts(events, tasks_by_id, cancelled_jobs)
+        return {"mrn": mrn, "events": _anonymize_events(paired)}
     except Exception as e:
         logger.exception("Failed to fetch patient timeline (all jobs): %s", e)
         raise HTTPException(status_code=500, detail=str(e))

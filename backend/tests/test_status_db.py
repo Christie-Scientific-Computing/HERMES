@@ -2,6 +2,7 @@ import uuid
 
 import pytest
 
+from backend.src.projects.db_client import ProjectsDB
 from backend.src.status.db_client import StatusDB
 
 
@@ -13,6 +14,15 @@ def db():
 @pytest.fixture
 def job_id():
     return f"test-{uuid.uuid4()}"
+
+
+@pytest.fixture
+def project_id():
+    """jobs.project_id has an FK to research_projects -- get_project_stats
+    tests below need a real row to attach jobs to."""
+    project_id = str(uuid.uuid4())
+    ProjectsDB().create_project(project_id, "Stats test project", "owner")
+    return project_id
 
 
 def test_create_job_is_idempotent(db, job_id):
@@ -299,6 +309,49 @@ def test_count_exported_patients_ignores_retrieve_stage(db, job_id):
 
 def test_count_exported_patients_unknown_job_returns_zeroes(db):
     assert db.count_exported_patients(f"nonexistent-{uuid.uuid4()}") == (0, 0)
+
+
+def test_get_project_stats_counts_restored_across_jobs(db, project_id):
+    """restored_count is distinct-MRN across ALL of a project's jobs, not
+    per-job -- mirrors count_imported_patients' own predicate."""
+    job_a, job_b = f"job-a-{uuid.uuid4()}", f"job-b-{uuid.uuid4()}"
+    db.create_job(job_a, project_id=project_id)
+    db.create_job(job_b, project_id=project_id)
+    db.add_event(job_a, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+    db.add_event(job_a, mrn="MRN2", stage="retrieve", event_type="success", details={"imported": False})
+    db.add_event(job_b, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})  # retry, same patient
+    db.add_event(job_b, mrn="MRN3", stage="retrieve", event_type="success", details={"imported": True})
+
+    stats = db.get_project_stats(project_id)
+
+    assert stats["restored_count"] == 2  # MRN1 (deduped across jobs) + MRN3
+
+
+def test_get_project_stats_sent_by_destination_grouped_and_deduped(db, project_id):
+    job_id = f"job-{uuid.uuid4()}"
+    db.create_job(job_id, project_id=project_id)
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success", details={"destination": "SCANNER_A"})
+    db.add_event(job_id, mrn="MRN1", stage="export", event_type="success", details={"destination": "SCANNER_A"})  # retry
+    db.add_event(job_id, mrn="MRN2", stage="export", event_type="success", details={"destination": "SCANNER_B"})
+    db.add_event(job_id, mrn="MRN3", stage="export", event_type="failure", error_message="boom")
+
+    stats = db.get_project_stats(project_id)
+
+    by_destination = {row["destination"]: row["count"] for row in stats["sent_by_destination"]}
+    assert by_destination == {"SCANNER_A": 1, "SCANNER_B": 1}
+
+
+def test_get_project_stats_ignores_other_projects_jobs(db, project_id):
+    other_project_id = str(uuid.uuid4())
+    ProjectsDB().create_project(other_project_id, "Other project", "owner")
+    other_job = f"job-other-{uuid.uuid4()}"
+    db.create_job(other_job, project_id=other_project_id)
+    db.add_event(other_job, mrn="MRN1", stage="retrieve", event_type="success", details={"imported": True})
+    db.add_event(other_job, mrn="MRN1", stage="export", event_type="success", details={"destination": "SCANNER_A"})
+
+    stats = db.get_project_stats(project_id)
+
+    assert stats == {"restored_count": 0, "sent_by_destination": []}
 
 
 # ---- list_recent_jobs_with_counts (Phase 4 admin dashboard) ----

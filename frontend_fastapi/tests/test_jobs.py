@@ -20,8 +20,8 @@ from frontend_fastapi.routers.jobs import _filter_patient_rows, _patient_rows
 PROJECT_ID = "proj-1"
 
 
-def _project(project_id=PROJECT_ID, title="Test Project"):
-    return {"project_id": project_id, "title": title}
+def _project(project_id=PROJECT_ID, title="Test Project", message_id=None):
+    return {"project_id": project_id, "title": title, "message_id": message_id}
 
 
 def _job_info(project_id=PROJECT_ID, is_combined=False, summary=None):
@@ -129,6 +129,38 @@ def test_submit_single_import_stays_on_page_and_does_not_redirect(client, make_u
     assert "Starting" in resp.text  # the progress widget rendered inline
 
 
+def test_submit_single_import_threads_mu_tolerance(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_user_active_projects"].return_value = [_project()]
+    mock_backend["batch_import_file"].return_value = {"job_id": "ignored", "total": 1}
+
+    resp = client.post("/submit", data={
+        "csrf_token": csrf_token(), "project_id": PROJECT_ID, "scope": "single", "mrn": "MRN1",
+        "do_import": "y", "import_level": "Planning data", "mu_tolerance": "0.5",
+    }, follow_redirects=False)
+
+    assert resp.status_code == 200
+    kwargs = mock_backend["batch_import_file"].call_args.kwargs
+    assert kwargs["mu_tolerance"] == 0.5
+
+
+def test_submit_single_import_mu_tolerance_defaults_to_none_when_blank(client, make_user, login, csrf_token, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_user_active_projects"].return_value = [_project()]
+    mock_backend["batch_import_file"].return_value = {"job_id": "ignored", "total": 1}
+
+    resp = client.post("/submit", data={
+        "csrf_token": csrf_token(), "project_id": PROJECT_ID, "scope": "single", "mrn": "MRN1",
+        "do_import": "y", "import_level": "Planning data",
+    }, follow_redirects=False)
+
+    assert resp.status_code == 200
+    kwargs = mock_backend["batch_import_file"].call_args.kwargs
+    assert kwargs["mu_tolerance"] is None
+
+
 def test_submit_batch_import_redirects_to_job_watch(client, make_user, login, csrf_token, mock_backend):
     make_user(username="alice")
     login("alice")
@@ -219,7 +251,7 @@ def test_submit_combined_import_and_dicom_export(client, make_user, login, csrf_
 
     resp = client.post("/submit", data={
         "csrf_token": csrf_token(), "project_id": PROJECT_ID, "scope": "single", "mrn": "MRN1",
-        "do_import": "y", "import_level": "Planning data",
+        "do_import": "y", "import_level": "Planning data", "mu_tolerance": "0.5",
         "do_export": "y", "export_kind": "dicom_move", "destination": "AE1",
     }, follow_redirects=False)
 
@@ -228,7 +260,8 @@ def test_submit_combined_import_and_dicom_export(client, make_user, login, csrf_
     kwargs = mock_backend["combined_import_export_file"].call_args.kwargs
     assert kwargs["export_kind"] == "dicom_move"
     assert kwargs["destination_or_collection"] == "AE1"
-    assert kwargs["message_id"] is None
+    assert kwargs["mu_tolerance"] == 0.5
+    assert "message_id" not in kwargs  # sourced by the backend from the project now, not this call
     mock_backend["batch_import_file"].assert_not_awaited()
     mock_backend["dicom_move_file"].assert_not_awaited()
 
@@ -253,22 +286,42 @@ def test_submit_export_only_proknow_calls_proknow_upload(client, make_user, logi
 def test_submit_export_only_dicom_calls_dicom_move_file(client, make_user, login, csrf_token, mock_backend):
     make_user(username="alice")
     login("alice")
-    mock_backend["list_user_active_projects"].return_value = [_project()]
+    mock_backend["list_user_active_projects"].return_value = [_project(message_id=42)]
     mock_backend["get_orthanc_modalities"].return_value = ["AE1"]
     mock_backend["dicom_move_file"].return_value = {"job_id": "ignored", "total": 1}
 
     resp = client.post("/submit", data={
         "csrf_token": csrf_token(), "project_id": PROJECT_ID, "scope": "single", "mrn": "MRN1",
-        "do_export": "y", "export_kind": "dicom_move", "destination": "AE1", "message_id": "42",
+        "do_export": "y", "export_kind": "dicom_move", "destination": "AE1",
     }, follow_redirects=False)
 
     assert resp.status_code == 200
     mock_backend["dicom_move_file"].assert_awaited_once()
     kwargs = mock_backend["dicom_move_file"].call_args.kwargs
     assert kwargs["destination"] == "AE1"
-    assert kwargs["message_id"] == 42
+    assert kwargs["message_id"] == 42  # sourced from the project, not the (now-removed) form field
     mock_backend["batch_import_file"].assert_not_awaited()
     mock_backend["combined_import_export_file"].assert_not_awaited()
+
+
+def test_submit_export_only_dicom_ignores_a_posted_message_id_field(client, make_user, login, csrf_token, mock_backend):
+    """message_id is no longer a JobSubmissionForm field -- a client that
+    posts one anyway (a stale form, a crafted request) must have zero
+    effect; only the project's own value is ever used."""
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_user_active_projects"].return_value = [_project(message_id=None)]
+    mock_backend["get_orthanc_modalities"].return_value = ["AE1"]
+    mock_backend["dicom_move_file"].return_value = {"job_id": "ignored", "total": 1}
+
+    resp = client.post("/submit", data={
+        "csrf_token": csrf_token(), "project_id": PROJECT_ID, "scope": "single", "mrn": "MRN1",
+        "do_export": "y", "export_kind": "dicom_move", "destination": "AE1", "message_id": "99999",
+    }, follow_redirects=False)
+
+    assert resp.status_code == 200
+    kwargs = mock_backend["dicom_move_file"].call_args.kwargs
+    assert kwargs["message_id"] is None
 
 
 def test_submit_choose_neither_import_nor_export_short_circuits_other_checks(client, make_user, login, csrf_token, mock_backend):
@@ -449,7 +502,7 @@ def test_patient_detail_renders_plans_and_timeline(client, make_user, login, moc
     mock_backend["list_projects"].return_value = [_project()]
     mock_backend["job_summary"].return_value = _job_info()
     mock_backend["patient_timeline"].return_value = {
-        "events": [{"ts": "t", "stage": "retrieve", "event_type": "success", "attempt": 1}],
+        "events": [{"mrn": "MRN1", "stage": "retrieve", "outcome": "success", "attempt": 1, "start_ts": "2026-01-01T00:00:00+00:00", "end_ts": "2026-01-01T00:00:05+00:00", "error_message": None}],
     }
     mock_backend["patient_plans"].return_value = {"available": True, "plans": [_plan()]}
     mock_backend["job_patients_summary"].return_value = {"patients": [{"mrn": "MRN1", "in_mosaiq": True}]}
@@ -506,7 +559,7 @@ def test_patient_detail_plans_failure_does_not_blank_the_timeline(client, make_u
     mock_backend["list_projects"].return_value = [_project()]
     mock_backend["job_summary"].return_value = _job_info()
     mock_backend["patient_timeline"].return_value = {
-        "events": [{"ts": "t", "stage": "retrieve", "event_type": "success", "attempt": 1}],
+        "events": [{"mrn": "MRN1", "stage": "retrieve", "outcome": "success", "attempt": 1, "start_ts": "2026-01-01T00:00:00+00:00", "end_ts": "2026-01-01T00:00:05+00:00", "error_message": None}],
     }
     mock_backend["patient_plans"].side_effect = backend_client.BackendError(500, "plans db down")
 
@@ -577,7 +630,7 @@ def test_results_lookup_by_patient_staff_can_search_without_a_job_id(client, mak
     login("admin")
     mock_backend["list_projects"].return_value = []
     mock_backend["patient_timeline_all"].return_value = {
-        "events": [{"ts": "t", "stage": "retrieve", "event_type": "success", "attempt": 1}],
+        "events": [{"mrn": "MRN1", "stage": "retrieve", "outcome": "success", "attempt": 1, "start_ts": "2026-01-01T00:00:00+00:00", "end_ts": "2026-01-01T00:00:05+00:00", "error_message": None}],
     }
 
     resp = client.get("/results?lookup=patient&mrn=MRN1")

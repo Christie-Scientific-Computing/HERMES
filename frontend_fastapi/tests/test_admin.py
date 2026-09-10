@@ -14,7 +14,7 @@ from frontend_fastapi import backend_client
 @pytest.fixture()
 def mock_backend(monkeypatch):
     mocks = {}
-    for name in ("admin_overview", "list_projects", "list_user_active_projects"):
+    for name in ("admin_overview", "list_projects", "list_user_active_projects", "list_error_reports"):
         m = AsyncMock()
         monkeypatch.setattr(backend_client, name, m)
         mocks[name] = m
@@ -23,6 +23,7 @@ def mock_backend(monkeypatch):
         "expiring_projects": [], "recent_jobs": [], "audit_chain_check": None,
     }
     mocks["list_projects"].return_value = []
+    mocks["list_error_reports"].return_value = []
     return mocks
 
 
@@ -99,3 +100,18 @@ def test_admin_overview_backend_error_shows_inline_message(client, make_user, lo
 
     assert resp.status_code == 200
     assert "backend down" in resp.text
+
+
+def test_admin_overview_shows_error_reports(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_error_reports"].return_value = [{
+        "id": 1, "username": "alice", "category": "error", "urgent": True,
+        "message": "Saw an MRN in an error banner.", "job_id": "job-1", "created_at": "2026-01-01T00:00:00Z",
+    }]
+
+    resp = client.get("/admin")
+
+    assert resp.status_code == 200
+    assert "Saw an MRN in an error banner." in resp.text
+    assert "Urgent" in resp.text
