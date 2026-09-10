@@ -30,6 +30,11 @@
 {% elif searched and not form.errors and not patients %}
 <div class="rounded-md p-4 bg-gray-50 text-gray-600 border border-gray-200 text-sm mb-4">No results found.</div>
 {% endif %}
+{% if truncated %}
+<div class="rounded-md p-4 bg-amber-50 text-amber-800 border border-amber-200 text-sm mb-4">
+  Showing the first 200 matching studies. Narrow your search to see the rest.
+</div>
+{% endif %}
 
 {% if patients %}
 {% for patient_id, studies in patients.items() %}

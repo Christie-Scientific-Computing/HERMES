@@ -5,11 +5,13 @@ local-PACS-move audit record is tagged with (project_id="localPACSTransfer").
 Mirrors frontend_fastapi/backend_client.py's own
 _find_or_create_superuser_bypass_project pattern (see that module), but done
 directly against ProjectsDB rather than over HTTP -- this code already runs
-inside the backend process, so there's no self-call to make. Unlike the
-superuser bypass project, this sentinel grants no membership to anyone: it
-exists only to satisfy jobs.project_id's foreign key. Authorization for a
-local-PACS move is entirely require_data_custodian, checked in
-frontend_fastapi before this endpoint is ever called (plan.md D005).
+inside the backend process, so there's no self-call to make. create_project
+adds its creator ("system") as an 'owner' member same as any other project,
+but -- unlike the superuser bypass project -- no real user is EVER added as
+a member of this one: it exists only to satisfy jobs.project_id's foreign
+key. Authorization for a local-PACS move is entirely require_data_custodian,
+checked in frontend_fastapi before this endpoint is ever called (plan.md
+D005); nothing here ever calls add_member for anyone else.
 """
 from datetime import datetime, timezone
 

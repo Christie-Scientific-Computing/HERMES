@@ -91,11 +91,21 @@ def test_echo_fails_against_an_unreachable_host(configured, monkeypatch):
 
 
 def test_find_studies_returns_matches(configured):
-    results = cc.find_studies(patient_id="ANON1")
-    assert len(results) == 1
-    assert results[0]["patient_id"] == "ANON1"
-    assert results[0]["study_instance_uid"] == "1.2.3.4"
-    assert results[0]["study_description"] == "Test study"
+    found = cc.find_studies(patient_id="ANON1")
+    assert found.truncated is False
+    assert len(found.matches) == 1
+    assert found.matches[0]["patient_id"] == "ANON1"
+    assert found.matches[0]["study_instance_uid"] == "1.2.3.4"
+    assert found.matches[0]["study_description"] == "Test study"
+
+
+def test_find_studies_reports_truncation_past_the_cap(configured, monkeypatch):
+    monkeypatch.setattr(cc, "MAX_FIND_RESULTS", 0)
+
+    found = cc.find_studies(patient_id="ANON1")
+
+    assert found.truncated is True
+    assert found.matches == []
 
 
 def test_move_study_sends_the_explicit_destination_aet(configured):

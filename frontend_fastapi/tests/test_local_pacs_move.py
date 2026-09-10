@@ -105,11 +105,11 @@ def test_no_destinations_configured_shows_a_clear_message_not_a_broken_dropdown(
     make_user("bob", is_staff=True)
     login("bob")
     monkeypatch.setattr(cc, "is_configured", Mock(return_value=True))
-    monkeypatch.setattr(cc, "find_studies", Mock(return_value=[{
+    monkeypatch.setattr(cc, "find_studies", Mock(return_value=cc.FindResult(matches=[{
         "patient_id": "ANON1", "study_instance_uid": "1.2.3", "study_date": "20260101",
         "study_description": "Planning CT", "modalities_in_study": "CT", "accession_number": "ACC1",
         "series_count": "1",
-    }]))
+    }], truncated=False)))
 
     resp = client.get("/local_pacs", params={"patient_id": "ANON1", "submitted": "1"})
 

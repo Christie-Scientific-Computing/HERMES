@@ -92,8 +92,12 @@ def _get_config() -> ConquestConfig:
             "Local PACS (Conquest) is not fully configured -- LOCAL_PACS_HOST, LOCAL_PACS_PORT, "
             "LOCAL_PACS_AE_TITLE and HERMES_FRONTEND_AE_TITLE must all be set."
         )
+    try:
+        port_number = int(port)
+    except ValueError:
+        raise ConquestNotConfigured(f"LOCAL_PACS_PORT must be a number, got {port!r}.")
     return ConquestConfig(
-        host=host, port=int(port), ae_title=ae_title, calling_ae_title=calling_ae_title,
+        host=host, port=port_number, ae_title=ae_title, calling_ae_title=calling_ae_title,
         timeout_seconds=settings.LOCAL_PACS_TIMEOUT_SECONDS,
     )
 
@@ -139,6 +143,16 @@ def echo() -> None:
             raise ConquestOperationFailed(
                 f"Local PACS rejected the C-ECHO (status 0x{status.Status:04X}).", status_code=status.Status,
             )
+    except ConquestError:
+        raise
+    except Exception as e:
+        # A malformed/unexpected response from the DICOM peer mid-operation
+        # (not just at association time, already handled by _associate)
+        # must still come out as a ConquestError -- every caller (F002/F004)
+        # only catches cc.ConquestError, and F004 specifically needs this to
+        # reach it so a failed move still gets audited (F005), not silently
+        # dropped by an unclassified exception.
+        raise ConquestOperationFailed(f"Local PACS C-ECHO failed unexpectedly: {e}") from e
     finally:
         assoc.release()
 
@@ -156,10 +170,16 @@ def _date_range(date_from, date_to) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class FindResult:
+    matches: list[dict]
+    truncated: bool
+
+
 def find_studies(
     *, patient_id: str = "", study_date_from=None, study_date_to=None,
     study_description: str = "", modalities_in_study: str = "",
-) -> list[dict]:
+) -> FindResult:
     """Study-level C-FIND. Every argument is an optional search key -- callers
     (F002) are responsible for requiring at least one to be non-empty before
     calling this, since an unconstrained query isn't the goal here."""
@@ -174,22 +194,31 @@ def find_studies(
         setattr(ds, tag, "")
 
     results = []
+    truncated = False
     assoc = _associate(cfg, [PatientRootQueryRetrieveInformationModelFind])
     try:
         for status, identifier in assoc.send_c_find(ds, PatientRootQueryRetrieveInformationModelFind):
             if status is None:
                 raise ConquestTimeout(f"Local PACS at {cfg.host}:{cfg.port} did not respond to C-FIND in time.")
             if status.Status in (0xFF00, 0xFF01):
-                if identifier is not None and len(results) < MAX_FIND_RESULTS:
-                    results.append(_study_to_dict(identifier))
+                if identifier is not None:
+                    if len(results) < MAX_FIND_RESULTS:
+                        results.append(_study_to_dict(identifier))
+                    else:
+                        truncated = True
+                        break  # pynetdicom cancels the remaining C-FIND on early generator exit
                 continue
             if status.Status != 0x0000:
                 raise ConquestOperationFailed(
                     f"Local PACS C-FIND failed (status 0x{status.Status:04X}).", status_code=status.Status,
                 )
+    except ConquestError:
+        raise
+    except Exception as e:
+        raise ConquestOperationFailed(f"Local PACS C-FIND failed unexpectedly: {e}") from e
     finally:
         assoc.release()
-    return results
+    return FindResult(matches=results, truncated=truncated)
 
 
 def find_series(*, study_instance_uid: str) -> list[dict]:
@@ -215,6 +244,10 @@ def find_series(*, study_instance_uid: str) -> list[dict]:
                 raise ConquestOperationFailed(
                     f"Local PACS C-FIND failed (status 0x{status.Status:04X}).", status_code=status.Status,
                 )
+    except ConquestError:
+        raise
+    except Exception as e:
+        raise ConquestOperationFailed(f"Local PACS C-FIND failed unexpectedly: {e}") from e
     finally:
         assoc.release()
     return results
@@ -288,6 +321,10 @@ def move_study(*, study_instance_uid: str, destination_ae: str) -> MoveResult:
                 warning=getattr(status, "NumberOfWarningSuboperations", 0) or 0,
                 status_code=status.Status,
             )
+    except ConquestError:
+        raise
+    except Exception as e:
+        raise ConquestOperationFailed(f"Local PACS C-MOVE failed unexpectedly: {e}") from e
     finally:
         assoc.release()
     return final

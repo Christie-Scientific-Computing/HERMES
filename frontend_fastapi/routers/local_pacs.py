@@ -57,6 +57,7 @@ async def local_pacs_browse(
 ):
     form = LocalPacsSearchForm(formdata=request.query_params)
     results: list[dict] = []
+    truncated = False
     conquest_error = None
     # "submitted" (a hidden field always present on the search form, see
     # browse.html) distinguishes an actual form submission (even one with
@@ -70,12 +71,13 @@ async def local_pacs_browse(
             conquest_error = "Local PACS (Conquest) is not configured on this deployment."
         else:
             try:
-                results = await asyncio.to_thread(
+                found = await asyncio.to_thread(
                     cc.find_studies,
                     patient_id=form.patient_id.data or "", study_date_from=form.study_date_from.data,
                     study_date_to=form.study_date_to.data, study_description=form.study_description.data or "",
                     modalities_in_study=form.modalities_in_study.data or "",
                 )
+                results, truncated = found.matches, found.truncated
             except cc.ConquestError as e:
                 conquest_error = str(e)
 
@@ -86,7 +88,7 @@ async def local_pacs_browse(
     destinations = db.query(LocalPacsDestination).order_by(LocalPacsDestination.display_name).all()
     return templates.TemplateResponse(request, "local_pacs/browse.html", {
         **ctx, "form": form, "patients": patients, "conquest_error": conquest_error, "searched": searched,
-        "search_query": _search_query(form), "destinations": destinations,
+        "truncated": truncated, "search_query": _search_query(form), "destinations": destinations,
         "can_move": user.is_staff,
     })
 
@@ -121,6 +123,11 @@ async def local_pacs_move(
         ("patient_id", "study_date_from", "study_date_to", "study_description", "modalities_in_study")
         if form_data.get(k)
     }
+    # "submitted" must be carried through too -- without it, local_pacs_browse
+    # treats the redirect as a fresh, un-submitted page load and skips
+    # re-running the search entirely (see that route's own "submitted" check),
+    # silently dropping the results the custodian was just looking at.
+    redirect_params["submitted"] = "1"
     redirect_url = f"{request.url_for('local_pacs_browse')}?{urlencode(redirect_params)}"
 
     destination = db.get(LocalPacsDestination, int(destination_id)) if destination_id else None
