@@ -183,6 +183,75 @@ def test_handle_one_denial_with_unknown_project_also_cancels(tasks_db, status_db
     assert row["state"] == "cancelled"
 
 
+# --- Import handler: _run_import / _get_importer ---
+#
+# Importer itself opens real ProKnow/Orthanc connections eagerly (see
+# _get_importer's own comment), so -- same reasoning as the export handlers
+# below -- these monkeypatch worker.Importer to a fake, never touching a
+# real one. mu_tolerance is deliberately NOT part of the cache key (an
+# earlier version of this code keyed on it too, which would leak one live
+# Importer per distinct value forever) -- what's worth testing here is that
+# the cache still only varies on import_level, and that _run_import mutates
+# the cached instance's mu_tolerance (via retrieve_logic.resolve_mu_tolerance)
+# on every call rather than baking it into construction.
+
+@pytest.fixture
+def _restore_importer_cache():
+    """_importer_cache is module-level state, same reasoning as
+    _restore_handlers above."""
+    original = dict(worker._importer_cache)
+    yield
+    worker._importer_cache.clear()
+    worker._importer_cache.update(original)
+
+
+class _FakeImporter:
+    def __init__(self, import_level):
+        self.import_level = import_level
+        self.mu_tolerance = None
+
+    def handle_patient(self, mrn):
+        return {"status": "success"}
+
+
+def test_get_importer_caches_per_import_level_only(monkeypatch, _restore_importer_cache):
+    worker._importer_cache.clear()
+    monkeypatch.setattr(worker, "Importer", _FakeImporter)
+
+    a = worker._get_importer("Planning data")
+    b = worker._get_importer("Planning data")
+    c = worker._get_importer("Images only")
+
+    assert a is b  # same import_level -> cached, no second Importer built
+    assert a is not c
+
+
+def test_run_import_reuses_the_cached_importer_across_different_mu_tolerances(monkeypatch, _restore_importer_cache):
+    """The whole point of not keying the cache on mu_tolerance: two tasks
+    with the same import_level but different mu_tolerance must reuse the
+    SAME Importer (and its already-open connections), not mint a new one."""
+    worker._importer_cache.clear()
+    monkeypatch.setattr(worker, "Importer", _FakeImporter)
+
+    worker._run_import({"real_id": "R1", "params": {"import_level": "Planning data", "mu_tolerance": 0.5}})
+    first = worker._importer_cache["Planning data"]
+    worker._run_import({"real_id": "R2", "params": {"import_level": "Planning data", "mu_tolerance": 1.0}})
+    second = worker._importer_cache["Planning data"]
+
+    assert first is second
+    assert second.mu_tolerance == 1.0  # mutated to the second task's value
+
+
+def test_run_import_defaults_mu_tolerance_to_the_module_default_when_task_omits_it(monkeypatch, _restore_importer_cache):
+    worker._importer_cache.clear()
+    monkeypatch.setattr(worker, "Importer", _FakeImporter)
+    monkeypatch.setattr("backend.src.retrieve.logic.MU_TOLERANCE_DEFAULT", 2.5)
+
+    worker._run_import({"real_id": "R1", "params": {"import_level": "Planning data"}})
+
+    assert worker._importer_cache["Planning data"].mu_tolerance == 2.5
+
+
 # --- Export handlers: _run_export, dispatched via _EXPORT_FACTORIES ---
 #
 # All three export kinds share one _run_export dispatcher that reuses

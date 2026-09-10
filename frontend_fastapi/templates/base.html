@@ -130,7 +130,7 @@
                 {% endif %}
               </div>
             </details>
-            <span class="text-gray-300 text-sm">{{ user.first_name ~ " " ~ user.last_name if user.first_name else user.username }}</span>
+            <a href="/accounts/me" class="text-gray-300 text-sm hover:text-white">{{ user.first_name ~ " " ~ user.last_name if user.first_name else user.username }}</a>
             <form method="post" action="/accounts/logout" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="text-gray-400 hover:text-white text-sm">Sign out</button>

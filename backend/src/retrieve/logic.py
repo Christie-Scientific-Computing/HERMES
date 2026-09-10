@@ -47,6 +47,33 @@ PINNACLE_PUSH_HOST = os.getenv('PINNACLE_PUSH_HOST')
 PINNACLE_PUSH_PORT = int(os.getenv('PINNACLE_PUSH_PORT'))
 PINNACLE_PUSH_AE_TITLE = os.getenv('PINNACLE_PUSH_AE_TITLE')
 
+def _resolve_mu_tolerance_default(raw: str | None) -> float | None:
+    """
+    Fallback MU tolerance for the Pinnacle export, used whenever a job
+    doesn't submit its own (retrieve/endpoints.py's batch_import_file). No
+    sane clinical default exists to hardcode, so this is None (and
+    'mu_tolerance' simply carries None into the payload) when unset, rather
+    than inventing a number -- PinnacleExport's own entry() doesn't consume
+    this field yet either, see the plan doc's own "out of scope" note.
+
+    A plain function (not inlined at module scope) so a test can exercise
+    the parsing rule directly, without reloading this whole module (which
+    would also mint a new Importer class object, going stale for any other
+    module that already holds the original one).
+    """
+    return float(raw) if raw else None
+
+
+MU_TOLERANCE_DEFAULT = _resolve_mu_tolerance_default(os.getenv('MU_TOLERANCE_DEFAULT'))
+
+
+def resolve_mu_tolerance(explicit: float | None) -> float | None:
+    """The "per-job value wins, else the env default" rule -- shared by
+    Importer.__init__ (a fresh Importer) and backend/worker.py's
+    _run_import (mutating a cached one before reuse, see that module's own
+    comment for why mu_tolerance deliberately isn't part of the cache key)."""
+    return explicit if explicit is not None else MU_TOLERANCE_DEFAULT
+
 #Proknow setup
 PROKNOW_URL = 'https://nhs.proknow.com'
 PROKNOW_WORKSPACE = 'RBV - Christie'
@@ -54,11 +81,12 @@ PROKNOW_WORKSPACE = 'RBV - Christie'
 
 class Importer():
 
-    def __init__(self, import_level:str | None = None):
+    def __init__(self, import_level:str | None = None, mu_tolerance: float | None = None):
         self.pk: ProKnow = None # Defining here for clarity
         self.ot: Orthanc = None
         self._init_connections() # This populates above
         self.dicom_sources = [PULL_MODALITY_AET_ONE, PULL_MODALITY_AET_TWO]
+        self.mu_tolerance = resolve_mu_tolerance(mu_tolerance)
 
         # Read-only reader for PinnacleExport's own status/errors tables (see
         # search_pinnacle_db) -- cheap to construct, doesn't connect eagerly.
@@ -308,7 +336,11 @@ class Importer():
             'remote_IP': PINNACLE_PUSH_HOST,
             'remote_port': PINNACLE_PUSH_PORT,
             'remote_AE_title': PINNACLE_PUSH_AE_TITLE,
-            'requests': export_requests
+            'requests': export_requests,
+            # Threaded through for PinnacleExport's own entry() to consume --
+            # not consumed there yet (separate repo/PR, see the plan doc's
+            # "out of scope" note), so this is a no-op downstream until then.
+            'mu_tolerance': self.mu_tolerance,
         }
         pinn_entry(payload)
 

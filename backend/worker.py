@@ -40,7 +40,7 @@ from backend.src.status.db_client import StatusDB
 from backend.src.notifications.db_client import NotificationsDB
 from backend.src.projects import enforcement
 from backend.src.common.sse import BatchItem
-from backend.src.retrieve.logic import Importer
+from backend.src.retrieve.logic import Importer, resolve_mu_tolerance
 from backend.src.retrieve.endpoints import Response as ImportResponse
 from backend.src.export import endpoints as export_endpoints
 from backend.scripts.verify_audit_chain import fetch_events_in_order, fetch_chain_state, verify_chain
@@ -73,6 +73,19 @@ def _handle_sigterm(signum, frame):
 # sets self.destination/self.tmp_dir -- no I/O happens until a method is
 # actually called -- so it needs no such cache; a fresh Exporter per task
 # costs nothing and keeps its destination scoped to exactly one task.
+#
+# mu_tolerance is deliberately NOT part of this cache key, unlike
+# import_level: it's a per-job override (retrieve/endpoints.py's
+# batch_import_file) that never affects what needs caching (the ProKnow/
+# Orthanc connections) -- it's a plain attribute _run_import overwrites on
+# the cached instance before every call. Keying on it too (an earlier
+# version of this cache did) would mint -- and never evict -- one live
+# Importer (each holding its own open connections) per distinct float a
+# user ever submits, an unbounded connection leak in a process meant to run
+# indefinitely. Mutating in place instead is safe here specifically because
+# backend/worker.py processes exactly one task at a time (see this module's
+# own docstring/CLAUDE.md's "Async threading") -- there's no concurrent
+# handle_patient() call that could see another task's value mid-flight.
 _importer_cache: dict[str, Importer] = {}
 
 
@@ -83,7 +96,10 @@ def _get_importer(import_level: str) -> Importer:
 
 
 def _run_import(task: dict) -> dict:
-    res = _get_importer(task["params"]["import_level"]).handle_patient(task["real_id"])
+    params = task["params"]
+    importer = _get_importer(params["import_level"])
+    importer.mu_tolerance = resolve_mu_tolerance(params.get("mu_tolerance"))
+    res = importer.handle_patient(task["real_id"])
     return ImportResponse(mrn=task["real_id"], **res).model_dump(exclude={"mrn"}, exclude_none=True)
 
 

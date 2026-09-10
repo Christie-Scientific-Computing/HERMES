@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% from "research_projects/_destination_picker.html" import destination_picker %}
+{% block title %}Amend {{ project.title }} — HERMES{% endblock %}
+{% block content %}
+<a href="/projects/{{ project.project_id }}" class="text-sm text-hermes-700 hover:underline">&larr; {{ project.title }}</a>
+
+<div class="max-w-lg mt-2">
+  <h1 class="text-xl font-semibold text-gray-900 mb-1">Propose an amendment</h1>
+  <p class="text-sm text-gray-500 mb-6">
+    Prefilled with the project's current destinations/message ID. The changes below stay pending --
+    and the project keeps working exactly as it does now -- until a data custodian approves them.
+  </p>
+  {% if destination_error %}
+  <div class="rounded-md p-4 bg-yellow-50 text-yellow-800 border border-yellow-200 text-sm mb-4">{{ destination_error }}</div>
+  {% endif %}
+  <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if form.form_errors %}
+    <p class="text-sm text-red-600">{{ form.form_errors|join("; ") }}</p>
+    {% endif %}
+    {{ destination_picker(form, None) }}
+    <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+      Propose amendment
+    </button>
+  </form>
+</div>
+{% endblock %}
