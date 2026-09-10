@@ -1,7 +1,7 @@
 ---
 generated_at: 2026-09-10T00:00:00Z
-staleness_key: git:da41479f97662838fe4a5a64c294303e652f667f873ad981c098f93c45379fb2
-generated_at_commit: 5a7b195b5a7ed13364edcdbcd451ead1c204167b
+staleness_key: git:1db676d0ac1b7402de27b507dc6c015aae06cb1094c22d51c1915ccda14c8d6f
+generated_at_commit: 607e82eb2a10f31701f6c547865e29d6530f736b
 ---
 
 # Architecture Map
