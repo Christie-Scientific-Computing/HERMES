@@ -48,6 +48,8 @@ from frontend_fastapi.templating import templates
 
 router = APIRouter(tags=["jobs"])
 
+RESULTS_JOBS_LIMIT = 25
+
 
 async def _project_choices_for(user: User) -> list[dict]:
     """Projects to offer on a submission form's project_id field, fetched
@@ -467,11 +469,17 @@ async def results_lookup(
     project_jobs = []
     for p in users_projects:
         try:
-            for j in await backend_client.list_project_jobs(p["project_id"]):
+            # limit=25 per project (not the dashboard's default 10) so a
+            # user with jobs concentrated in one project doesn't lose real
+            # recent jobs to a too-low per-call limit before the final
+            # sort/slice to RESULTS_JOBS_LIMIT below.
+            for j in await backend_client.list_project_jobs_with_counts(p["project_id"], limit=RESULTS_JOBS_LIMIT):
                 project_jobs.append({**j, "project_title": p["title"]})
         except backend_client.BackendError:
             pass
     project_jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    project_jobs_total = len(project_jobs)
+    project_jobs = project_jobs[:RESULTS_JOBS_LIMIT]
 
     query_params = request.query_params
     job_form = JobLookupForm(formdata=query_params if lookup == "job" else None)
@@ -520,7 +528,7 @@ async def results_lookup(
                 error = e.detail
 
     return templates.TemplateResponse(request, "jobs/results_lookup.html", {
-        **ctx, "project_jobs": project_jobs,
+        **ctx, "project_jobs": project_jobs, "project_jobs_total": project_jobs_total,
         "lookup": lookup, "job_form": job_form, "patient_form": patient_form,
         "summary": summary, "rows": rows, "pills": pills, "total": total,
         "looked_up_job_id": looked_up_job_id, "events": events, "error": error,

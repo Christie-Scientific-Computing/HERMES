@@ -80,3 +80,103 @@ def test_template_context_backend_health_is_none_when_unreachable(client, monkey
     monkeypatch.setattr(backend_client, "get_backend_health", _raise)
     ctx = client.get("/test/context").json()
     assert ctx["backend_health"] is None
+
+
+# ---- nav_review_queue_count (F002) / nav_urgent_reports_count (F004) ----
+
+def test_review_queue_count_for_staff_sums_submitted_and_amendments(client, make_user, login, monkeypatch):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    async def _list_projects(username=None, status=None):
+        # list_user_active_projects (nav_active_projects) also calls this
+        # with username= set -- only the review-badge's own username-less,
+        # status="submitted" call should contribute to the count.
+        if username is not None:
+            return []
+        return [{"project_id": "p1"}]
+
+    async def _amendments():
+        return [{"project_id": "p2"}, {"project_id": "p3"}]
+
+    monkeypatch.setattr(backend_client, "list_projects", _list_projects)
+    monkeypatch.setattr(backend_client, "list_pending_amendments", _amendments)
+
+    ctx = client.get("/test/context").json()
+
+    assert ctx["nav_review_queue_count"] == 3
+
+
+def test_review_queue_count_absent_for_non_staff(client, make_user, login, monkeypatch):
+    make_user(username="alice", is_staff=False)
+    login("alice")
+
+    async def _list_projects(username=None, status=None):
+        return [{"project_id": "p1"}]
+
+    monkeypatch.setattr(backend_client, "list_projects", _list_projects)
+
+    ctx = client.get("/test/context").json()
+
+    assert ctx["nav_review_queue_count"] == 0
+
+
+def test_review_queue_count_degrades_to_zero_on_backend_error(client, make_user, login, monkeypatch):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    async def _list_projects(username=None, status=None):
+        if username is not None:
+            return []
+        raise backend_client.BackendError(503, "backend down")
+
+    monkeypatch.setattr(backend_client, "list_projects", _list_projects)
+
+    ctx = client.get("/test/context").json()
+
+    assert ctx["nav_review_queue_count"] == 0
+
+
+def test_urgent_reports_count_for_staff_counts_only_urgent(client, make_user, login, monkeypatch):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    async def _reports(limit=100, unaddressed_only=False):
+        return [
+            {"id": 1, "urgent": True, "resolved_at": None},
+            {"id": 2, "urgent": False, "resolved_at": None},
+        ]
+
+    monkeypatch.setattr(backend_client, "list_error_reports", _reports)
+
+    ctx = client.get("/test/context").json()
+
+    assert ctx["nav_urgent_reports_count"] == 1
+
+
+def test_urgent_reports_count_absent_for_non_staff(client, make_user, login, monkeypatch):
+    make_user(username="alice", is_staff=False)
+    login("alice")
+
+    async def _reports(limit=100, unaddressed_only=False):
+        return [{"id": 1, "urgent": True, "resolved_at": None}]
+
+    monkeypatch.setattr(backend_client, "list_error_reports", _reports)
+
+    ctx = client.get("/test/context").json()
+
+    assert ctx["nav_urgent_reports_count"] == 0
+
+
+def test_urgent_reports_count_degrades_to_zero_on_backend_error(client, make_user, login, monkeypatch):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    async def _raise(limit=100, unaddressed_only=False):
+        raise backend_client.BackendError(503, "backend down")
+
+    monkeypatch.setattr(backend_client, "list_error_reports", _raise)
+
+    ctx = client.get("/test/context").json()
+
+    assert ctx["nav_urgent_reports_count"] == 0

@@ -14,7 +14,10 @@ from frontend_fastapi import backend_client
 @pytest.fixture()
 def mock_backend(monkeypatch):
     mocks = {}
-    for name in ("admin_overview", "list_projects", "list_user_active_projects", "list_error_reports"):
+    for name in (
+        "admin_overview", "list_projects", "list_user_active_projects", "list_error_reports",
+        "mark_error_report_addressed",
+    ):
         m = AsyncMock()
         monkeypatch.setattr(backend_client, name, m)
         mocks[name] = m
@@ -115,3 +118,89 @@ def test_admin_overview_shows_error_reports(client, make_user, login, mock_backe
     assert resp.status_code == 200
     assert "Saw an MRN in an error banner." in resp.text
     assert "Urgent" in resp.text
+
+
+def test_admin_overview_section_order(client, make_user, login, mock_backend):
+    """Error reports & feedback should sit between Expiring soon and Recent
+    jobs (D003/F003 in .plans/ui-polish/plan.md)."""
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    resp = client.get("/admin")
+
+    text = resp.text
+    assert text.index("Expiring soon") < text.index("Error reports") < text.index("Recent jobs")
+
+
+def test_admin_overview_amber_indicator_for_non_urgent_unaddressed(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_error_reports"].return_value = [
+        {"id": 1, "username": "alice", "category": "feedback", "urgent": False, "message": "nice UI", "job_id": None, "created_at": "2026-01-01T00:00:00Z", "resolved_at": None, "resolved_by": None},
+    ]
+
+    resp = client.get("/admin")
+
+    assert 'bg-amber-500' in resp.text
+    assert 'bg-red-600" title="Unaddressed' not in resp.text
+
+
+def test_admin_overview_red_indicator_for_urgent_unaddressed(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_error_reports"].return_value = [
+        {"id": 1, "username": "alice", "category": "error", "urgent": True, "message": "urgent issue", "job_id": None, "created_at": "2026-01-01T00:00:00Z", "resolved_at": None, "resolved_by": None},
+    ]
+
+    resp = client.get("/admin")
+
+    assert 'bg-red-600" title="Unaddressed' in resp.text
+
+
+def test_admin_overview_no_indicator_when_nothing_unaddressed(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_error_reports"].return_value = [
+        {"id": 1, "username": "alice", "category": "error", "urgent": True, "message": "urgent issue", "job_id": None, "created_at": "2026-01-01T00:00:00Z", "resolved_at": "2026-01-02T00:00:00Z", "resolved_by": "admin"},
+    ]
+
+    resp = client.get("/admin")
+
+    assert 'bg-red-600" title="Unaddressed' not in resp.text
+    assert 'bg-amber-500" title="Unaddressed' not in resp.text
+    assert "Nothing outstanding." in resp.text
+
+
+def test_admin_overview_show_all_includes_addressed_reports(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_error_reports"].return_value = [
+        {"id": 1, "username": "alice", "category": "error", "urgent": False, "message": "already handled", "job_id": None, "created_at": "2026-01-01T00:00:00Z", "resolved_at": "2026-01-02T00:00:00Z", "resolved_by": "admin"},
+    ]
+
+    default_resp = client.get("/admin")
+    assert "already handled" not in default_resp.text
+
+    all_resp = client.get("/admin?show=all")
+    assert "already handled" in all_resp.text
+    assert "Addressed by admin" in all_resp.text
+
+
+def test_mark_error_report_addressed_requires_staff(client, make_user, login, csrf_token):
+    make_user(username="alice", is_staff=False)
+    login("alice")
+
+    resp = client.post("/admin/error_reports/1/resolve", data={"csrf_token": csrf_token()})
+
+    assert resp.status_code == 403
+
+
+def test_mark_error_report_addressed_redirects_to_admin(client, make_user, login, mock_backend, csrf_token):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+
+    resp = client.post("/admin/error_reports/1/resolve", data={"csrf_token": csrf_token()}, follow_redirects=False)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "http://localhost/admin"
+    mock_backend["mark_error_report_addressed"].assert_awaited_once_with(1, "admin")

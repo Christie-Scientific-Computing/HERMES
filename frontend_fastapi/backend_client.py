@@ -434,5 +434,9 @@ async def create_error_report(
     })
 
 
-async def list_error_reports(limit: int = 100) -> list[dict]:
-    return (await _get("/error_reports", params={"limit": limit}))["error_reports"]
+async def list_error_reports(limit: int = 100, unaddressed_only: bool = False) -> list[dict]:
+    return (await _get("/error_reports", params={"limit": limit, "unaddressed_only": unaddressed_only}))["error_reports"]
+
+
+async def mark_error_report_addressed(report_id: int, username: str) -> dict:
+    return await _post(f"/error_reports/{report_id}/resolve", params={"username": username})

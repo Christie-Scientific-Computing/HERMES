@@ -202,6 +202,8 @@ def app(SessionFactory):
             "csrf_token": ctx["csrf_token"],
             "nav_active_projects": ctx["nav_active_projects"],
             "backend_health": ctx["backend_health"],
+            "nav_review_queue_count": ctx["nav_review_queue_count"],
+            "nav_urgent_reports_count": ctx["nav_urgent_reports_count"],
         }
 
     return test_app

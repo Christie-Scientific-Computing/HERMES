@@ -1,27 +1,17 @@
 {% extends "base.html" %}
-{% from "research_projects/_macros.html" import project_card %}
+{% from "research_projects/_macros.html" import project_table %}
 {% block title %}Review Queue — HERMES{% endblock %}
 {% block content %}
 <h1 class="text-xl font-semibold text-gray-900 mb-4">Projects awaiting review</h1>
 {% if backend_error %}
 <div class="rounded-md p-4 bg-red-50 text-red-800 border border-red-200 text-sm mb-4">{{ backend_error }}</div>
 {% endif %}
-{% if projects %}
-<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-  {% for project in projects %}
-    {{ project_card(project) }}
-  {% endfor %}
-</div>
-{% elif not amendments %}
-<p class="text-gray-400 text-center py-16">Nothing waiting for review.</p>
+{% if projects or not amendments %}
+{{ project_table(projects, "Nothing waiting for review.") }}
 {% endif %}
 
 {% if amendments %}
 <h2 class="text-lg font-semibold text-gray-900 mt-8 mb-4">Approved projects with a pending amendment</h2>
-<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-  {% for project in amendments %}
-    {{ project_card(project) }}
-  {% endfor %}
-</div>
+{{ project_table(amendments, "") }}
 {% endif %}
 {% endblock %}

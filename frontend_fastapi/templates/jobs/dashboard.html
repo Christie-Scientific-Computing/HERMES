@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% from "jobs/_macros.html" import no_projects_notice %}
-{% block title %}Dashboard — HERMES{% endblock %}
+{% block title %}Home — HERMES{% endblock %}
 {% block content %}
-<h1 class="text-2xl font-semibold text-gray-900 mb-1">Dashboard</h1>
+<h1 class="text-2xl font-semibold text-gray-900 mb-1">Home</h1>
 {% if not projects %}
 <div class="mb-6">{{ no_projects_notice() }}</div>
 {% endif %}
@@ -35,7 +35,7 @@
       {% for job in recent_jobs %}
       <tr>
         <td class="py-1 pr-4"><a class="text-hermes-700 hover:underline" href="/jobs/{{ job.job_id }}">{{ job.description }}</a></td>
-        <td class="py-1 pr-4 text-gray-500">{{ job.created_at }}</td>
+        <td class="py-1 pr-4 text-gray-500">{{ job.created_at | hermes_timestamp }}</td>
         <td class="py-1 pr-4 tabular-nums">{{ job.imported_count }} / {{ job.submitted_count }}</td>
         <td class="py-1 tabular-nums">{{ job.exported_count }} / {{ job.export_attempted_count }}</td>
       </tr>

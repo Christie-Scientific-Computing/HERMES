@@ -159,6 +159,8 @@ async def get_template_context(
     """
     nav_active_projects: list[dict] = []
     nav_notifications: list[dict] = []
+    nav_review_queue_count = 0
+    nav_urgent_reports_count = 0
     try:
         backend_health = await backend_client.get_backend_health()
     except (backend_client.BackendError, httpx.HTTPError):
@@ -182,6 +184,23 @@ async def get_template_context(
             # Same reasoning as nav_active_projects above -- the dropdown is
             # a convenience, not load-bearing.
             nav_notifications = []
+        if user.is_staff:
+            try:
+                # Same pair of calls review_queue's own route already makes
+                # (F002) -- the badge counts exactly what that page would
+                # show, computed fresh, no persisted row.
+                pending = await backend_client.list_projects(status="submitted")
+                amendments = await backend_client.list_pending_amendments()
+                nav_review_queue_count = len(pending) + len(amendments)
+            except (backend_client.BackendError, httpx.HTTPError):
+                nav_review_queue_count = 0
+            try:
+                # F004 -- unaddressed AND urgent specifically (the amber,
+                # non-urgent case stays admin-page-only, per F003).
+                urgent_unaddressed = await backend_client.list_error_reports(unaddressed_only=True)
+                nav_urgent_reports_count = sum(1 for r in urgent_unaddressed if r.get("urgent"))
+            except (backend_client.BackendError, httpx.HTTPError):
+                nav_urgent_reports_count = 0
     return {
         "request": request,
         "user": user,
@@ -195,5 +214,7 @@ async def get_template_context(
         # rows): this is live-computed on every render, same as
         # research_projects.py's own expiring-soon banner.
         "nav_expiring_soon": expiring_soon(nav_active_projects),
+        "nav_review_queue_count": nav_review_queue_count,
+        "nav_urgent_reports_count": nav_urgent_reports_count,
         "backend_health": backend_health,
     }

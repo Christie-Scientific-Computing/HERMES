@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "research_projects/_macros.html" import project_card %}
+{% from "research_projects/_macros.html" import project_table %}
 {% block title %}Projects — HERMES{% endblock %}
 {% block content %}
 <div class="flex items-center justify-between mb-1">
@@ -41,16 +41,8 @@
 </div>
 {% endif %}
 
-{% if projects %}
-<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-  {% for project in projects %}
-    {{ project_card(project) }}
-  {% endfor %}
-</div>
-{% else %}
-<div class="text-center py-16 text-gray-400">
-  <p>{% if user.is_staff %}No projects match this filter.{% else %}You're not part of any project yet.{% endif %}</p>
-  {% if not user.is_staff %}<a href="/projects/new" class="text-hermes-700 underline">Request one</a> to get started.{% endif %}
-</div>
+{{ project_table(projects, "No projects match this filter." if user.is_staff else "You're not part of any project yet.") }}
+{% if not projects and not user.is_staff %}
+<p class="text-center text-gray-400"><a href="/projects/new" class="text-hermes-700 underline">Request one</a> to get started.</p>
 {% endif %}
 {% endblock %}

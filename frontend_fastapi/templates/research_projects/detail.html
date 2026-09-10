@@ -90,7 +90,7 @@
         <p class="mt-3 text-sm">
           Expires:
           <span class="font-medium {% if overview_days_remaining is not none and overview_days_remaining <= 7 %}text-red-600{% elif overview_days_remaining is not none and overview_days_remaining <= 30 %}text-yellow-700{% else %}text-gray-900{% endif %}">
-            {{ project.expiry_date }}
+            {{ project.expiry_date | hermes_date }}
           </span>
         </p>
         {% endif %}
@@ -175,7 +175,7 @@
           <tr>
             <td class="py-1 text-gray-700">{{ job.job_id }}</td>
             <td class="py-1 text-gray-600">{{ job.description }}</td>
-            <td class="py-1 text-gray-500">{{ job.created_at }}</td>
+            <td class="py-1 text-gray-500">{{ job.created_at | hermes_timestamp }}</td>
           </tr>
           {% endfor %}
         </tbody>

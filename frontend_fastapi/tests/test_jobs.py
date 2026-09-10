@@ -637,3 +637,72 @@ def test_results_lookup_by_patient_staff_can_search_without_a_job_id(client, mak
 
     assert resp.status_code == 200
     mock_backend["patient_timeline_all"].assert_awaited_once_with("MRN1")
+
+
+# ---- results_lookup: F005 page reorg (search above jobs table, 25-row cap) ----
+
+def test_results_lookup_search_section_precedes_jobs_table(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_projects"].return_value = [_project()]
+    mock_backend["list_project_jobs_with_counts"].return_value = [{
+        "job_id": "job-1", "description": "d", "created_at": "2026-01-01T00:00:00Z",
+        "imported_count": 1, "submitted_count": 1, "exported_count": 1, "export_attempted_count": 1,
+    }]
+
+    resp = client.get("/results")
+
+    assert resp.status_code == 200
+    assert resp.text.index("Narrow your search") < resp.text.index("Your jobs")
+
+
+def test_results_lookup_jobs_table_capped_at_25_most_recent(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_projects"].return_value = [_project()]
+    jobs = [{
+        "job_id": f"job-{i}", "description": f"d{i}", "created_at": f"2026-01-{i+1:02d}T00:00:00Z",
+        "imported_count": 0, "submitted_count": 0, "exported_count": 0, "export_attempted_count": 0,
+    } for i in range(30)]
+    mock_backend["list_project_jobs_with_counts"].return_value = jobs
+
+    resp = client.get("/results")
+
+    assert resp.status_code == 200
+    assert "Your jobs (30)" in resp.text
+    assert "showing 25" in resp.text
+    # most recent (job-29, created 2026-01-30) present; oldest (job-0) truncated
+    assert "job-29" in resp.text
+    assert ">job-0<" not in resp.text
+
+
+def test_results_lookup_jobs_table_shows_import_export_counts(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_projects"].return_value = [_project()]
+    mock_backend["list_project_jobs_with_counts"].return_value = [{
+        "job_id": "job-1", "description": "d", "created_at": "2026-01-01T00:00:00Z",
+        "imported_count": 3, "submitted_count": 5, "exported_count": 2, "export_attempted_count": 4,
+    }]
+
+    resp = client.get("/results")
+
+    assert resp.status_code == 200
+    assert "3 / 5" in resp.text
+    assert "2 / 4" in resp.text
+
+
+def test_results_lookup_fewer_than_25_jobs_shows_no_truncation_message(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_projects"].return_value = [_project()]
+    mock_backend["list_project_jobs_with_counts"].return_value = [{
+        "job_id": "job-1", "description": "d", "created_at": "2026-01-01T00:00:00Z",
+        "imported_count": 0, "submitted_count": 0, "exported_count": 0, "export_attempted_count": 0,
+    }]
+
+    resp = client.get("/results")
+
+    assert resp.status_code == 200
+    assert "Your jobs (1)" in resp.text
+    assert "showing" not in resp.text
