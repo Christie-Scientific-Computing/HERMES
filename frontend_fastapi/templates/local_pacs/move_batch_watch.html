@@ -43,8 +43,16 @@
   }
 
   es.addEventListener('start', (e) => {
+    // The stream always replays its FULL event history from the start on
+    // any new connection (including EventSource's own auto-reconnect after
+    // a dropped connection mid-batch -- real C-MOVEs can run for minutes),
+    // not just on the first connect -- so "start" can legitimately arrive
+    // more than once. Reset rather than accumulate, or a reconnect would
+    // double-count studies already reported before the drop.
     const data = JSON.parse(e.data);
     total = data.total || total;
+    done = 0;
+    eventLog.innerHTML = '';
     statusLabel.textContent = 'Running (' + total + ' stud' + (total === 1 ? 'y' : 'ies') + ')';
     updateProgress();
   });
