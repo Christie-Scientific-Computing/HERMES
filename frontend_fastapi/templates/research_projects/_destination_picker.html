@@ -1,0 +1,52 @@
+{# Shared by create.html and amend.html -- both need the identical two-step
+   destination picker: a type toggle (checkboxes, since both types can
+   coexist per GRILLING.md #11) revealing the matching live multi-select,
+   plus the project-level message_id field. #}
+{% macro destination_picker(form, destination_error) %}
+<div class="space-y-4 border-t border-gray-100 pt-4">
+  <h2 class="text-sm font-semibold text-gray-900">Export destinations</h2>
+  {% if destination_error %}
+  <div class="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">{{ destination_error }}</div>
+  {% endif %}
+
+  <label class="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+    {{ form.use_dicom() }} Export via DICOM
+  </label>
+  <div id="field-dicom-destinations" class="pl-6">
+    <label class="block text-sm font-medium text-gray-700">{{ form.dicom_destinations.label }}</label>
+    {{ form.dicom_destinations(size=4) }}
+    {% if form.dicom_destinations.errors %}<p class="text-xs text-red-600 mt-1">{{ form.dicom_destinations.errors|join("; ") }}</p>{% endif %}
+  </div>
+
+  <label class="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+    {{ form.use_proknow() }} Export via ProKnow
+  </label>
+  <div id="field-proknow-destinations" class="pl-6">
+    <label class="block text-sm font-medium text-gray-700">{{ form.proknow_destinations.label }}</label>
+    {{ form.proknow_destinations(size=4) }}
+    {% if form.proknow_destinations.errors %}<p class="text-xs text-red-600 mt-1">{{ form.proknow_destinations.errors|join("; ") }}</p>{% endif %}
+  </div>
+
+  <div>
+    <label class="block text-sm font-medium text-gray-700">{{ form.message_id.label }}</label>
+    {{ form.message_id() }}
+    <p class="text-xs text-gray-400 mt-1">{{ form.message_id.description }}</p>
+    {% if form.message_id.errors %}<p class="text-xs text-red-600 mt-1">{{ form.message_id.errors|join("; ") }}</p>{% endif %}
+  </div>
+</div>
+
+<script>
+(function () {
+  function update() {
+    var dicomEl = document.getElementById('use_dicom');
+    var proknowEl = document.getElementById('use_proknow');
+    document.getElementById('field-dicom-destinations').classList.toggle('hidden', !(dicomEl && dicomEl.checked));
+    document.getElementById('field-proknow-destinations').classList.toggle('hidden', !(proknowEl && proknowEl.checked));
+  }
+  document.querySelectorAll('#use_dicom, #use_proknow').forEach(function (el) {
+    el.addEventListener('change', update);
+  });
+  update();
+})();
+</script>
+{% endmacro %}

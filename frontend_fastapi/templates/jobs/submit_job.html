@@ -43,9 +43,16 @@
         <label class="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
           {{ form.do_import() }} Import
         </label>
-        <div id="field-import_level" class="pl-6">
-          <label class="block text-sm font-medium text-gray-700">{{ form.import_level.label }}</label>
-          {{ form.import_level() }}
+        <div id="field-import_level" class="pl-6 space-y-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700">{{ form.import_level.label }}</label>
+            {{ form.import_level() }}
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700">{{ form.mu_tolerance.label }}</label>
+            {{ form.mu_tolerance() }}
+            {% if form.mu_tolerance.errors %}<p class="text-xs text-red-600 mt-1">{{ form.mu_tolerance.errors|join("; ") }}</p>{% endif %}
+          </div>
         </div>
       </div>
 
@@ -75,10 +82,12 @@
               {% if form.destination.errors %}<p class="text-xs text-red-600 mt-1">{{ form.destination.errors|join("; ") }}</p>{% endif %}
             </div>
             <div>
-              <label class="block text-sm font-medium text-gray-700">{{ form.message_id.label }}</label>
-              {{ form.message_id() }}
-              <p class="text-xs text-gray-400 mt-1">{{ form.message_id.description }}</p>
-              {% if form.message_id.errors %}<p class="text-xs text-red-600 mt-1">{{ form.message_id.errors|join("; ") }}</p>{% endif %}
+              <span class="block text-sm font-medium text-gray-700">Message ID</span>
+              <p id="project-message-id" class="text-sm text-gray-600 mt-1">—</p>
+              <p class="text-xs text-gray-400 mt-1">
+                Set on the project (for clinical-trial patients who need a different
+                pseudonymisation table). Not editable here -- contact a data custodian to change it.
+              </p>
             </div>
           </div>
 
@@ -118,6 +127,14 @@
 </div>
 
 <script>
+var HERMES_PROJECT_MESSAGE_IDS = {{ project_message_ids | tojson }};
+
+function hermesUpdateProjectMessageId() {
+  var projectEl = document.getElementById('project_id');
+  var mid = projectEl ? HERMES_PROJECT_MESSAGE_IDS[projectEl.value] : null;
+  document.getElementById('project-message-id').textContent = (mid === null || mid === undefined) ? '—' : mid;
+}
+
 function hermesUpdateVisibility() {
   var scopeEl = document.querySelector('input[name="scope"]:checked');
   var scope = scopeEl ? scopeEl.value : 'single';
@@ -141,5 +158,9 @@ function hermesUpdateVisibility() {
 document.querySelectorAll('input[name="scope"], input[name="export_kind"], #do_import, #do_export')
   .forEach(function (el) { el.addEventListener('change', hermesUpdateVisibility); });
 hermesUpdateVisibility();
+
+var hermesProjectEl = document.getElementById('project_id');
+if (hermesProjectEl) { hermesProjectEl.addEventListener('change', hermesUpdateProjectMessageId); }
+hermesUpdateProjectMessageId();
 </script>
 {% endblock %}
