@@ -34,6 +34,7 @@ import uuid
 from typing import Optional
 from urllib.parse import urlencode
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy.orm import Session as DBSession
@@ -162,7 +163,17 @@ async def _move_and_audit_one(
     Returns (outcome, detail, audit_failed): outcome is "success"/"failure";
     detail is the failure reason (None on success); audit_failed is True iff
     the move's own outcome was recorded above but the audit call itself
-    raised BackendError (the move is still real regardless -- D006).
+    failed -- BackendError (a non-2xx response) or a raw httpx.HTTPError
+    (backend unreachable/timed out; backend_client never wraps a transport-
+    level failure in BackendError, only a bad HTTP status) -- the move is
+    still real regardless (D006). Caught broadly, not just BackendError:
+    for the batch flow below (_run_batch), an uncaught exception here would
+    kill the whole background task silently -- no "done" event ever fires,
+    every remaining study in the batch is left unattempted with no visible
+    error, and the batch never gets swept by _purge_stale_batches (which
+    only removes FINISHED batches) -- effectively a permanent, invisible
+    stuck progress page. Matches CLAUDE.md's "best-effort, log and
+    continue" tone for non-authorization bookkeeping elsewhere in this app.
     """
     try:
         result = await asyncio.to_thread(
@@ -184,7 +195,7 @@ async def _move_and_audit_one(
             destination_ae_title=destination_ae_title, destination_display_name=destination_display_name,
             performed_by=performed_by, outcome=outcome, detail=detail,
         )
-    except backend_client.BackendError:
+    except (backend_client.BackendError, httpx.HTTPError):
         logger.exception("Local PACS move audit call failed for study %s", study_instance_uid)
         audit_failed = True
 

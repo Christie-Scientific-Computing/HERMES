@@ -13,6 +13,7 @@ precisely without racing a real background task through HTTP.
 import json
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 
 from frontend_fastapi import backend_client
@@ -221,6 +222,34 @@ async def test_audit_failure_is_a_warning_not_a_stopped_batch(monkeypatch):
     assert len(success_events) == 2
     assert all("audit not recorded" in e["status"] for e in success_events)
     assert audit_mock.call_count == 2
+    assert events[-1]["type"] == "done"
+
+
+async def test_a_transport_level_audit_failure_does_not_kill_the_batch(monkeypatch):
+    """backend_client._post never wraps a raw httpx transport failure
+    (backend unreachable/timed out) in BackendError -- only a bad HTTP
+    status becomes one. Before this was caught broadly, an httpx.HTTPError
+    here would escape _run_batch's background task entirely: no "done"
+    event, remaining studies never attempted, and the batch left stuck
+    forever (never swept, since _purge_stale_batches only removes finished
+    ones)."""
+    monkeypatch.setattr(cc, "move_study", Mock(return_value=cc.MoveResult(completed=1, status_code=0x0000)))
+    audit_mock = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+    monkeypatch.setattr(backend_client, "audit_local_pacs_move", audit_mock)
+
+    batch = _new_batch([
+        {"study_instance_uid": "1.2.3", "patient_id": "ANON1", "label": "ANON1 — Planning CT"},
+        {"study_instance_uid": "1.2.4", "patient_id": "ANON2", "label": "ANON2 — Planning CT"},
+    ])
+    local_pacs._BATCHES["batch-transport-error"] = batch
+
+    await local_pacs._run_batch("batch-transport-error")
+
+    assert batch["finished"] is True
+    events = await _drain(batch)
+    success_events = [e for e in events if e["type"] == "success"]
+    assert len(success_events) == 2
+    assert all("audit not recorded" in e["status"] for e in success_events)
     assert events[-1]["type"] == "done"
 
 
