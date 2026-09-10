@@ -369,3 +369,17 @@ async def list_notifications(username: str, unread_only: bool = False, limit: in
 
 async def mark_notification_read(notification_id: int, username: str) -> dict:
     return await _post(f"/notifications/{notification_id}/read", params={"username": username})
+
+
+# ---- Error reports / suggestions (item 06) ----
+
+async def create_error_report(
+    username: str, category: str, message: str, urgent: bool = False, job_id: Optional[str] = None,
+) -> dict:
+    return await _post("/error_reports", json={
+        "username": username, "category": category, "message": message, "urgent": urgent, "job_id": job_id or None,
+    })
+
+
+async def list_error_reports(limit: int = 100) -> list[dict]:
+    return (await _get("/error_reports", params={"limit": limit}))["error_reports"]
