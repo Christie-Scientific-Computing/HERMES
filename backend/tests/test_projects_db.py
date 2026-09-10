@@ -241,3 +241,175 @@ def test_list_expiring_projects_excludes_non_approved_projects(db, owner):
 
     assert draft_id not in result
     assert revoked_id not in result
+
+
+# ---- Destinations / message_id at creation (F005) ----
+
+def test_create_project_with_destinations_and_message_id(db, owner):
+    project_id = str(uuid.uuid4())
+    db.create_project(
+        project_id, "Trial project", owner,
+        destinations=[
+            {"destination_type": "dicom", "destination_value": "TRIAL_AE"},
+            {"destination_type": "proknow", "destination_value": "TrialCollection"},
+        ],
+        message_id=42,
+    )
+
+    project = db.get_project(project_id)
+    assert project["message_id"] == 42
+    assert project["pending_message_id"] is None
+
+    destinations = db.list_destinations(project_id)
+    assert {(d["destination_type"], d["destination_value"], d["status"]) for d in destinations} == {
+        ("dicom", "TRIAL_AE", "active"),
+        ("proknow", "TrialCollection", "active"),
+    }
+
+
+def test_create_project_with_no_destinations_or_message_id(db, owner):
+    project_id = _make_project(db, owner)
+    assert db.list_destinations(project_id) == []
+    assert db.get_project(project_id)["message_id"] is None
+
+
+def test_create_project_with_an_invalid_destination_rolls_back_the_whole_project(db, owner):
+    """A destinations-insert failure (here, the DB's own destination_type
+    CHECK constraint -- the endpoint layer's Pydantic Literal["dicom",
+    "proknow"] would normally catch this first, but ProjectsDB itself must
+    not rely on that) must not leave an orphan draft project row with no
+    destinations and no way to add them later -- amendments only accept
+    destinations for an ALREADY-approved project (propose_amendment)."""
+    project_id = str(uuid.uuid4())
+    with pytest.raises(Exception):
+        db.create_project(
+            project_id, "Bad project", owner,
+            destinations=[{"destination_type": "not-a-real-type", "destination_value": "x"}],
+        )
+    with pytest.raises(ProjectNotFoundError):
+        db.get_project(project_id)
+
+
+# ---- Amendments (F005) ----
+
+def _approved_project_with_destination(db, owner):
+    project_id = _make_project(db, owner)
+    db._insert_destinations(project_id, [{"destination_type": "dicom", "destination_value": "OLD_AE"}], status="active")
+    db.submit_project(project_id, owner)
+    db.review_project(project_id, approved=True, reviewer="admin", expiry_date=None)
+    return project_id
+
+
+def test_propose_amendment_requires_an_approved_project(db, owner):
+    """A draft/submitted project must not accumulate 'proposed' rows --
+    list_pending_amendments only ever looks at approved projects, so a
+    proposal against a non-approved one would be permanently invisible to
+    any reviewer while still tripping has_pending_amendment's 409 guard
+    forever, and would resurface as a phantom amendment once the project
+    is later approved normally."""
+    draft_id = _make_project(db, owner)
+    with pytest.raises(ProjectNotFoundError):
+        db.propose_amendment(draft_id, owner, message_id=7)
+
+    submitted_id = _make_project(db, owner)
+    db.submit_project(submitted_id, owner)
+    with pytest.raises(ProjectNotFoundError):
+        db.propose_amendment(submitted_id, owner, message_id=7)
+
+
+def test_propose_amendment_adds_proposed_rows_without_touching_active_ones(db, owner):
+    project_id = _approved_project_with_destination(db, owner)
+
+    db.propose_amendment(
+        project_id, owner,
+        destinations=[{"destination_type": "dicom", "destination_value": "NEW_AE"}],
+        message_id=99,
+    )
+
+    destinations = db.list_destinations(project_id)
+    assert {(d["destination_value"], d["status"]) for d in destinations} == {
+        ("OLD_AE", "active"), ("NEW_AE", "proposed"),
+    }
+    project = db.get_project(project_id)
+    assert project["message_id"] is None  # not live yet
+    assert project["pending_message_id"] == 99
+    assert db.has_pending_amendment(project_id) is True
+    assert project_id in project_ids(db.list_pending_amendments())
+
+
+def test_approve_amendment_promotes_proposed_and_drops_old_active(db, owner):
+    project_id = _approved_project_with_destination(db, owner)
+    db.propose_amendment(
+        project_id, owner,
+        destinations=[{"destination_type": "dicom", "destination_value": "NEW_AE"}],
+        message_id=99,
+    )
+
+    db.approve_amendment(project_id, reviewed_by="admin", comment="looks fine")
+
+    destinations = db.list_destinations(project_id)
+    assert [(d["destination_value"], d["status"]) for d in destinations] == [("NEW_AE", "active")]
+    project = db.get_project(project_id)
+    assert project["message_id"] == 99
+    assert project["pending_message_id"] is None
+    assert db.has_pending_amendment(project_id) is False
+
+
+def test_approve_amendment_with_no_proposed_destinations_keeps_current_ones(db, owner):
+    """An amendment that only changes message_id (destinations=None) must
+    not silently wipe out the project's existing active destinations --
+    approve_amendment only removes 'active' rows when there are 'proposed'
+    ones to replace them with."""
+    project_id = _approved_project_with_destination(db, owner)
+    db.propose_amendment(project_id, owner, destinations=None, message_id=7)
+
+    db.approve_amendment(project_id, reviewed_by="admin")
+
+    destinations = db.list_destinations(project_id)
+    assert [(d["destination_value"], d["status"]) for d in destinations] == [("OLD_AE", "active")]
+    assert db.get_project(project_id)["message_id"] == 7
+
+
+def test_reject_amendment_drops_proposed_rows_and_keeps_active_ones(db, owner):
+    project_id = _approved_project_with_destination(db, owner)
+    db.propose_amendment(
+        project_id, owner,
+        destinations=[{"destination_type": "dicom", "destination_value": "NEW_AE"}],
+        message_id=99,
+    )
+
+    db.reject_amendment(project_id, reviewed_by="admin", comment="not justified")
+
+    destinations = db.list_destinations(project_id)
+    assert [(d["destination_value"], d["status"]) for d in destinations] == [("OLD_AE", "active")]
+    project = db.get_project(project_id)
+    assert project["message_id"] is None
+    assert project["pending_message_id"] is None
+    assert db.has_pending_amendment(project_id) is False
+
+
+def test_list_pending_amendments_excludes_projects_with_no_amendment(db, owner):
+    with_amendment = _approved_project_with_destination(db, owner)
+    db.propose_amendment(with_amendment, owner, message_id=1)
+    without_amendment = _approved_project_with_destination(db, owner)
+
+    result = project_ids(db.list_pending_amendments())
+
+    assert with_amendment in result
+    assert without_amendment not in result
+
+
+# ---- Requested patients (F005) ----
+
+def test_add_and_count_requested_patients(db, owner):
+    project_id = _make_project(db, owner)
+    added = db.add_requested_patients(project_id, ["MRN1", "MRN2", "MRN3"])
+
+    assert added == 3
+    assert db.count_requested_patients(project_id) == 3
+
+
+def test_add_requested_patients_with_empty_list_is_a_no_op(db, owner):
+    project_id = _make_project(db, owner)
+    assert db.add_requested_patients(project_id, []) == 0
+    assert db.count_requested_patients(project_id) == 0

@@ -12,7 +12,16 @@
     {{ project_card(project) }}
   {% endfor %}
 </div>
-{% else %}
+{% elif not amendments %}
 <p class="text-gray-400 text-center py-16">Nothing waiting for review.</p>
+{% endif %}
+
+{% if amendments %}
+<h2 class="text-lg font-semibold text-gray-900 mt-8 mb-4">Approved projects with a pending amendment</h2>
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for project in amendments %}
+    {{ project_card(project) }}
+  {% endfor %}
+</div>
 {% endif %}
 {% endblock %}

@@ -19,8 +19,8 @@ other field's errors are shown.
 CSRF is handled separately and globally (deps.csrf_protect), same as every
 other form module here -- nothing to disable.
 """
-from wtforms import BooleanField, Form, IntegerField, RadioField, SelectField, StringField
-from wtforms.validators import DataRequired, Length, NumberRange
+from wtforms import BooleanField, FloatField, Form, RadioField, SelectField, StringField
+from wtforms.validators import DataRequired, Length
 from wtforms.validators import Optional as OptionalField
 
 IMPORT_LEVEL_CHOICES = [
@@ -91,6 +91,14 @@ class JobSubmissionForm(ProjectScopedForm):
 
     do_import = BooleanField("Import", default=True)
     import_level = SelectField(choices=IMPORT_LEVEL_CHOICES, default="Planning data", validators=[OptionalField()])
+    # Optional per-job override for the Pinnacle export's MU tolerance --
+    # blank by default, in which case the backend fills in
+    # MU_TOLERANCE_DEFAULT (retrieve/logic.py); this form has no need to
+    # know that default's value. Only people who know what they're doing
+    # should tweak this (FEATURES.md), but it's shown as a normal field
+    # rather than behind an "advanced" toggle -- no such grouping exists on
+    # this form for any other field either.
+    mu_tolerance = FloatField("MU tolerance (optional)", validators=[OptionalField()])
 
     do_export = BooleanField(
         "Also export", description="Runs automatically once each patient's import succeeds.",
@@ -100,19 +108,12 @@ class JobSubmissionForm(ProjectScopedForm):
         default="dicom_move", validators=[OptionalField()],
     )
     destination = _OptionalSelectField("Orthanc modality AE title", choices=[], validators=[OptionalField()])
-    # Optional DICOM C-MOVE Message ID -- forwarded to Orthanc as
-    # MoveOriginatorID (see backend/src/export/logic.py's
-    # Exporter.dicom_c_move) so a receiving anonymising node on the DMZ can
-    # pick the right pseudonymisation table (e.g. for clinical-trial
-    # patients, who need a different PatientID mapping than routine
-    # pseudo-anonymisation). Left blank for an ordinary export. min/max match
-    # DICOM's Message ID VR (US, unsigned 16-bit): 0-65535.
-    message_id = IntegerField(
-        "Message ID (optional)", validators=[OptionalField(), NumberRange(min=0, max=65535)],
-        description="For clinical-trial patients: the DICOM Message ID the receiving "
-                     "anonymising node uses to pick a pseudonymisation table. Leave blank "
-                     "for an ordinary export.",
-    )
+    # Message ID is no longer a field on this form -- it's a project-level
+    # setting (item 05), read-only here and looked up server-side
+    # (routers/jobs.py sources it from the selected project's row; the
+    # backend's batch_import_file endpoint looks it up itself too, never
+    # trusting a browser-supplied value) rather than something any job
+    # submission can choose per-request.
     collection = _OptionalSelectField("ProKnow collection", choices=[], validators=[OptionalField()])
 
     def __init__(self, *args, **kwargs):
