@@ -62,7 +62,7 @@ def mock_backend(monkeypatch):
     for name in (
         "list_projects", "get_project", "create_project", "submit_project",
         "review_project", "revoke_project", "add_member", "remove_member",
-        "list_project_jobs", "list_user_active_projects",
+        "list_project_jobs", "list_user_active_projects", "get_project_stats",
         "get_orthanc_modalities", "get_proknow_collections", "add_requested_patients",
         "propose_amendment", "approve_amendment", "reject_amendment", "list_pending_amendments",
     ):
@@ -71,6 +71,7 @@ def mock_backend(monkeypatch):
         mocks[name] = m
     mocks["list_user_active_projects"].return_value = []
     mocks["list_project_jobs"].return_value = []
+    mocks["get_project_stats"].return_value = {"requested_count": 0, "restored_count": 0, "sent_by_destination": []}
     mocks["get_orthanc_modalities"].return_value = ["AE1"]
     mocks["get_proknow_collections"].return_value = ["Collection1"]
     mocks["list_pending_amendments"].return_value = []
@@ -520,6 +521,22 @@ def test_detail_hides_review_form_for_non_staff(client, make_user, login, mock_b
     assert "Review decision" not in resp.text
 
 
+def test_detail_shows_project_overview_stats(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["get_project"].return_value = _project(status="approved", members=[{"username": "alice", "role": "owner"}])
+    mock_backend["get_project_stats"].return_value = {
+        "requested_count": 5, "restored_count": 3,
+        "sent_by_destination": [{"destination": "SCANNER_A", "count": 2}],
+    }
+
+    resp = client.get(f"/projects/{PROJECT_ID}")
+
+    assert resp.status_code == 200
+    assert "Project overview" in resp.text
+    assert "Sent to SCANNER_A" in resp.text
+
+
 def test_detail_backend_error_redirects_to_list_with_flash(client, make_user, login, mock_backend):
     make_user(username="alice")
     login("alice")
@@ -560,6 +577,39 @@ def test_detail_days_remaining_banner_absent_for_non_member(client, make_user, l
     resp = client.get(f"/projects/{PROJECT_ID}")
 
     assert "This project expires" not in resp.text
+
+
+def test_detail_overview_card_colour_codes_expiry_red_within_a_week_even_for_non_member(
+    client, make_user, login, mock_backend,
+):
+    """Unlike the days-remaining banner above (member-only), the overview
+    card's expiry colour-coding applies to any viewer -- e.g. a staff
+    reviewer who isn't a project member."""
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    soon = (datetime.now(timezone.utc) + timedelta(days=5, hours=1)).isoformat()
+    mock_backend["get_project"].return_value = _project(
+        status="approved", expiry_date=soon, members=[{"username": "alice", "role": "owner"}],
+    )
+
+    resp = client.get(f"/projects/{PROJECT_ID}")
+
+    assert "text-red-600" in resp.text
+
+
+def test_detail_overview_card_colour_codes_expiry_amber_at_exactly_thirty_days(
+    client, make_user, login, mock_backend,
+):
+    make_user(username="alice")
+    login("alice")
+    exactly_30 = (datetime.now(timezone.utc) + timedelta(days=30, hours=1)).isoformat()
+    mock_backend["get_project"].return_value = _project(
+        status="approved", expiry_date=exactly_30, members=[{"username": "alice", "role": "owner"}],
+    )
+
+    resp = client.get(f"/projects/{PROJECT_ID}")
+
+    assert "text-yellow-700" in resp.text
 
 
 def test_detail_shows_uploader_and_date_on_documents(client, make_user, login, mock_backend, db):

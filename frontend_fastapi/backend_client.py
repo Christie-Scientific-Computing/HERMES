@@ -176,6 +176,10 @@ async def list_project_jobs(project_id: str) -> list[dict]:
     return (await _get(f"/projects/{project_id}/jobs"))["jobs"]
 
 
+async def get_project_stats(project_id: str) -> dict:
+    return await _get(f"/projects/{project_id}/stats")
+
+
 async def list_user_active_projects(username: str) -> list[dict]:
     """Active (approved, non-expired) projects `username` belongs to -- used
     by deps.get_template_context to populate the nav's active-projects

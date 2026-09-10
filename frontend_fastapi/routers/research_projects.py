@@ -243,6 +243,11 @@ async def project_detail(
     except backend_client.BackendError:
         jobs = []
 
+    try:
+        stats = await backend_client.get_project_stats(project_id)
+    except backend_client.BackendError:
+        stats = {"requested_count": 0, "restored_count": 0, "sent_by_destination": []}
+
     # Contextual to THIS project specifically (unlike list.html's aggregate
     # banner across every project the viewer belongs to) -- only meaningful
     # for a member of an approved project, not e.g. a staff reviewer who
@@ -252,6 +257,12 @@ async def project_detail(
         matches = expiring_soon([project])
         if matches:
             days_remaining = matches[0]["days_remaining"]
+
+    # Unlike the banner above, the "Project overview" card's expiry
+    # colour-coding is for ANY viewer (e.g. a staff reviewer deciding
+    # whether to act on it), not gated on project membership.
+    overview_matches = expiring_soon([project])
+    overview_days_remaining = overview_matches[0]["days_remaining"] if overview_matches else None
 
     destinations = project["destinations"]
     active_destinations = [d for d in destinations if d["status"] == "active"]
@@ -265,10 +276,12 @@ async def project_detail(
         "can_manage_documents": is_member or user.is_staff,
         "documents": documents,
         "jobs": jobs,
+        "stats": stats,
         "add_member_form": AddMemberForm(),
         "review_form": ReviewProjectForm(),
         "amendment_decision_form": AmendmentDecisionForm(),
         "days_remaining": days_remaining,
+        "overview_days_remaining": overview_days_remaining,
         "active_destinations": active_destinations,
         "proposed_destinations": proposed_destinations,
         "pending_amendment": pending_amendment,

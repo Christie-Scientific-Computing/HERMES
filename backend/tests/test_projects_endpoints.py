@@ -248,3 +248,33 @@ def test_add_requested_patients_rejects_an_unknown_anon_id(client):
         "added_by": owner, "mrns": ["no-such-anon-id"],
     })
     assert resp.status_code == 422
+
+
+def test_project_stats_reflects_requested_restored_and_sent(client):
+    owner = f"owner-{uuid.uuid4()}"
+    project_id = _create_approve(client, owner)
+
+    client.post(f"/projects/{project_id}/requested_patients", json={"added_by": owner, "mrns": [ANON_MRN, ANON_MRN_2]})
+
+    from backend.src.status.db_client import StatusDB
+    status_db = StatusDB()
+    job_id = f"job-{uuid.uuid4()}"
+    status_db.create_job(job_id, project_id=project_id)
+    status_db.add_event(job_id, mrn=REAL_MRN, stage="retrieve", event_type="success", details={"imported": True})
+    status_db.add_event(job_id, mrn=REAL_MRN, stage="export", event_type="success", details={"destination": "SCANNER_A"})
+
+    resp = client.get(f"/projects/{project_id}/stats")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested_count"] == 2
+    assert body["restored_count"] == 1
+    assert body["sent_by_destination"] == [{"destination": "SCANNER_A", "count": 1}]
+
+
+def test_project_stats_zero_for_a_project_with_no_activity(client):
+    owner = f"owner-{uuid.uuid4()}"
+    project_id = _create_approve(client, owner)
+
+    resp = client.get(f"/projects/{project_id}/stats")
+    assert resp.status_code == 200
+    assert resp.json() == {"requested_count": 0, "restored_count": 0, "sent_by_destination": []}

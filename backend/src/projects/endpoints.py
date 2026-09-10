@@ -21,12 +21,14 @@ from backend.src.identity import anon
 from backend.src.notifications.db_client import NotificationsDB
 from backend.src.projects.db_client import ProjectsDB, ProjectNotFoundError
 from backend.src.projects.enforcement import verify_internal_key
+from backend.src.status.db_client import StatusDB
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(verify_internal_key)])
 
 projects_db = ProjectsDB()
 notifications_db = NotificationsDB()
+status_db = StatusDB()
 
 
 class DestinationIn(BaseModel):
@@ -192,6 +194,16 @@ async def remove_member(project_id: str, username: str, removed_by: str = Query(
         raise HTTPException(status_code=403, detail="Only an existing project member may remove members")
     projects_db.remove_member(project_id, username, removed_by=removed_by)
     return {"members": projects_db.list_members(project_id)}
+
+
+@router.get("/{project_id}/stats")
+async def project_stats(project_id: str):
+    """Backs the project homepage's "Project overview" card (item 04):
+    requested/restored/sent-per-destination counts."""
+    return {
+        "requested_count": projects_db.count_requested_patients(project_id),
+        **status_db.get_project_stats(project_id),
+    }
 
 
 @router.get("/{project_id}/jobs")
