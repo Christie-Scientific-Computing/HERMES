@@ -181,6 +181,46 @@ class StatusDB:
             )
             return [dict(r) for r in cur.fetchall()]
 
+    def get_project_stats(self, project_id: str) -> dict:
+        """
+        The "N requested / M restored / sent to X" figures for a project's
+        homepage (item 04). `restored_count` mirrors count_imported_patients'
+        "imported" predicate (details->>'imported' = 'true', a retrieve-stage
+        success), just scoped by jobs.project_id across every job the project
+        has ever run instead of one job_id. `sent_by_destination` is the
+        export-side equivalent, grouped by the destination each export
+        success event's own details recorded (see export/endpoints.py's
+        _dicom_move_worker/_proknow_worker) -- broken out per destination
+        rather than summed, since "sent to X" and "sent to Y" are distinct
+        facts a reviewer cares about separately.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT e.mrn)
+                FROM events e JOIN jobs j ON j.job_id = e.job_id
+                WHERE j.project_id = %s AND e.stage = 'retrieve' AND e.event_type = 'success'
+                  AND e.details ->> 'imported' = 'true'
+                """,
+                (project_id,),
+            )
+            restored_count = cur.fetchone()[0]
+
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.details ->> 'destination' AS destination, COUNT(DISTINCT e.mrn) AS count
+                FROM events e JOIN jobs j ON j.job_id = e.job_id
+                WHERE j.project_id = %s AND e.stage = 'export' AND e.event_type = 'success'
+                GROUP BY e.details ->> 'destination'
+                ORDER BY destination
+                """,
+                (project_id,),
+            )
+            sent_by_destination = [dict(r) for r in cur.fetchall()]
+
+        return {"restored_count": restored_count, "sent_by_destination": sent_by_destination}
+
     def mark_job_notified(self, job_id: str) -> bool:
         """
         Race-safe "has a job-completion notification already been created

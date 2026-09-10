@@ -89,11 +89,19 @@ async def get_backend_health() -> dict:
 
 # ---- Projects (research_projects, ported in Phase 2) ----
 
-async def create_project(title: str, created_by: str, description: str = "", ethics_reference: str = "") -> dict:
-    return await _post("/projects", json={
+async def create_project(
+    title: str, created_by: str, description: str = "", ethics_reference: str = "",
+    destinations: Optional[list[dict]] = None, message_id: Optional[int] = None,
+) -> dict:
+    body = {
         "title": title, "created_by": created_by,
         "description": description or None, "ethics_reference": ethics_reference or None,
-    })
+    }
+    if destinations:
+        body["destinations"] = destinations
+    if message_id is not None:
+        body["message_id"] = message_id
+    return await _post("/projects", json=body)
 
 
 async def submit_project(project_id: str, username: str) -> dict:
@@ -137,8 +145,39 @@ async def remove_member(project_id: str, username: str, removed_by: str) -> dict
     return await _delete(f"/projects/{project_id}/members/{username}", params={"removed_by": removed_by})
 
 
+async def add_requested_patients(project_id: str, mrns: list[str], added_by: str) -> dict:
+    return await _post(f"/projects/{project_id}/requested_patients", json={"added_by": added_by, "mrns": mrns})
+
+
+async def propose_amendment(
+    project_id: str, proposed_by: str, destinations: Optional[list[dict]] = None, message_id: Optional[int] = None,
+) -> dict:
+    body = {"proposed_by": proposed_by}
+    if destinations:
+        body["destinations"] = destinations
+    if message_id is not None:
+        body["message_id"] = message_id
+    return await _post(f"/projects/{project_id}/amendments", json=body)
+
+
+async def approve_amendment(project_id: str, reviewed_by: str, comment: str = "") -> dict:
+    return await _post(f"/projects/{project_id}/amendments/approve", json={"reviewed_by": reviewed_by, "comment": comment or None})
+
+
+async def reject_amendment(project_id: str, reviewed_by: str, comment: str = "") -> dict:
+    return await _post(f"/projects/{project_id}/amendments/reject", json={"reviewed_by": reviewed_by, "comment": comment or None})
+
+
+async def list_pending_amendments() -> list[dict]:
+    return (await _get("/projects/pending_amendments"))["projects"]
+
+
 async def list_project_jobs(project_id: str) -> list[dict]:
     return (await _get(f"/projects/{project_id}/jobs"))["jobs"]
+
+
+async def get_project_stats(project_id: str) -> dict:
+    return await _get(f"/projects/{project_id}/stats")
 
 
 async def list_user_active_projects(username: str) -> list[dict]:
@@ -236,31 +275,40 @@ async def _post_batch_file(path: str, job_id: str, filename: str, content: bytes
 
 
 async def batch_import_file(job_id: str, filename: str, content: bytes, project_id: str,
-                             username: str, import_level: str) -> dict:
+                             username: str, import_level: str, mu_tolerance: Optional[float] = None) -> dict:
+    # mu_tolerance is genuinely optional (the backend fills in
+    # MU_TOLERANCE_DEFAULT when omitted) -- omit the key entirely rather
+    # than sending it as None, which httpx would otherwise stringify into
+    # the literal multipart value "None" (same reasoning as message_id
+    # below on dicom_move_file).
+    extra = {"import_level": import_level}
+    if mu_tolerance is not None:
+        extra["mu_tolerance"] = mu_tolerance
     return await _post_batch_file("/import/batch_import_file", job_id, filename, content,
-                                   project_id, username, import_level=import_level)
+                                   project_id, username, **extra)
 
 
 async def combined_import_export_file(job_id: str, filename: str, content: bytes, project_id: str,
                                        username: str, import_level: str, export_kind: str,
-                                       destination_or_collection: str, message_id: Optional[int] = None) -> dict:
+                                       destination_or_collection: str, mu_tolerance: Optional[float] = None) -> dict:
     """
     Import, then chain a matching export for each patient once its import
     succeeds (backend/worker.py's _maybe_chain_export). Hits the same
     /import/batch_import_file endpoint as batch_import_file, just with the
-    extra export_kind/destination-or-collection/message_id fields that opt a
-    job into chaining -- see that endpoint's docstring for why this isn't a
-    separate backend endpoint.
+    extra export_kind/destination-or-collection fields that opt a job into
+    chaining -- see that endpoint's docstring for why this isn't a separate
+    backend endpoint. No message_id param here: the backend looks that up
+    itself, from the project, never from this call.
     """
     extra = {"import_level": import_level, "export_kind": export_kind}
     if export_kind == "dicom_move":
         extra["destination"] = destination_or_collection
-        if message_id is not None:
-            extra["message_id"] = message_id
     elif export_kind == "proknow_upload":
         extra["collection"] = destination_or_collection
     else:
         raise ValueError(f"Unknown export_kind: {export_kind}")
+    if mu_tolerance is not None:
+        extra["mu_tolerance"] = mu_tolerance
     return await _post_batch_file("/import/batch_import_file", job_id, filename, content,
                                    project_id, username, **extra)
 
@@ -369,3 +417,17 @@ async def list_notifications(username: str, unread_only: bool = False, limit: in
 
 async def mark_notification_read(notification_id: int, username: str) -> dict:
     return await _post(f"/notifications/{notification_id}/read", params={"username": username})
+
+
+# ---- Error reports / suggestions (item 06) ----
+
+async def create_error_report(
+    username: str, category: str, message: str, urgent: bool = False, job_id: Optional[str] = None,
+) -> dict:
+    return await _post("/error_reports", json={
+        "username": username, "category": category, "message": message, "urgent": urgent, "job_id": job_id or None,
+    })
+
+
+async def list_error_reports(limit: int = 100) -> list[dict]:
+    return (await _get("/error_reports", params={"limit": limit}))["error_reports"]

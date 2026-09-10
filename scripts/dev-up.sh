@@ -91,11 +91,21 @@ USE_DJANGO_FRONTEND="${HERMES_DEV_USE_DJANGO_FRONTEND:-0}"
 # gracefully, force-kill whatever's still actually bound to the ports this
 # script itself started, so nothing can outlive the script that spawned it.
 cleanup() {
-  # Clear the trap first: kill 0 below signals this script's own process
-  # too (it's part of its own process group), which would otherwise
-  # re-enter cleanup on that self-delivered signal before the process
-  # actually exits.
-  trap - EXIT INT TERM HUP
+  # Clear the EXIT trap so it doesn't re-fire when this function's own
+  # `exit`/return happens below. INT/TERM/HUP are set to IGNORED (not
+  # cleared to default via `trap -`) for a different reason: kill 0 below
+  # signals this script's own process too (it's part of its own process
+  # group), and resetting to *default* disposition first meant that
+  # self-delivered signal would kill this very function mid-execution,
+  # before it ever reached the sleep/fuser backstop a few lines down --
+  # confirmed by reproduction to be the actual cause of backend/proxy/
+  # frontend processes surviving Ctrl-C: uvicorn --reload in this stack
+  # doesn't react to a bare SIGINT/SIGTERM within several seconds (verified
+  # directly), so that backstop unconditionally SIGKILLing whatever still
+  # holds each port is the thing actually doing the work, not a nicety --
+  # and it was silently never running.
+  trap - EXIT
+  trap '' INT TERM HUP
   echo ""
   echo "Stopping HERMES dev stack..."
   kill 0 2>/dev/null || true

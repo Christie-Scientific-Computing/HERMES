@@ -22,7 +22,7 @@ from frontend_fastapi import backend_client
 from frontend_fastapi.deps import csrf_protect
 from frontend_fastapi.exceptions import Forbidden, NotAuthenticated
 from frontend_fastapi.migrations import run_migrations
-from frontend_fastapi.routers import accounts, admin, jobs, notifications, research_projects
+from frontend_fastapi.routers import accounts, admin, error_reports, jobs, notifications, research_projects
 from frontend_fastapi.session_middleware import SessionMiddleware
 from frontend_fastapi.settings import ALLOWED_HOSTS, DATABASE_URL, LOGIN_URL, STATIC_DIR
 from frontend_fastapi.templating import templates
@@ -61,6 +61,7 @@ app.include_router(accounts.router)
 app.include_router(research_projects.router)
 app.include_router(admin.router)
 app.include_router(notifications.router)
+app.include_router(error_reports.router)
 
 
 def _best_effort_error_context(request: Request) -> dict:

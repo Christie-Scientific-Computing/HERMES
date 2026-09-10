@@ -72,3 +72,20 @@ class ActivateForm(Form):
         "Confirm password",
         validators=[DataRequired(), EqualTo("password1", message="The two password fields didn't match.")],
     )
+
+
+class ChangePasswordForm(Form):
+    """Same shape as ActivateForm plus old_password -- no username/email
+    fields here either (the logged-in user is already known from the
+    session), so routers/accounts.py's account_settings runs the same
+    manual security.password_strength_errors check ActivateForm's own
+    router does, rather than the _validate_password_strength WTForms
+    validator (which needs form.username/email fields this form has
+    none of)."""
+
+    old_password = PasswordField("Current password", validators=[DataRequired()])
+    password1 = PasswordField("New password", validators=[DataRequired()])
+    password2 = PasswordField(
+        "Confirm new password",
+        validators=[DataRequired(), EqualTo("password1", message="The two password fields didn't match.")],
+    )

@@ -1,7 +1,7 @@
 ---
-generated_at: 2026-09-09T00:00:00Z
-staleness_key: git:8cd6117a20ad3520b732aad2fd4af6769e9639f267d24b008c7adb58f7442721
-generated_at_commit: ed4dd229d43bdc132512c177ab16f86964b8d4bf
+generated_at: 2026-09-10T00:00:00Z
+staleness_key: git:22fc15889d5e61322e95836430f15871d6145fdf54ec448bc0d12693544c96ef
+generated_at_commit: 4726270c5e20025da43b1f9439e08fbce92fbc31
 ---
 
 # Architecture Map
@@ -59,10 +59,11 @@ Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
 | `status` | `backend/src/status/` | Job/patient/event audit log (`StatusDB`) and the `tasks` queue (`TasksDB`), plus the hash chain | — |
 | `projects` | `backend/src/projects/` | Ethics/research-project workflow: lifecycle, membership, audit log, enforcement gate | — |
 | `notifications` | `backend/src/notifications/` | Persisted job-done/approval-decision notifications | — |
+| `error_reports` | `backend/src/error_reports/` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log | — |
 | `admin` | `backend/src/admin/` | Compliance dashboard aggregate queries (project-status counts, expiring-soon, recent jobs, audit-chain status) | — |
 | `common` | `backend/src/common/` | Shared SSE batch runner, PII redaction (`pii_patterns.py`), global exception handling | — |
 
-`frontend_fastapi/` mirrors most of the same domain names as its own routers/forms (`accounts`, `research_projects`, `jobs`, `admin`, `notifications`) — it is a thin UI layer over the backend API, holding no job/event/project data itself (see Frontend/backend boundaries below).
+`frontend_fastapi/` mirrors most of the same domain names as its own routers/forms (`accounts`, `research_projects`, `jobs`, `admin`, `notifications`, `error_reports`) — it is a thin UI layer over the backend API, holding no job/event/project data itself (see Frontend/backend boundaries below).
 
 ## Apps / packages
 
@@ -80,7 +81,7 @@ Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
 
 ## Frontend / backend boundaries
 
-`backend/` exposes one FastAPI app (`/studies`, `/import`, `/export`, `/results`, `/projects`) and has no authentication of its own beyond an optional shared-secret header (`HERMES_INTERNAL_KEY`). `frontend_fastapi/` (and, before it, `frontend/`) is the only intended caller: it session-authenticates the human, then issues every backend call server-side — including SSE streams — via its own `backend_client.py`, attaching `project_id`/`username` itself rather than trusting a browser-supplied value. `frontend_fastapi/` holds only its own local concerns (`users`, `sessions`, `project_documents`) in a separate local DB; all job/event/research-project *data* is fetched fresh from the backend on every request, never cached or duplicated locally. `webui/` and `proxy/` both talk to the backend directly instead, for different reasons (dev convenience vs. DMZ relay respectively).
+`backend/` exposes one FastAPI app (`/studies`, `/import`, `/export`, `/results`, `/projects`, `/notifications`, `/error_reports`) and has no authentication of its own beyond an optional shared-secret header (`HERMES_INTERNAL_KEY`). `frontend_fastapi/` (and, before it, `frontend/`) is the only intended caller: it session-authenticates the human, then issues every backend call server-side — including SSE streams — via its own `backend_client.py`, attaching `project_id`/`username` itself rather than trusting a browser-supplied value. `frontend_fastapi/` holds only its own local concerns (`users`, `sessions`, `project_documents`) in a separate local DB; all job/event/research-project *data* is fetched fresh from the backend on every request, never cached or duplicated locally. `webui/` and `proxy/` both talk to the backend directly instead, for different reasons (dev convenience vs. DMZ relay respectively).
 
 ## Test organisation
 
@@ -95,7 +96,7 @@ Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
 - `requirements.txt` / `requirements-dev.txt` (repo root) — cover `backend` + `frontend_fastapi` + Streamlit remnants; single shared dependency set.
 - `Dockerfile`, `Dockerfile.dev`, `docker-compose.yml`, `docker-compose.dev.yml` — dev compose brings up both Postgres DBs, `backend`, `worker`, `frontend_fastapi`, and `frontend` together; root compose has no frontend service of its own (production routing handled outside this repo).
 - `scripts/dev-up.sh` — starts backend + worker(s) + `frontend_fastapi` together for local dev (`HERMES_DEV_USE_DJANGO_FRONTEND=1` switches to legacy `frontend/`).
-- Alembic migrations: `backend/alembic/versions/` (HermesDB, 7 revisions) and `frontend_fastapi/alembic/versions/` (frontend's own local DB, 3 revisions) — two independently-migrated databases, never share a migration chain.
+- Alembic migrations: `backend/alembic/versions/` (HermesDB, 7 revisions) and `frontend_fastapi/alembic/versions/` (frontend's own local DB, 2 revisions) — two independently-migrated databases, never share a migration chain.
 
 ## Developer & architecture docs
 
