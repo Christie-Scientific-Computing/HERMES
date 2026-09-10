@@ -97,4 +97,39 @@
   <p class="text-gray-400 text-sm">No jobs recorded.</p>
   {% endif %}
 </div>
+
+<div class="bg-white border border-gray-200 rounded-lg p-6 mt-6">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">Error reports & feedback</h2>
+  {% if error_reports %}
+  <div class="overflow-x-auto">
+    <table class="min-w-full text-sm divide-y divide-gray-100">
+      <thead><tr>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Reported</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">By</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Category</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Job</th>
+        <th class="text-left py-1 font-medium text-gray-500">Message</th>
+      </tr></thead>
+      <tbody class="divide-y divide-gray-50">
+        {% for report in error_reports %}
+        <tr>
+          <td class="py-1 pr-4 text-gray-500 whitespace-nowrap">{{ report.created_at }}</td>
+          <td class="py-1 pr-4 text-gray-600">{{ report.username }}</td>
+          <td class="py-1 pr-4">
+            {{ report.category }}
+            {% if report.urgent %}<span class="inline-flex items-center rounded-full bg-red-600 text-white text-xs px-2 py-0.5 ml-1">Urgent</span>{% endif %}
+          </td>
+          <td class="py-1 pr-4 text-gray-500 font-mono">
+            {% if report.job_id %}<a class="text-hermes-700 hover:underline" href="/jobs/{{ report.job_id }}">{{ report.job_id }}</a>{% endif %}
+          </td>
+          <td class="py-1 text-gray-700 break-words max-w-md">{{ report.message }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-gray-400 text-sm">No reports submitted.</p>
+  {% endif %}
+</div>
 {% endblock %}
