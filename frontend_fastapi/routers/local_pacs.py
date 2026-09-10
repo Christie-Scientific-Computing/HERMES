@@ -130,7 +130,12 @@ async def local_pacs_move(
     redirect_params["submitted"] = "1"
     redirect_url = f"{request.url_for('local_pacs_browse')}?{urlencode(redirect_params)}"
 
-    destination = db.get(LocalPacsDestination, int(destination_id)) if destination_id else None
+    destination = None
+    if destination_id:
+        try:
+            destination = db.get(LocalPacsDestination, int(destination_id))
+        except ValueError:
+            destination = None
     if destination is None:
         flash(session, "error", "No such destination -- it may have been removed. Choose another and try again.")
         return RedirectResponse(redirect_url, status_code=303)

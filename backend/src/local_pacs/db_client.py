@@ -43,9 +43,9 @@ def ensure_sentinel_project(projects_db: ProjectsDB) -> str:
         created_by=_SENTINEL_SYSTEM_USER,
         description=(
             "Sentinel project satisfying jobs.project_id for custodian-initiated local-PACS "
-            "(Conquest) relays. Grants no membership and authorizes nothing -- the actual "
-            "authorization is require_data_custodian, checked in frontend_fastapi before this "
-            "project is ever referenced."
+            "(Conquest) relays. No real user is ever added as a member, and membership here "
+            "authorizes nothing -- the actual authorization is require_data_custodian, checked "
+            "in frontend_fastapi before this project is ever referenced."
         ),
         ethics_reference=SENTINEL_PROJECT_ID,
     )

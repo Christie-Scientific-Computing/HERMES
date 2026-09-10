@@ -46,6 +46,19 @@ def test_non_custodian_cannot_move(client, make_user, login, csrf_token, destina
     mock_audit.assert_not_called()
 
 
+def test_malformed_destination_id_is_a_clean_flash_not_a_500(client, make_user, login, csrf_token, mock_audit):
+    make_user("bob", is_staff=True)
+    login("bob")
+
+    resp = client.post("/local_pacs/move", data={
+        "csrf_token": csrf_token(), "patient_id": "ANON1", "study_instance_uid": "1.2.3",
+        "destination_id": "not-a-number",
+    }, follow_redirects=False)
+
+    assert resp.status_code == 303
+    mock_audit.assert_not_called()
+
+
 def test_successful_move_is_relayed_and_audited(client, make_user, login, csrf_token, destination, mock_audit, monkeypatch):
     make_user("bob", is_staff=True)
     login("bob")
