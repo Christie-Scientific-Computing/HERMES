@@ -1,7 +1,7 @@
 ---
 generated_at: 2026-09-10T00:00:00Z
-staleness_key: git:22fc15889d5e61322e95836430f15871d6145fdf54ec448bc0d12693544c96ef
-generated_at_commit: 4726270c5e20025da43b1f9439e08fbce92fbc31
+staleness_key: git:940f4d6c867ecc17fbbafea3c8697e36289d66c7ee9d5b74788fd437d1701d83
+generated_at_commit: 708cde90229e9a825ff24d02f3498e6271a48be1
 ---
 
 # Architecture Map
@@ -18,26 +18,28 @@ graph TD
         WEBUI[webui\nthrowaway dev tool]
     end
     PROXY[proxy\nDMZ reverse proxy]
-    API[backend\nFastAPI, all features]
-    WORKER[backend/worker.py]
-    HDB[(HermesDB\nPostgres)]
-    FDB[(frontend_fastapi\nlocal DB)]
-    ANON[(anon-mapping DB\nexternal, read-only)]
-    ORTHANC[Orthanc\nDICOM hub]
-    PROKNOW[ProKnow\ncloud RT]
-    PINNACLE[PinnacleExport\nsubmodule, local]
+    subgraph Backend
+        API[backend\nFastAPI app, all features]
+        WORKER[backend/worker.py\nbatch task-queue worker]
+    end
+    HERMESDB[(HermesDB\nPostgres, HERMES-owned)]
+    ANONDB[(Anon-mapping DB\nPostgres, external, read-only)]
+    ORTHANC[(Orthanc\nDICOM hub)]
+    PROKNOW[(ProKnow\ncloud RT)]
+    PINNACLE[(Pinnacle\nlocal, via PinnacleExport submodule)]
 
     FASTAPI --> PROXY
     DJANGO --> PROXY
     WEBUI --> API
     PROXY --> API
-    FASTAPI --> FDB
-    API --> HDB
-    API --> ANON
+    FASTAPI --> API
+    DJANGO --> API
+    API --> HERMESDB
+    API --> ANONDB
     API --> ORTHANC
     API --> PROKNOW
     API --> PINNACLE
-    WORKER --> HDB
+    WORKER --> HERMESDB
     WORKER --> ORTHANC
     WORKER --> PROKNOW
     WORKER --> PINNACLE

@@ -77,7 +77,7 @@ async def dashboard(user: User = Depends(require_login), ctx: dict = Depends(get
     jobs = []
     for p in projects:
         try:
-            jobs.extend(await backend_client.list_project_jobs(p["project_id"]))
+            jobs.extend(await backend_client.list_project_jobs_with_counts(p["project_id"]))
         except backend_client.BackendError:
             pass
     jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)

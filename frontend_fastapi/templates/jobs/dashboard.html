@@ -26,16 +26,18 @@
   {% if recent_jobs %}
   <table class="min-w-full text-sm divide-y divide-gray-100">
     <thead><tr>
-      <th class="text-left py-1 font-medium text-gray-500">Job</th>
-      <th class="text-left py-1 font-medium text-gray-500">Description</th>
-      <th class="text-left py-1 font-medium text-gray-500">Created</th>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Description</th>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Created</th>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Imported</th>
+      <th class="text-left py-1 font-medium text-gray-500">Exported</th>
     </tr></thead>
     <tbody class="divide-y divide-gray-50">
       {% for job in recent_jobs %}
       <tr>
-        <td class="py-1"><a class="text-hermes-700 hover:underline" href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a></td>
-        <td class="py-1 text-gray-600">{{ job.description }}</td>
-        <td class="py-1 text-gray-500">{{ job.created_at }}</td>
+        <td class="py-1 pr-4"><a class="text-hermes-700 hover:underline" href="/jobs/{{ job.job_id }}">{{ job.description }}</a></td>
+        <td class="py-1 pr-4 text-gray-500">{{ job.created_at }}</td>
+        <td class="py-1 pr-4 tabular-nums">{{ job.imported_count }} / {{ job.submitted_count }}</td>
+        <td class="py-1 tabular-nums">{{ job.exported_count }} / {{ job.export_attempted_count }}</td>
       </tr>
       {% endfor %}
     </tbody>

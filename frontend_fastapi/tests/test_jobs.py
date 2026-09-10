@@ -32,7 +32,7 @@ def _job_info(project_id=PROJECT_ID, is_combined=False, summary=None):
 def mock_backend(monkeypatch):
     mocks = {}
     for name in (
-        "list_projects", "list_user_active_projects", "list_project_jobs",
+        "list_projects", "list_user_active_projects", "list_project_jobs", "list_project_jobs_with_counts",
         "ensure_superuser_bypass_project", "get_orthanc_modalities", "get_proknow_collections",
         "batch_import_file", "combined_import_export_file", "dicom_move_file", "proknow_upload_file",
         "job_summary", "job_patients", "job_patients_summary",
@@ -44,9 +44,35 @@ def mock_backend(monkeypatch):
     mocks["list_user_active_projects"].return_value = []
     mocks["list_projects"].return_value = []
     mocks["list_project_jobs"].return_value = []
+    mocks["list_project_jobs_with_counts"].return_value = []
     mocks["get_orthanc_modalities"].return_value = ["AE1"]
     mocks["get_proknow_collections"].return_value = ["Collection1"]
     return mocks
+
+
+# ---- dashboard (F011: cleaned description + import/export counts) ----
+
+def test_dashboard_shows_counts_and_no_raw_job_id(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_user_active_projects"].return_value = [_project()]
+    mock_backend["list_project_jobs_with_counts"].return_value = [{
+        "job_id": "11111111-1111-1111-1111-111111111111",
+        "description": "Batch import (patients.csv)",
+        "created_at": "2026-01-01T00:00:00Z",
+        "imported_count": 42, "submitted_count": 50,
+        "exported_count": 38, "export_attempted_count": 38,
+    }]
+
+    resp = client.get("/")
+
+    assert resp.status_code == 200
+    assert "Batch import (patients.csv)" in resp.text
+    assert "42" in resp.text and "50" in resp.text
+    assert "38" in resp.text
+    # the job id is still needed in the link's href, but must not appear as
+    # its own visible cell/text (the raw-UUID column this feature removes)
+    assert ">11111111-1111-1111-1111-111111111111<" not in resp.text
 
 
 # ---- _patient_rows / _filter_patient_rows: the tri-state filter logic ----

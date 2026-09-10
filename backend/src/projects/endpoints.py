@@ -211,6 +211,15 @@ async def project_jobs(project_id: str):
     return {"project_id": project_id, "jobs": projects_db.list_project_jobs(project_id)}
 
 
+@router.get("/{project_id}/jobs_with_counts")
+async def project_jobs_with_counts(project_id: str, limit: int = Query(10)):
+    """Same rows as `project_jobs`, but with the imported/exported counts
+    already used by the admin dashboard (StatusDB.list_recent_jobs_with_counts,
+    Phase 4) -- scoped to this project instead of global. Backs the
+    frontpage's recent-jobs table (F011); a separate endpoint from
+    `project_jobs` since it's a different query (StatusDB, not ProjectsDB)
+    for a different consumer (project_detail's own job list is unaffected)."""
+    return {"project_id": project_id, "jobs": status_db.list_recent_jobs_with_counts(limit=limit, project_id=project_id)}
 @router.post("/{project_id}/requested_patients")
 async def add_requested_patients(project_id: str, body: RequestedPatientsRequest):
     if not projects_db.is_member(project_id, body.added_by):
