@@ -476,7 +476,7 @@ def test_patient_detail_renders_plans_and_timeline(client, make_user, login, moc
     mock_backend["list_projects"].return_value = [_project()]
     mock_backend["job_summary"].return_value = _job_info()
     mock_backend["patient_timeline"].return_value = {
-        "events": [{"ts": "t", "stage": "retrieve", "event_type": "success", "attempt": 1}],
+        "events": [{"mrn": "MRN1", "stage": "retrieve", "outcome": "success", "attempt": 1, "start_ts": "2026-01-01T00:00:00+00:00", "end_ts": "2026-01-01T00:00:05+00:00", "error_message": None}],
     }
     mock_backend["patient_plans"].return_value = {"available": True, "plans": [_plan()]}
     mock_backend["job_patients_summary"].return_value = {"patients": [{"mrn": "MRN1", "in_mosaiq": True}]}
@@ -533,7 +533,7 @@ def test_patient_detail_plans_failure_does_not_blank_the_timeline(client, make_u
     mock_backend["list_projects"].return_value = [_project()]
     mock_backend["job_summary"].return_value = _job_info()
     mock_backend["patient_timeline"].return_value = {
-        "events": [{"ts": "t", "stage": "retrieve", "event_type": "success", "attempt": 1}],
+        "events": [{"mrn": "MRN1", "stage": "retrieve", "outcome": "success", "attempt": 1, "start_ts": "2026-01-01T00:00:00+00:00", "end_ts": "2026-01-01T00:00:05+00:00", "error_message": None}],
     }
     mock_backend["patient_plans"].side_effect = backend_client.BackendError(500, "plans db down")
 
@@ -604,7 +604,7 @@ def test_results_lookup_by_patient_staff_can_search_without_a_job_id(client, mak
     login("admin")
     mock_backend["list_projects"].return_value = []
     mock_backend["patient_timeline_all"].return_value = {
-        "events": [{"ts": "t", "stage": "retrieve", "event_type": "success", "attempt": 1}],
+        "events": [{"mrn": "MRN1", "stage": "retrieve", "outcome": "success", "attempt": 1, "start_ts": "2026-01-01T00:00:00+00:00", "end_ts": "2026-01-01T00:00:05+00:00", "error_message": None}],
     }
 
     resp = client.get("/results?lookup=patient&mrn=MRN1")
