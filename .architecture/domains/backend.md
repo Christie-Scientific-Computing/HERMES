@@ -1,7 +1,7 @@
 ---
-generated_at: 2026-09-10T18:15:35Z
-staleness_key: git:35cf6a2d0e4d19d6358ff93016638e8e4c132f91315d1cd53a2fc9864d782f92
-generated_at_commit: 74c42276fe01e9f5a9ce4b981541aca953af7e53
+generated_at: 2026-09-10T21:15:00Z
+staleness_key: git:f2c8cea4e7a489e36e0a21da005f90a64a4b5d2cf7da611d043900f54eb947ea
+generated_at_commit: cb058f2b4c95089457a206cf0bce265833349f2c
 parent: ../../ARCHITECTURE.md
 ---
 
@@ -27,6 +27,7 @@ graph TD
     ADMIN[admin/\ncompliance dashboard]
     PLANS[plans/\nread-only PinnacleExport plans table]
     ERRORREPORTS[error_reports/\nuser-submitted feedback/error log]
+    LOCALPACS[local_pacs/\naudits Conquest moves into HermesDB]
     COMMON[common/\nSSE runner, PII redaction, errors]
 
     MAIN --> RETRIEVE
@@ -37,12 +38,16 @@ graph TD
     MAIN --> ADMIN
     MAIN --> NOTIFICATIONS
     MAIN --> ERRORREPORTS
+    MAIN --> LOCALPACS
     RETRIEVE --> STATUS
     EXPORT --> STATUS
     RETRIEVE --> IDENTITY
     EXPORT --> IDENTITY
     STUDIES --> IDENTITY
     RESULTS --> IDENTITY
+    LOCALPACS --> IDENTITY
+    LOCALPACS --> STATUS
+    LOCALPACS --> PROJECTS
     RETRIEVE --> PROJECTS
     EXPORT --> PROJECTS
     RESULTS --> COMMON
@@ -66,12 +71,13 @@ graph TD
 | Notifications | `backend/src/notifications/` | Persisted job-done/approval-decision notifications |
 | Error reports | `backend/src/error_reports/db_client.py`, `endpoints.py` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log with a persisted `resolved_at`/`resolved_by` addressed state (`mark_addressed`, `POST /error_reports/{id}/resolve`, `unaddressed_only` list filter) |
 | Admin | `backend/src/admin/endpoints.py` | Compliance dashboard: project-status counts, expiring-soon list, recent-jobs-with-counts table, audit-chain status |
+| Local PACS audit | `backend/src/local_pacs/endpoints.py`, `db_client.py` | `verify_internal_key`-only endpoint (`POST /local_pacs/audit_move`) recording a Conquest-to-destination move (performed entirely in `frontend_fastapi`, never here) into the normal `jobs`/`patients`/`events` hash chain, under an idempotently-bootstrapped sentinel `research_projects` row (`project_id="localPACSTransfer"`); resolves the caller's anon patient ID via `identity/anon.py` before writing. The only backend module in this feature — the actual DICOM C-ECHO/C-FIND/C-MOVE traffic lives in `frontend_fastapi/local_pacs/` since `backend` can't reach Conquest (firewalled) |
 | Shared infra | `backend/src/common/sse.py`, `pii_patterns.py`, `errors.py` | `run_batch_job`/`BatchItem` SSE generator; `redact`/`redact_dict` PII floor; global PII-safe exception handler |
 | DB pool / migrations | `backend/src/db.py`, `backend/src/database.py`, `backend/alembic/versions/` | Shared `psycopg2` pool (`DATABASE_URL`); Alembic runs on startup |
 
 ## Test organisation
 
-`backend/tests/` (42 files) — pytest against a real Postgres, no mocked DB layer. Notable groupings: `test_status_db.py`/`test_projects_db.py`/`test_projects_enforcement.py`/`test_tasks_db.py`/`test_worker.py`/`test_observer_stream.py`/`test_hash_chain.py` (core data-layer + queue behaviour); `test_*_anon_boundary.py` + `test_*_pii_boundary.py` + `backend/tests/support/pii_assertions.py` (the PII-boundary-specific suite, built directly on `pii_patterns.py`); `test_cleanup_orthanc.py`/`test_retrieve_endpoints_errors.py` need the `PinnacleExport` submodule and `pytest.importorskip` if it's absent. `conftest.py`'s `active_project` fixture creates a fully-approved project for tests that need to pass the ethics gate.
+`backend/tests/` (43 files) — pytest against a real Postgres, no mocked DB layer. Notable groupings: `test_status_db.py`/`test_projects_db.py`/`test_projects_enforcement.py`/`test_tasks_db.py`/`test_worker.py`/`test_observer_stream.py`/`test_hash_chain.py` (core data-layer + queue behaviour); `test_*_anon_boundary.py` + `test_*_pii_boundary.py` + `backend/tests/support/pii_assertions.py` (the PII-boundary-specific suite, built directly on `pii_patterns.py`); `test_cleanup_orthanc.py`/`test_retrieve_endpoints_errors.py` need the `PinnacleExport` submodule and `pytest.importorskip` if it's absent. `conftest.py`'s `active_project` fixture creates a fully-approved project for tests that need to pass the ethics gate.
 
 ## Notable conventions
 
