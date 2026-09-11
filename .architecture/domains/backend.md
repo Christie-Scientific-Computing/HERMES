@@ -1,7 +1,7 @@
 ---
-generated_at: 2026-09-10T00:00:00Z
-staleness_key: git:940f4d6c867ecc17fbbafea3c8697e36289d66c7ee9d5b74788fd437d1701d83
-generated_at_commit: 708cde90229e9a825ff24d02f3498e6271a48be1
+generated_at: 2026-09-10T18:15:35Z
+staleness_key: git:35cf6a2d0e4d19d6358ff93016638e8e4c132f91315d1cd53a2fc9864d782f92
+generated_at_commit: 74c42276fe01e9f5a9ce4b981541aca953af7e53
 parent: ../../ARCHITECTURE.md
 ---
 
@@ -26,6 +26,7 @@ graph TD
     NOTIFICATIONS[notifications/]
     ADMIN[admin/\ncompliance dashboard]
     PLANS[plans/\nread-only PinnacleExport plans table]
+    ERRORREPORTS[error_reports/\nuser-submitted feedback/error log]
     COMMON[common/\nSSE runner, PII redaction, errors]
 
     MAIN --> RETRIEVE
@@ -35,6 +36,7 @@ graph TD
     MAIN --> PROJECTS
     MAIN --> ADMIN
     MAIN --> NOTIFICATIONS
+    MAIN --> ERRORREPORTS
     RETRIEVE --> STATUS
     EXPORT --> STATUS
     RETRIEVE --> IDENTITY
@@ -62,13 +64,14 @@ graph TD
 | Anonymisation boundary | `backend/src/identity/anon.py` | `resolve_real_id`/`to_display_id`, `shift_date`; passthrough when `ANON_DB_*`/`ANON_CONFIG` unset |
 | Plans | `backend/src/plans/db_client.py` (`PlansDB`) | Read-only access to PinnacleExport's own `plans` table (same Postgres database, separate schema) |
 | Notifications | `backend/src/notifications/` | Persisted job-done/approval-decision notifications |
+| Error reports | `backend/src/error_reports/db_client.py`, `endpoints.py` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log with a persisted `resolved_at`/`resolved_by` addressed state (`mark_addressed`, `POST /error_reports/{id}/resolve`, `unaddressed_only` list filter) |
 | Admin | `backend/src/admin/endpoints.py` | Compliance dashboard: project-status counts, expiring-soon list, recent-jobs-with-counts table, audit-chain status |
 | Shared infra | `backend/src/common/sse.py`, `pii_patterns.py`, `errors.py` | `run_batch_job`/`BatchItem` SSE generator; `redact`/`redact_dict` PII floor; global PII-safe exception handler |
 | DB pool / migrations | `backend/src/db.py`, `backend/src/database.py`, `backend/alembic/versions/` | Shared `psycopg2` pool (`DATABASE_URL`); Alembic runs on startup |
 
 ## Test organisation
 
-`backend/tests/` (38 files) — pytest against a real Postgres, no mocked DB layer. Notable groupings: `test_status_db.py`/`test_projects_db.py`/`test_projects_enforcement.py`/`test_tasks_db.py`/`test_worker.py`/`test_observer_stream.py`/`test_hash_chain.py` (core data-layer + queue behaviour); `test_*_anon_boundary.py` + `test_*_pii_boundary.py` + `backend/tests/support/pii_assertions.py` (the PII-boundary-specific suite, built directly on `pii_patterns.py`); `test_cleanup_orthanc.py`/`test_retrieve_endpoints_errors.py` need the `PinnacleExport` submodule and `pytest.importorskip` if it's absent. `conftest.py`'s `active_project` fixture creates a fully-approved project for tests that need to pass the ethics gate.
+`backend/tests/` (42 files) — pytest against a real Postgres, no mocked DB layer. Notable groupings: `test_status_db.py`/`test_projects_db.py`/`test_projects_enforcement.py`/`test_tasks_db.py`/`test_worker.py`/`test_observer_stream.py`/`test_hash_chain.py` (core data-layer + queue behaviour); `test_*_anon_boundary.py` + `test_*_pii_boundary.py` + `backend/tests/support/pii_assertions.py` (the PII-boundary-specific suite, built directly on `pii_patterns.py`); `test_cleanup_orthanc.py`/`test_retrieve_endpoints_errors.py` need the `PinnacleExport` submodule and `pytest.importorskip` if it's absent. `conftest.py`'s `active_project` fixture creates a fully-approved project for tests that need to pass the ethics gate.
 
 ## Notable conventions
 

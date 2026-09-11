@@ -1,7 +1,17 @@
 {% macro form_field(field) %}
   <div>
+    {% if field.type == "BooleanField" %}
+    {# Checkbox fields read label-to-the-right-of-the-box, not
+       label-above-the-box -- the generic layout below reads oddly for a
+       checkbox specifically. #}
+    <label class="flex items-center gap-2 text-sm text-gray-700">
+      {{ field() }}
+      <span>{{ field.label.text }}</span>
+    </label>
+    {% else %}
     <label class="block text-sm font-medium text-gray-700">{{ field.label }}</label>
     {{ field() }}
+    {% endif %}
     {% if field.errors %}<p class="text-xs text-red-600 mt-1">{{ field.errors[0] }}</p>{% endif %}
     {% if field.description %}<p class="text-xs text-gray-400 mt-1">{{ field.description }}</p>{% endif %}
   </div>

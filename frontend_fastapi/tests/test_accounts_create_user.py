@@ -8,6 +8,25 @@ def test_non_staff_user_cannot_create_accounts(client, make_user, login):
     assert resp.status_code == 403
 
 
+def test_create_user_form_only_shows_the_essential_fields(client, make_user, login):
+    """Name/department are collected via the invite flow instead -- this
+    quick direct-create page should only ask for what it actually needs."""
+    make_user(username="bob", is_staff=True)
+    login("bob")
+    resp = client.get("/accounts/users/create")
+    assert resp.status_code == 200
+    assert 'name="username"' in resp.text
+    assert 'name="email"' in resp.text
+    assert 'name="password1"' in resp.text
+    assert 'name="password2"' in resp.text
+    assert 'name="is_staff"' in resp.text
+    assert 'name="first_name"' not in resp.text
+    assert 'name="last_name"' not in resp.text
+    assert 'name="department"' not in resp.text
+    # is_staff renders last, right before the submit button.
+    assert resp.text.index('name="is_staff"') > resp.text.index('name="password2"')
+
+
 def test_staff_creates_an_immediately_usable_account(client, make_user, login, csrf_token, db):
     make_user(username="bob", is_staff=True)
     login("bob")

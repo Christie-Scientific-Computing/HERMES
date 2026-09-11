@@ -8,32 +8,6 @@
   {% else %}Jobs across the projects you belong to.{% endif %}
 </p>
 
-<div class="bg-white border border-gray-200 rounded-lg p-6 mb-8">
-  <h2 class="text-sm font-semibold text-gray-900 mb-4">Your jobs ({{ project_jobs|length }})</h2>
-  {% if project_jobs %}
-  <table class="min-w-full text-sm divide-y divide-gray-100">
-    <thead><tr>
-      <th class="text-left py-1 font-medium text-gray-500">Job</th>
-      <th class="text-left py-1 font-medium text-gray-500">Project</th>
-      <th class="text-left py-1 font-medium text-gray-500">Description</th>
-      <th class="text-left py-1 font-medium text-gray-500">Created</th>
-    </tr></thead>
-    <tbody class="divide-y divide-gray-50">
-      {% for job in project_jobs %}
-      <tr>
-        <td class="py-1"><a class="text-hermes-700 hover:underline font-mono" href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a></td>
-        <td class="py-1 text-gray-600">{{ job.project_title }}</td>
-        <td class="py-1 text-gray-600">{{ job.description }}</td>
-        <td class="py-1 text-gray-500">{{ job.created_at }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="text-gray-400 text-sm">No jobs under any of your projects yet.</p>
-  {% endif %}
-</div>
-
 <h2 class="text-sm font-semibold text-gray-900 mb-2">Narrow your search</h2>
 <div class="flex gap-4 border-b border-gray-200 mb-6 text-sm">
   <a href="?lookup=job" class="pb-2 {% if lookup == 'job' %}border-b-2 border-hermes-700 text-hermes-700 font-medium{% else %}text-gray-500{% endif %}">By job</a>
@@ -127,4 +101,39 @@
 {% if error %}
 <div class="max-w-md mt-4 rounded-md bg-red-50 border border-red-200 p-4 text-sm text-red-700">{{ error }}</div>
 {% endif %}
+
+<div class="bg-white border border-gray-200 rounded-lg p-6 mt-8">
+  <h2 class="text-sm font-semibold text-gray-900 mb-4">
+    Your jobs ({{ project_jobs_total }})
+    {% if project_jobs|length != project_jobs_total %}<span class="font-normal text-gray-400">— showing {{ project_jobs|length }}</span>{% endif %}
+  </h2>
+  {% if project_jobs %}
+  <div class="overflow-x-auto">
+    <table class="min-w-full text-sm divide-y divide-gray-100">
+      <thead><tr>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Job</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Project</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Description</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Created</th>
+        <th class="text-left py-1 pr-4 font-medium text-gray-500">Imported</th>
+        <th class="text-left py-1 font-medium text-gray-500">Exported</th>
+      </tr></thead>
+      <tbody class="divide-y divide-gray-50">
+        {% for job in project_jobs %}
+        <tr>
+          <td class="py-1 pr-4"><a class="text-hermes-700 hover:underline font-mono" href="/jobs/{{ job.job_id }}">{{ job.job_id }}</a></td>
+          <td class="py-1 pr-4 text-gray-600">{{ job.project_title }}</td>
+          <td class="py-1 pr-4 text-gray-600">{{ job.description }}</td>
+          <td class="py-1 pr-4 text-gray-500">{{ job.created_at | hermes_timestamp }}</td>
+          <td class="py-1 pr-4 tabular-nums">{{ job.imported_count }} / {{ job.submitted_count }}</td>
+          <td class="py-1 tabular-nums">{{ job.exported_count }} / {{ job.export_attempted_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-gray-400 text-sm">No jobs under any of your projects yet.</p>
+  {% endif %}
+</div>
 {% endblock %}

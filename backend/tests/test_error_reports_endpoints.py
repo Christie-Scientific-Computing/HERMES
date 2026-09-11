@@ -67,3 +67,39 @@ def test_list_error_reports_returns_newest_first(client, username):
     assert resp.status_code == 200
     own = [r for r in resp.json()["error_reports"] if r["username"] == username]
     assert [r["message"] for r in own] == ["second", "first"]
+
+
+def test_resolve_error_report_marks_addressed(client, username):
+    client.post("/error_reports", json={"username": username, "category": "feedback", "message": "please address"})
+    report_id = next(r for r in ErrorReportsDB().list_all() if r["username"] == username)["id"]
+
+    resp = client.post(f"/error_reports/{report_id}/resolve", params={"username": "alice"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    report = next(r for r in ErrorReportsDB().list_all() if r["id"] == report_id)
+    assert report["resolved_by"] == "alice"
+    assert report["resolved_at"] is not None
+
+
+def test_resolve_error_report_already_addressed_returns_404(client, username):
+    client.post("/error_reports", json={"username": username, "category": "feedback", "message": "please address"})
+    report_id = next(r for r in ErrorReportsDB().list_all() if r["username"] == username)["id"]
+    client.post(f"/error_reports/{report_id}/resolve", params={"username": "alice"})
+
+    resp = client.post(f"/error_reports/{report_id}/resolve", params={"username": "bob"})
+
+    assert resp.status_code == 404
+
+
+def test_list_error_reports_unaddressed_only(client, username):
+    client.post("/error_reports", json={"username": username, "category": "feedback", "message": "one"})
+    client.post("/error_reports", json={"username": username, "category": "feedback", "message": "two"})
+    # list_all orders newest-first, so own[0] is "two".
+    own = [r for r in ErrorReportsDB().list_all() if r["username"] == username]
+    client.post(f"/error_reports/{own[0]['id']}/resolve", params={"username": "alice"})
+
+    resp = client.get("/error_reports", params={"unaddressed_only": True})
+
+    own_unaddressed = [r for r in resp.json()["error_reports"] if r["username"] == username]
+    assert [r["message"] for r in own_unaddressed] == ["one"]

@@ -48,5 +48,12 @@ async def create_error_report(body: CreateErrorReportRequest):
 
 
 @router.get("")
-async def list_error_reports(limit: int = Query(100)):
-    return {"error_reports": error_reports_db.list_all(limit=limit)}
+async def list_error_reports(limit: int = Query(100), unaddressed_only: bool = Query(False)):
+    return {"error_reports": error_reports_db.list_all(limit=limit, unaddressed_only=unaddressed_only)}
+
+
+@router.post("/{report_id}/resolve")
+async def resolve_error_report(report_id: int, username: str = Query(...)):
+    if not error_reports_db.mark_addressed(report_id, username):
+        raise HTTPException(status_code=404, detail="No such unaddressed error report")
+    return {"ok": True}

@@ -1,7 +1,7 @@
 ---
-generated_at: 2026-09-10T00:00:00Z
-staleness_key: git:940f4d6c867ecc17fbbafea3c8697e36289d66c7ee9d5b74788fd437d1701d83
-generated_at_commit: 708cde90229e9a825ff24d02f3498e6271a48be1
+generated_at: 2026-09-10T18:15:35Z
+staleness_key: git:35cf6a2d0e4d19d6358ff93016638e8e4c132f91315d1cd53a2fc9864d782f92
+generated_at_commit: 74c42276fe01e9f5a9ce4b981541aca953af7e53
 ---
 
 # Architecture Map
@@ -56,12 +56,13 @@ Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
 | `retrieve` | `backend/src/retrieve/` | Import: Mosaiq/Pinnacle/ProKnow search, DICOM pull to Orthanc, Orthanc cleanup | — |
 | `export` | `backend/src/export/` | Export: DICOM C-MOVE to registered modalities, ProKnow SDK upload | — |
 | `studies` | `backend/src/studies/` | Read-only study/series browsing against Orthanc | — |
+| `results` | `backend/src/results/` | Job summaries, per-patient event timelines (incl. attempt-pairing), the observer SSE stream (`GET /results/job/{job_id}/stream`) | — |
 | `identity` | `backend/src/identity/` | Anon ⇄ real ID translation boundary (`anon.py`) | — |
 | `plans` | `backend/src/plans/` | Read-only access to PinnacleExport's own `plans` table | — |
 | `status` | `backend/src/status/` | Job/patient/event audit log (`StatusDB`) and the `tasks` queue (`TasksDB`), plus the hash chain | — |
 | `projects` | `backend/src/projects/` | Ethics/research-project workflow: lifecycle, membership, audit log, enforcement gate | — |
 | `notifications` | `backend/src/notifications/` | Persisted job-done/approval-decision notifications | — |
-| `error_reports` | `backend/src/error_reports/` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log | — |
+| `error_reports` | `backend/src/error_reports/` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log with a persisted addressed/resolved state | — |
 | `admin` | `backend/src/admin/` | Compliance dashboard aggregate queries (project-status counts, expiring-soon, recent jobs, audit-chain status) | — |
 | `common` | `backend/src/common/` | Shared SSE batch runner, PII redaction (`pii_patterns.py`), global exception handling | — |
 
@@ -98,7 +99,7 @@ Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
 - `requirements.txt` / `requirements-dev.txt` (repo root) — cover `backend` + `frontend_fastapi` + Streamlit remnants; single shared dependency set.
 - `Dockerfile`, `Dockerfile.dev`, `docker-compose.yml`, `docker-compose.dev.yml` — dev compose brings up both Postgres DBs, `backend`, `worker`, `frontend_fastapi`, and `frontend` together; root compose has no frontend service of its own (production routing handled outside this repo).
 - `scripts/dev-up.sh` — starts backend + worker(s) + `frontend_fastapi` together for local dev (`HERMES_DEV_USE_DJANGO_FRONTEND=1` switches to legacy `frontend/`).
-- Alembic migrations: `backend/alembic/versions/` (HermesDB, 7 revisions) and `frontend_fastapi/alembic/versions/` (frontend's own local DB, 2 revisions) — two independently-migrated databases, never share a migration chain.
+- Alembic migrations: `backend/alembic/versions/` (HermesDB, 11 revisions) and `frontend_fastapi/alembic/versions/` (frontend's own local DB, 2 revisions) — two independently-migrated databases, never share a migration chain.
 
 ## Developer & architecture docs
 

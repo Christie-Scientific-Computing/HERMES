@@ -4,7 +4,11 @@
 
 {% macro status_badge(status, expired=False) %}
   {% if expired %}
-    <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-gray-100 text-gray-600">Expired</span>
+    {# Red, not grey -- an expired approval means "no more access", the
+       same practical consequence as a rejection/revocation, so it should
+       read with the same visual weight rather than blending in with the
+       merely-inert "Draft" grey. #}
+    <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold bg-red-100 text-red-800">&#9888; Expired</span>
   {% elif status == "draft" %}
     <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-slate-100 text-slate-700">Draft</span>
   {% elif status == "submitted" %}
@@ -35,6 +39,39 @@
   <p class="mt-2 text-sm text-gray-500 line-clamp-2">{{ project.description or "No description." }}</p>
   <p class="mt-2 text-xs text-gray-400">Created by {{ project.created_by }}</p>
 </a>
+{% endmacro %}
+
+{# F007 -- the table row shared by list.html and review_queue.html's two
+   sections, so the same six columns aren't triplicated. #}
+{% macro project_table(projects, empty_message) %}
+{% if projects %}
+<div class="overflow-x-auto">
+  <table class="min-w-full text-sm divide-y divide-gray-100">
+    <thead><tr>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Name</th>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Description</th>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Created by</th>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Created at</th>
+      <th class="text-left py-1 pr-4 font-medium text-gray-500">Status</th>
+      <th class="text-left py-1 font-medium text-gray-500">Expiry date</th>
+    </tr></thead>
+    <tbody class="divide-y divide-gray-50">
+      {% for project in projects %}
+      <tr class="{% if is_project_expired(project) %}bg-red-50{% endif %}">
+        <td class="py-2 pr-4"><a class="text-hermes-700 hover:underline font-medium" href="/projects/{{ project.project_id }}">{{ project.title }}</a></td>
+        <td class="py-2 pr-4 text-gray-500 max-w-md truncate">{{ project.description or "No description." }}</td>
+        <td class="py-2 pr-4 text-gray-600">{{ project.created_by }}</td>
+        <td class="py-2 pr-4 text-gray-500 whitespace-nowrap">{{ project.created_at | hermes_timestamp }}</td>
+        <td class="py-2 pr-4">{{ status_badge(project.status, expired=is_project_expired(project)) }}</td>
+        <td class="py-2 text-gray-500 whitespace-nowrap">{{ project.expiry_date | hermes_date if project.expiry_date else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="text-gray-400 text-center py-16">{{ empty_message }}</p>
+{% endif %}
 {% endmacro %}
 
 {# Visualizes the project lifecycle: draft -> submitted -> approved/rejected. #}
@@ -92,7 +129,7 @@
     <tbody class="divide-y divide-gray-100">
       {% for entry in entries %}
       <tr>
-        <td class="px-4 py-2 whitespace-nowrap text-gray-500">{{ entry.ts }}</td>
+        <td class="px-4 py-2 whitespace-nowrap text-gray-500">{{ entry.ts | hermes_timestamp }}</td>
         <td class="px-4 py-2 whitespace-nowrap text-gray-700">{{ entry.username }}</td>
         <td class="px-4 py-2 whitespace-nowrap">
           <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium

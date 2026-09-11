@@ -64,3 +64,39 @@ def test_list_all_respects_limit(db, username):
         db.create(username, category="feedback", message=f"n{i}")
 
     assert len(db.list_all(limit=2)) == 2
+
+
+def test_mark_addressed_records_who_and_when(db, username):
+    db.create(username, category="feedback", message="please address me")
+    report_id = next(r for r in db.list_all() if r["username"] == username)["id"]
+
+    assert db.mark_addressed(report_id, "alice") is True
+
+    report = next(r for r in db.list_all(unaddressed_only=False) if r["id"] == report_id)
+    assert report["resolved_by"] == "alice"
+    assert report["resolved_at"] is not None
+
+
+def test_mark_addressed_is_idempotent(db, username):
+    db.create(username, category="feedback", message="please address me")
+    report_id = next(r for r in db.list_all() if r["username"] == username)["id"]
+
+    assert db.mark_addressed(report_id, "alice") is True
+    assert db.mark_addressed(report_id, "bob") is False
+
+
+def test_mark_addressed_unknown_id_returns_false(db):
+    assert db.mark_addressed(-1, "alice") is False
+
+
+def test_list_all_unaddressed_only_filters_out_addressed(db, username):
+    db.create(username, category="feedback", message="one")
+    db.create(username, category="feedback", message="two")
+    # list_all orders newest-first, so reports[0] is "two".
+    reports = [r for r in db.list_all() if r["username"] == username]
+    db.mark_addressed(reports[0]["id"], "alice")
+
+    unaddressed = [r for r in db.list_all(unaddressed_only=True) if r["username"] == username]
+
+    assert len(unaddressed) == 1
+    assert unaddressed[0]["message"] == "one"

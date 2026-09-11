@@ -43,6 +43,10 @@
       outline: 2px solid transparent; border-color: #1d6fa5;
       box-shadow: 0 0 0 3px rgba(29, 111, 165, 0.15);
     }
+    /* Slow, subtle "alive" pulse for the anonymiser-on nav badge -- a
+       gentle opacity dip, not a hard on/off blink. */
+    @keyframes hermes-slow-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
+    .hermes-slow-blink { animation: hermes-slow-blink 4s ease-in-out infinite; }
   </style>
 </head>
 <body class="h-full flex flex-col min-h-screen">
@@ -56,14 +60,20 @@
           </a>
           {% if user %}
           <div class="hidden md:flex items-center gap-4 text-sm">
-            <a href="/" class="text-hermes-200 hover:text-white">Dashboard</a>
+            <a href="/" class="text-hermes-200 hover:text-white">Home</a>
             <a href="/projects" class="text-hermes-200 hover:text-white">Projects</a>
             <a href="/results" class="text-hermes-200 hover:text-white">Results</a>
             <a href="/report" class="text-hermes-200 hover:text-white">Report issue</a>
             {% if user.is_staff %}
-              <a href="/projects/review" class="text-hermes-200 hover:text-white">Review Queue</a>
+              <a href="/projects/review" class="text-hermes-200 hover:text-white">
+                Review Projects
+                {% if nav_review_queue_count %}<span class="inline-flex items-center justify-center rounded-full bg-red-600 text-white text-xs px-1.5 py-0.5 ml-1">{{ nav_review_queue_count }}</span>{% endif %}
+              </a>
               <a href="/accounts/users" class="text-hermes-200 hover:text-white">Users</a>
-              <a href="/admin" class="text-hermes-200 hover:text-white">Admin</a>
+              <a href="/admin" class="text-hermes-200 hover:text-white">
+                Admin
+                {% if nav_urgent_reports_count %}<span class="inline-flex items-center justify-center rounded-full bg-red-600 text-white text-xs px-1.5 py-0.5 ml-1">{{ nav_urgent_reports_count }}</span>{% endif %}
+              </a>
             {% endif %}
           </div>
           {% endif %}
@@ -76,7 +86,7 @@
           {% if backend_health is none %}
             <span class="inline-flex items-center rounded-full bg-gray-600 text-white text-xs px-2 py-1">Backend unreachable</span>
           {% elif backend_health.anonymisation_active %}
-            <span class="inline-flex items-center rounded-full bg-green-600 text-white text-xs px-2 py-1">Anonymised</span>
+            <span class="hermes-slow-blink inline-flex items-center rounded-full bg-green-600 text-white text-xs px-2 py-1">Anonymiser: on</span>
           {% else %}
             <span class="inline-flex items-center rounded-full bg-amber-500 text-white text-xs px-2 py-1">Not anonymised (internal)</span>
           {% endif %}
@@ -115,7 +125,7 @@
                   <li class="p-3">
                     <p class="text-gray-700">{{ n.message }}</p>
                     <div class="flex items-center justify-between mt-1">
-                      <span class="text-xs text-gray-400">{{ n.created_at }}</span>
+                      <span class="text-xs text-gray-400">{{ n.created_at | hermes_timestamp }}</span>
                       <form method="post" action="/notifications/{{ n.id }}/read">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <button type="submit" class="text-xs text-hermes-700 hover:underline">Mark read</button>

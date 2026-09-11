@@ -99,7 +99,11 @@ def test_staff_sees_every_project_and_can_filter_by_status(client, make_user, lo
     resp = client.get("/projects?status=approved")
 
     assert resp.status_code == 200
-    mock_backend["list_projects"].assert_awaited_once_with(status="approved")
+    # Not assert_awaited_once_with: get_template_context's F002 nav badge
+    # (staff-only) makes its own separate list_projects(status="submitted")
+    # call on every staff page render, same "lightweight, duplicated
+    # convenience fetch" pattern as nav_active_projects.
+    mock_backend["list_projects"].assert_any_await(status="approved")
 
 
 def test_non_staff_sees_only_their_own_projects_and_status_filter_is_ignored(client, make_user, login, mock_backend):
@@ -111,6 +115,67 @@ def test_non_staff_sees_only_their_own_projects_and_status_filter_is_ignored(cli
 
     assert resp.status_code == 200
     mock_backend["list_projects"].assert_awaited_once_with(username="alice")
+
+
+# ---- project_list / review_queue: F007 table view ----
+
+def test_project_list_renders_a_table_with_all_columns(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_projects"].return_value = [_project(
+        status="approved", description="A detailed description.", created_by="bob",
+        expiry_date="2027-06-15T00:00:00+00:00",
+    )]
+
+    resp = client.get("/projects")
+
+    assert resp.status_code == 200
+    assert "<table" in resp.text
+    assert "project_card" not in resp.text
+    assert "A detailed description." in resp.text
+    assert "bob" in resp.text
+    assert "2026-01-01 at" in resp.text  # created_at via hermes_timestamp
+    assert "2027-06-15" in resp.text  # expiry_date via hermes_date, no time shown
+    assert "2027-06-15 at" not in resp.text
+
+
+def test_project_list_expired_approved_project_shows_expired_badge(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_projects"].return_value = [_project(
+        status="approved", expiry_date="2020-01-01T00:00:00+00:00",
+    )]
+
+    resp = client.get("/projects")
+
+    assert resp.status_code == 200
+    assert "Expired" in resp.text
+
+
+def test_project_list_draft_project_shows_dash_for_expiry_date(client, make_user, login, mock_backend):
+    make_user(username="alice")
+    login("alice")
+    mock_backend["list_projects"].return_value = [_project(status="draft", expiry_date=None)]
+
+    resp = client.get("/projects?status=approved")
+
+    assert resp.status_code == 200
+    assert "—" in resp.text
+
+
+def test_review_queue_renders_tables_not_card_grids(client, make_user, login, mock_backend):
+    make_user(username="admin", is_staff=True)
+    login("admin")
+    mock_backend["list_projects"].return_value = [_project(status="submitted", title="Needs Review", created_by="carol")]
+    mock_backend["list_pending_amendments"].return_value = [_project(status="approved", title="Amended One", created_by="dave")]
+
+    resp = client.get("/projects/review")
+
+    assert resp.status_code == 200
+    assert resp.text.count("<table") == 2
+    assert "project_card" not in resp.text
+    assert "carol" in resp.text
+    assert "dave" in resp.text
 
 
 def test_backend_error_shows_inline_message_instead_of_crashing(client, make_user, login, mock_backend):
@@ -471,7 +536,10 @@ def test_review_queue_lists_submitted_projects(client, make_user, login, mock_ba
 
     assert resp.status_code == 200
     assert "Needs Review" in resp.text
-    mock_backend["list_projects"].assert_awaited_once_with(status="submitted")
+    # Called twice with these same args now: once by review_queue's own
+    # fetch, once by get_template_context's F002 nav badge (staff-only,
+    # same duplicated-convenience-fetch pattern as nav_active_projects).
+    mock_backend["list_projects"].assert_any_await(status="submitted")
 
 
 # ---- project_detail ----

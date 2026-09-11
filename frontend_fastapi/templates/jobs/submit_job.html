@@ -86,7 +86,8 @@
               <p id="project-message-id" class="text-sm text-gray-600 mt-1">—</p>
               <p class="text-xs text-gray-400 mt-1">
                 Set on the project (for clinical-trial patients who need a different
-                pseudonymisation table). Not editable here -- contact a data custodian to change it.
+                pseudonymisation table). Not editable here --
+                <a id="project-amend-link" href="/projects" class="text-hermes-700 hover:underline">amend your project info</a> to change it.
               </p>
             </div>
           </div>
@@ -133,6 +134,7 @@ function hermesUpdateProjectMessageId() {
   var projectEl = document.getElementById('project_id');
   var mid = projectEl ? HERMES_PROJECT_MESSAGE_IDS[projectEl.value] : null;
   document.getElementById('project-message-id').textContent = (mid === null || mid === undefined) ? '—' : mid;
+  document.getElementById('project-amend-link').href = (projectEl && projectEl.value) ? '/projects/' + projectEl.value + '/amend' : '/projects';
 }
 
 function hermesUpdateVisibility() {

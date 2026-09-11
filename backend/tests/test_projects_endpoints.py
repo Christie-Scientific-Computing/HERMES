@@ -225,6 +225,26 @@ def test_pending_amendments_endpoint_lists_only_projects_with_one(client):
     assert without_amendment not in ids
 
 
+def test_active_projects_endpoint_excludes_expired(client):
+    """GET /projects/active must be expiry-aware, unlike the generic
+    GET ""?status=approved filter -- an approved-but-expired project must
+    not come back as "active" (this backs the submit-job form's project
+    choices; an expired project showing up there was a real bug)."""
+    owner = f"owner-{uuid.uuid4()}"
+    active_project = _create_approve(client, owner)
+    expired_project = client.post("/projects", json={"title": "Expired project", "created_by": owner}).json()["project_id"]
+    client.post(f"/projects/{expired_project}/submit", json={"username": owner})
+    client.post(f"/projects/{expired_project}/review", json={
+        "reviewer": "admin", "approved": True, "expiry_date": "2020-01-01T00:00:00Z",
+    })
+
+    result = client.get("/projects/active", params={"username": owner}).json()["projects"]
+    ids = {p["project_id"] for p in result}
+
+    assert active_project in ids
+    assert expired_project not in ids
+
+
 def test_add_requested_patients_requires_membership(client):
     owner = f"owner-{uuid.uuid4()}"
     project_id = _create_approve(client, owner)
