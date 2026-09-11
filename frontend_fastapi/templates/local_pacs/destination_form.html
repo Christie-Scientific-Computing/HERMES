@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% from "_form_field.html" import form_field %}
+{% block title %}{% if editing %}Edit{% else %}Add{% endif %} local PACS destination — HERMES{% endblock %}
+{% block content %}
+<div class="max-w-lg">
+  <h1 class="text-xl font-semibold text-gray-900 mb-6">{% if editing %}Edit{% else %}Add{% endif %} move destination</h1>
+  <form method="post" class="space-y-4 bg-white border border-gray-200 rounded-lg p-6">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for field in form %}{{ form_field(field) }}{% endfor %}
+    <div class="flex gap-2">
+      <button type="submit" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+        {% if editing %}Save{% else %}Add destination{% endif %}
+      </button>
+      <a href="/local_pacs/destinations" class="rounded-md bg-gray-100 text-gray-700 px-4 py-2 text-sm font-medium hover:bg-gray-200">
+        Cancel
+      </a>
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -94,3 +94,25 @@ class ProjectDocument(Base):
     original_filename: Mapped[str] = mapped_column(String(255))
     uploaded_by: Mapped[str] = mapped_column(String(150))
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LocalPacsDestination(Base):
+    """
+    F003 -- a data custodian-curated destination a local-PACS (Conquest)
+    move (F004) can be sent to. Purely a labelling/curation layer: adding a
+    row here does not register anything with Conquest itself, which must
+    already be configured, ops-side, to reach this AE title (see
+    docs/plans local-pacs-query plan.md's Out of scope). Lives in this
+    project's own local DB, not HermesDB -- it's UI configuration, not
+    job/event/audit data (F005's audit records store the AE title/display
+    name as they were AT THE TIME of the move, not a live FK here, so
+    deleting a destination never breaks a past audit record).
+    """
+    __tablename__ = "local_pacs_destinations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ae_title: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(String(500), default="")
+    created_by: Mapped[str] = mapped_column(String(150))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

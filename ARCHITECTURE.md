@@ -1,7 +1,7 @@
 ---
-generated_at: 2026-09-10T18:15:35Z
-staleness_key: git:35cf6a2d0e4d19d6358ff93016638e8e4c132f91315d1cd53a2fc9864d782f92
-generated_at_commit: 74c42276fe01e9f5a9ce4b981541aca953af7e53
+generated_at: 2026-09-10T22:30:00Z
+staleness_key: git:2a963abbdbf5836ca03a46c7a49d9dafa915c8c4e59edd808696667ea2bfa2ba
+generated_at_commit: dc26003b806cdecbeaa59369e40f7b34189bbe0e
 ---
 
 # Architecture Map
@@ -27,6 +27,7 @@ graph TD
     ORTHANC[(Orthanc\nDICOM hub)]
     PROKNOW[(ProKnow\ncloud RT)]
     PINNACLE[(Pinnacle\nlocal, via PinnacleExport submodule)]
+    CONQUEST[(Conquest\nlocal PACS, external, anonymised-only)]
 
     FASTAPI --> PROXY
     DJANGO --> PROXY
@@ -43,9 +44,10 @@ graph TD
     WORKER --> ORTHANC
     WORKER --> PROKNOW
     WORKER --> PINNACLE
+    FASTAPI -.DICOM, not HTTP -- backend cannot reach Conquest.-> CONQUEST
 ```
 
-`frontend_fastapi/` is the sole caller of `backend/` for real traffic (Phase 5 cutover); `frontend/` (Django) is kept running only for burn-in/rollback. `webui/` talks to `backend/` directly but its import/export routes are broken (ethics-gate 422s). `proxy/` is an optional pass-through, used only when a frontend is DMZ-facing.
+`frontend_fastapi/` is the sole caller of `backend/` for real traffic (Phase 5 cutover); `frontend/` (Django) is kept running only for burn-in/rollback. `webui/` talks to `backend/` directly but its import/export routes are broken (ethics-gate 422s). `proxy/` is an optional pass-through, used only when a frontend is DMZ-facing. `frontend_fastapi/` also speaks DICOM directly to Conquest (the trust's local PACS, separate from Orthanc) via `pynetdicom` — the one DICOM integration in this repo that bypasses `backend`/Orthanc entirely, since `backend` is firewalled off from Conquest; see the `frontend_fastapi` domain sub-map's "Local PACS (Conquest)" row.
 
 ## Domains
 
@@ -64,9 +66,10 @@ Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
 | `notifications` | `backend/src/notifications/` | Persisted job-done/approval-decision notifications | — |
 | `error_reports` | `backend/src/error_reports/` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log with a persisted addressed/resolved state | — |
 | `admin` | `backend/src/admin/` | Compliance dashboard aggregate queries (project-status counts, expiring-soon, recent jobs, audit-chain status) | — |
+| `local_pacs` | `backend/src/local_pacs/` | `verify_internal_key`-only endpoint auditing a Conquest move (performed in `frontend_fastapi`, never here) into `jobs`/`patients`/`events`, under a sentinel `research_projects` row | — |
 | `common` | `backend/src/common/` | Shared SSE batch runner, PII redaction (`pii_patterns.py`), global exception handling | — |
 
-`frontend_fastapi/` mirrors most of the same domain names as its own routers/forms (`accounts`, `research_projects`, `jobs`, `admin`, `notifications`, `error_reports`) — it is a thin UI layer over the backend API, holding no job/event/project data itself (see Frontend/backend boundaries below).
+`frontend_fastapi/` mirrors most of the same domain names as its own routers/forms (`accounts`, `research_projects`, `jobs`, `admin`, `notifications`, `error_reports`) — it is a thin UI layer over the backend API, holding no job/event/project data itself (see Frontend/backend boundaries below). Its `local_pacs` (Conquest DICOM browse/move) is the one exception: it's a UI layer over an external DICOM peer, not over `backend` — see the `frontend_fastapi` domain sub-map.
 
 ## Apps / packages
 
@@ -99,7 +102,7 @@ Backend domains (`backend/src/`) — one FastAPI app, organised by subpackage:
 - `requirements.txt` / `requirements-dev.txt` (repo root) — cover `backend` + `frontend_fastapi` + Streamlit remnants; single shared dependency set.
 - `Dockerfile`, `Dockerfile.dev`, `docker-compose.yml`, `docker-compose.dev.yml` — dev compose brings up both Postgres DBs, `backend`, `worker`, `frontend_fastapi`, and `frontend` together; root compose has no frontend service of its own (production routing handled outside this repo).
 - `scripts/dev-up.sh` — starts backend + worker(s) + `frontend_fastapi` together for local dev (`HERMES_DEV_USE_DJANGO_FRONTEND=1` switches to legacy `frontend/`).
-- Alembic migrations: `backend/alembic/versions/` (HermesDB, 11 revisions) and `frontend_fastapi/alembic/versions/` (frontend's own local DB, 2 revisions) — two independently-migrated databases, never share a migration chain.
+- Alembic migrations: `backend/alembic/versions/` (HermesDB, 11 revisions) and `frontend_fastapi/alembic/versions/` (frontend's own local DB, 3 revisions) — two independently-migrated databases, never share a migration chain.
 
 ## Developer & architecture docs
 

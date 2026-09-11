@@ -73,6 +73,22 @@ HERMES_INTERNAL_KEY = os.getenv("HERMES_INTERNAL_KEY")
 LOGIN_URL = "/accounts/login"
 LOGIN_REDIRECT_URL = "/"
 
+# --- Local PACS (Conquest) connection ----------------------------------------
+# Reachable only from this process, not backend/Orthanc (firewalled) -- see
+# frontend_fastapi/local_pacs/conquest_client.py's module docstring. Follows
+# the same env-var-per-connection-detail convention as PINNACLE_PUSH_*/
+# PULL_MODALITY_AET_* (backend/src/retrieve/logic.py). All four must be set
+# for local-PACS features to work at all -- unlike anonymisation's
+# unset -> passthrough convention, there is no safe no-op here.
+LOCAL_PACS_HOST = os.getenv("LOCAL_PACS_HOST", "")
+LOCAL_PACS_PORT = os.getenv("LOCAL_PACS_PORT", "")
+LOCAL_PACS_AE_TITLE = os.getenv("LOCAL_PACS_AE_TITLE", "")
+# The AE title this app presents as the calling application when
+# associating with Conquest -- distinct from LOCAL_PACS_AE_TITLE, which is
+# Conquest's own AE title.
+HERMES_FRONTEND_AE_TITLE = os.getenv("HERMES_FRONTEND_AE_TITLE", "")
+LOCAL_PACS_TIMEOUT_SECONDS = int(os.getenv("LOCAL_PACS_TIMEOUT_SECONDS", "30"))
+
 # --- Email --------------------------------------------------------------------
 # No SMTP server exists for most deployments -- unset HERMES_FRONTEND_SMTP_HOST
 # (the default) means email_backend.send_mail logs the message instead of

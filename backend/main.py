@@ -14,6 +14,7 @@ from backend.src.projects.endpoints import router as projects_router
 from backend.src.admin.endpoints import router as admin_router
 from backend.src.notifications.endpoints import router as notifications_router
 from backend.src.error_reports.endpoints import router as error_reports_router
+from backend.src.local_pacs.endpoints import router as local_pacs_router
 from backend.src.common.errors import register_pii_safe_exception_handlers
 from backend.src.identity import anon
 
@@ -50,6 +51,7 @@ app.include_router(projects_router)
 app.include_router(admin_router)
 app.include_router(notifications_router)
 app.include_router(error_reports_router)
+app.include_router(local_pacs_router)
 
 
 @app.get("/health")

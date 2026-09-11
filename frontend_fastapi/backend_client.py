@@ -445,3 +445,23 @@ async def list_error_reports(limit: int = 100, unaddressed_only: bool = False) -
 
 async def mark_error_report_addressed(report_id: int, username: str) -> dict:
     return await _post(f"/error_reports/{report_id}/resolve", params={"username": username})
+
+
+# ---- Local PACS move audit (F005) ----
+
+async def audit_local_pacs_move(
+    anon_patient_id: str, study_instance_uid: str, destination_ae_title: str, destination_display_name: str,
+    performed_by: str, outcome: str, detail: Optional[str] = None,
+) -> dict:
+    """Records one local-PACS (Conquest) move attempt in HermesDB's audit
+    trail (F005) -- called by routers/local_pacs.py's move handler (F004)
+    AFTER the C-MOVE has already been attempted, whether it succeeded or
+    failed. Raising BackendError here must never be read as "the move
+    failed" by the caller -- see that router for how a raised BackendError
+    is turned into a "move succeeded, but the audit record could not be
+    saved" warning instead."""
+    return await _post("/local_pacs/audit_move", json={
+        "anon_patient_id": anon_patient_id, "study_instance_uid": study_instance_uid,
+        "destination_ae_title": destination_ae_title, "destination_display_name": destination_display_name,
+        "performed_by": performed_by, "outcome": outcome, "detail": detail,
+    })

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Local PACS move destinations — HERMES{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-xl font-semibold text-gray-900">Local PACS move destinations</h1>
+  <a href="/local_pacs/destinations/add" class="rounded-md bg-hermes-700 text-white px-4 py-2 text-sm font-medium hover:bg-hermes-800">
+    Add destination
+  </a>
+</div>
+<p class="text-sm text-gray-500 mb-6">
+  Destinations a custodian can relay a local-PACS study to (F004's "Move" action). Conquest must already be
+  configured, ops-side, to reach the AE title -- adding one here only adds it to this curated list.
+</p>
+
+<div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+  <table class="min-w-full divide-y divide-gray-200 text-sm">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-4 py-2 text-left font-medium text-gray-500">AE title</th>
+        <th class="px-4 py-2 text-left font-medium text-gray-500">Display name</th>
+        <th class="px-4 py-2 text-left font-medium text-gray-500">Description</th>
+        <th class="px-4 py-2 text-left font-medium text-gray-500"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for d in destinations %}
+      <tr>
+        <td class="px-4 py-2 font-mono">{{ d.ae_title }}</td>
+        <td class="px-4 py-2">{{ d.display_name }}</td>
+        <td class="px-4 py-2 text-gray-500">{{ d.description }}</td>
+        <td class="px-4 py-2 text-right whitespace-nowrap">
+          <a href="/local_pacs/destinations/{{ d.id }}/edit" class="text-hermes-700 hover:underline mr-3">Edit</a>
+          <form method="post" action="/local_pacs/destinations/{{ d.id }}/delete" class="inline"
+            onsubmit="return confirm('Remove destination {{ d.display_name }}?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="text-red-600 hover:underline">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="px-4 py-4 text-gray-400 text-center">No destinations configured yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

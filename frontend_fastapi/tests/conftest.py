@@ -36,7 +36,7 @@ from frontend_fastapi.flash import flash
 # lifespan, which this fixture never runs; see main.py).
 from frontend_fastapi.main import _forbidden, _not_authenticated
 from frontend_fastapi.models import Base, Session, User
-from frontend_fastapi.routers import accounts, admin, error_reports, jobs, notifications, research_projects
+from frontend_fastapi.routers import accounts, admin, error_reports, jobs, local_pacs, notifications, research_projects
 from frontend_fastapi.session_middleware import SessionMiddleware
 
 
@@ -155,6 +155,7 @@ def app(SessionFactory):
     test_app.include_router(admin.router)
     test_app.include_router(notifications.router)
     test_app.include_router(error_reports.router)
+    test_app.include_router(local_pacs.router)
 
     @test_app.post("/test/login")
     async def _login(
