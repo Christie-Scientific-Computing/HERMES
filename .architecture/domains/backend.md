@@ -1,7 +1,7 @@
 ---
-generated_at: 2026-09-10T18:15:35Z
-staleness_key: git:35cf6a2d0e4d19d6358ff93016638e8e4c132f91315d1cd53a2fc9864d782f92
-generated_at_commit: 74c42276fe01e9f5a9ce4b981541aca953af7e53
+generated_at: 2026-09-18T15:13:36Z
+staleness_key: git:3b3d88b4071ad35937e1ba427995c1ea7179f5880370418bc90efb80812bf929
+generated_at_commit: 98383d87dc904f9cf56df23e52820198da6bc32c
 parent: ../../ARCHITECTURE.md
 ---
 
@@ -62,6 +62,7 @@ graph TD
 | Project/ethics workflow | `backend/src/projects/db_client.py`, `endpoints.py`, `enforcement.py` | `ProjectsDB` (create/submit/review/revoke, membership, audit log); `enforcement.py`'s `require_project_member`/`require_any_active_project`/`verify_internal_key` gate every import/export/project call |
 | Status/audit | `backend/src/status/db_client.py` (`StatusDB`), `tasks_db.py` (`TasksDB`), `hash_chain.py`, `audit_chain_db.py` | Job/patient/event tracking, the `tasks` queue (Postgres `SELECT...FOR UPDATE SKIP LOCKED`), the tamper-evident `events` hash chain |
 | Anonymisation boundary | `backend/src/identity/anon.py` | `resolve_real_id`/`to_display_id`, `shift_date`; passthrough when `ANON_DB_*`/`ANON_CONFIG` unset |
+| Anon CSV translator | `backend/scripts/anon_lookup.py` | Transition-period standalone script (`--to-real`/`--to-anon`): translates a CSV's ID column via `anon.py` directly, bypassing the ethics gate and audit trail by design; delete once HERMES is used full-time |
 | Plans | `backend/src/plans/db_client.py` (`PlansDB`) | Read-only access to PinnacleExport's own `plans` table (same Postgres database, separate schema) |
 | Notifications | `backend/src/notifications/` | Persisted job-done/approval-decision notifications |
 | Error reports | `backend/src/error_reports/db_client.py`, `endpoints.py` | User-submitted feedback/error reports (category, urgent flag, optional job ID); admin-readable log with a persisted `resolved_at`/`resolved_by` addressed state (`mark_addressed`, `POST /error_reports/{id}/resolve`, `unaddressed_only` list filter) |
