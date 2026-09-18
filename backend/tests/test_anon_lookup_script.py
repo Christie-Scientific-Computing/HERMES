@@ -7,6 +7,7 @@ os.environ["ANON_DB_PORT"] = "55433"
 os.environ["ANON_DB_NAME"] = "anon_test"
 os.environ["ANON_DB_USER"] = "postgres"
 os.environ["ANON_DB_PASS"] = "test"
+os.environ["ANON_CONFIG"] = ""  # a dev .env's config file would otherwise override the test DB
 
 from backend.scripts.anon_lookup import main  # noqa: E402
 from backend.src.identity import anon  # noqa: E402
@@ -38,6 +39,12 @@ def test_unmapped_to_real_blank_and_reported(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "1 translated, 4 unmapped" in err and "2, 3, 4, 5" in err
     assert "424242" not in err
+
+
+def test_out_of_range_id_is_unmapped_not_fatal(tmp_path):
+    code, dst = run(tmp_path, "id\n1001\n99999999999999999999\n", "--to-real")
+    assert code == 1
+    assert dst.read_text().splitlines() == ["id,patient_id", "1001,500123", "99999999999999999999,"]
 
 
 def test_unmapped_to_anon_is_blank_not_placeholder(tmp_path):

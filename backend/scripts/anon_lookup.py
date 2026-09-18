@@ -23,6 +23,7 @@ Exit codes: 0 all rows translated; 1 output written but some rows unmapped;
 """
 import argparse
 import csv
+import logging
 import sys
 from pathlib import Path
 
@@ -46,7 +47,8 @@ def _translate(ids: list[str], to_real: bool) -> dict[str, str]:
     if to_real:
         # lookup_real_ids raises on the first unmapped ID with no partial
         # result, so go through its query helper to get per-row answers.
-        as_ints = anon._to_bigints(unique)
+        # _to_bigints keeps out-of-range ints, which would make Postgres reject the whole query.
+        as_ints = {i: n for i, n in anon._to_bigints(unique).items() if abs(n) < 2**63}
         by_int = {int(a): str(r) for a, r in anon._query(anon._SQL_ANON_TO_REAL, list(as_ints.values()))}
         return {i: by_int[n] for i, n in as_ints.items() if n in by_int}
     return {k: v for k, v in anon.lookup_anon_ids(unique).items() if v != "[unknown]"}
@@ -114,4 +116,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    # anon._query logs failures with a traceback whose text may echo bound IDs.
+    logging.disable(logging.ERROR)
     sys.exit(main())
