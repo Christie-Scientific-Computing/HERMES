@@ -11,3 +11,6 @@ credentials.json
 db.sqlite3
 media
 config
+proxy/bundle
+proxy/wheels
+proxy/python*

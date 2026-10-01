@@ -69,6 +69,16 @@ FRONTEND_PORT="${HERMES_DEV_FRONTEND_PORT:-8010}"
 USE_PROXY="${HERMES_DEV_USE_PROXY:-0}"
 PROXY_PORT="${HERMES_DEV_PROXY_PORT:-8001}"
 
+# When set (host/IP of a proxy already running elsewhere, e.g. a DMZ test
+# box -- see ./scripts/dev-up-remote-proxy.sh), route the frontend through
+# THAT proxy instead of starting one locally. Implies USE_PROXY=1's "route
+# through a proxy" behavior but skips the local proxy process and its
+# localhost readiness check entirely.
+PROXY_HOST="${HERMES_DEV_PROXY_HOST:-}"
+if [ -n "$PROXY_HOST" ]; then
+  USE_PROXY=1
+fi
+
 # Default is frontend_fastapi/ (the production frontend post-cutover); set
 # to 1 to run the legacy Django frontend/ instead during the Phase 6
 # burn-in period.
@@ -126,7 +136,12 @@ echo ""
 
 # Each service's output is prefixed and interleaved in this one terminal,
 # rather than needing a separate terminal per process.
-(python -m uvicorn backend.main:app --reload --port "$BACKEND_PORT" 2>&1 | sed -u "s/^/[backend]   /") &
+# Bound to 0.0.0.0 (not the uvicorn default of 127.0.0.1) whenever a remote
+# proxy needs to reach back in over the LAN -- localhost-only otherwise, no
+# behavior change for the common case.
+BACKEND_HOST="127.0.0.1"
+[ -n "$PROXY_HOST" ] && BACKEND_HOST="0.0.0.0"
+(python -m uvicorn backend.main:app --reload --host "$BACKEND_HOST" --port "$BACKEND_PORT" 2>&1 | sed -u "s/^/[backend]   /") &
 
 # backend/main.py runs its Alembic migration at import time, before uvicorn
 # ever starts accepting connections -- so waiting for the port to respond is
@@ -175,7 +190,15 @@ done
 FRONTEND_BACKEND_URI="localhost"
 FRONTEND_BACKEND_PORT="$BACKEND_PORT"
 
-if [ "$USE_PROXY" = "1" ]; then
+if [ -n "$PROXY_HOST" ]; then
+  # Proxy is already running elsewhere (its own machine, its own
+  # HERMES_URL pointed back at this machine's IP -- see
+  # scripts/dev-up-remote-proxy.sh) -- nothing to start or wait on here,
+  # just route the frontend at it.
+  echo "Routing frontend through remote proxy at $PROXY_HOST:$PROXY_PORT (not started by this script -- make sure it's already up and its own HERMES_URL points back at this machine)"
+  FRONTEND_BACKEND_URI="$PROXY_HOST"
+  FRONTEND_BACKEND_PORT="$PROXY_PORT"
+elif [ "$USE_PROXY" = "1" ]; then
   (cd proxy && HERMES_URL="http://localhost:$BACKEND_PORT" python -m uvicorn main:app --reload --port "$PROXY_PORT" 2>&1 | sed -u "s/^/[proxy]     /") &
 
   # Deliberately NOT /docs here: proxy/main.py's own FastAPI() app
@@ -223,7 +246,13 @@ else
     python -m uvicorn frontend_fastapi.main:app --reload --port "$FRONTEND_PORT" 2>&1 | sed -u "s/^/[frontend]  /") &
 fi
 
-echo "All processes started. Frontend: http://localhost:$FRONTEND_PORT/  Backend: http://localhost:$BACKEND_PORT/$( [ "$USE_PROXY" = "1" ] && echo "  Proxy: http://localhost:$PROXY_PORT/ (frontend routed through here)" )  (Ctrl-C to stop everything)"
+PROXY_SUMMARY=""
+if [ -n "$PROXY_HOST" ]; then
+  PROXY_SUMMARY="  Proxy: http://$PROXY_HOST:$PROXY_PORT/ (remote, frontend routed through here)"
+elif [ "$USE_PROXY" = "1" ]; then
+  PROXY_SUMMARY="  Proxy: http://localhost:$PROXY_PORT/ (frontend routed through here)"
+fi
+echo "All processes started. Frontend: http://localhost:$FRONTEND_PORT/  Backend: http://localhost:$BACKEND_PORT/ (bound to $BACKEND_HOST)$PROXY_SUMMARY  (Ctrl-C to stop everything)"
 echo ""
 
 wait
